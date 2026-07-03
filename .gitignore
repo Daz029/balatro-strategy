@@ -210,3 +210,7 @@ balatro_source/
 runs/
 logs/
 checkpoints/
+
+# claude
+.agents/
+.claude/

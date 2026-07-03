@@ -51,8 +51,12 @@ class GameState:
     done: bool
 
 
-def _snapshot(gs: dict[str, Any]) -> GameState:
-    """Build a :class:`GameState` snapshot from an engine game_state dict."""
+def snapshot(gs: dict[str, Any]) -> GameState:
+    """Build a :class:`GameState` snapshot from an engine game_state dict.
+
+    Public so other :class:`GameAdapter` implementations (e.g.
+    ``HandPlayAdapter``) outside this module can reuse it.
+    """
     phase = gs.get("phase", GamePhase.GAME_OVER)
     if isinstance(phase, str):
         phase = GamePhase(phase)
@@ -155,13 +159,13 @@ class DirectAdapter:
         self._gs = initialize_run(back_key, stake, seed, challenge=challenge)
         self._gs["phase"] = GamePhase.BLIND_SELECT
         self._gs["blind_on_deck"] = "Small"
-        return _snapshot(self._gs)
+        return snapshot(self._gs)
 
     def step(self, action: Action) -> GameState:
         from jackdaw.engine.game import step as engine_step
 
         engine_step(self._gs, action)
-        return _snapshot(self._gs)
+        return snapshot(self._gs)
 
     def get_legal_actions(self) -> list[Action]:
         from jackdaw.engine.actions import get_legal_actions as engine_legal
@@ -228,7 +232,7 @@ class BridgeAdapter:
         }
         self._last_response = self._backend.handle("start", params)
         self._last_gs = self._build_gs()
-        return _snapshot(self._last_gs)
+        return snapshot(self._last_gs)
 
     def step(self, action: Action) -> GameState:
         from jackdaw.bridge.balatrobot_adapter import action_to_rpc
@@ -236,7 +240,7 @@ class BridgeAdapter:
         rpc = action_to_rpc(action, self._last_gs)
         self._last_response = self._backend.handle(rpc["method"], rpc["params"])
         self._last_gs = self._build_gs()
-        return _snapshot(self._last_gs)
+        return snapshot(self._last_gs)
 
     def get_legal_actions(self) -> list[Action]:
         from jackdaw.bridge.backend import SimBackend
