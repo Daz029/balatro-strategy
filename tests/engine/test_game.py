@@ -601,8 +601,9 @@ class TestDoubleTag:
     def test_double_tag_duplicates(self):
         """Double Tag duplicates a newly awarded tag."""
         gs = _mech_init("DOUBLE_TAG")
-        # Put a Double Tag in the active tags
-        gs["tags"] = ["tag_double"]
+        # Hold an un-consumed Double Tag (awarded_tags is the real store;
+        # the old gs["tags"] list was never written by the engine)
+        gs["awarded_tags"] = [{"key": "tag_double", "result": None, "blind": "Small"}]
         # Force Small tag to be tag_economy
         gs["round_resets"]["blind_tags"]["Small"] = "tag_economy"
         gs["dollars"] = 10

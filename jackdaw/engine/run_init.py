@@ -401,9 +401,12 @@ def start_round(game_state: dict[str, Any]) -> None:
     rb["next_hands"] = 0
     rb["discards"] = 0
 
-    # Temp hand size (Juggle Tag) — apply then clear
+    # Temp hand size (Juggle Tag) — apply then clear the request flag.
+    # The applied amount is recorded in current_round so the end-of-round
+    # path can revert it (one-round bonus, like The Manacle's restore).
     if rr.get("temp_handsize"):
         game_state["hand_size"] = game_state.get("hand_size", 8) + rr["temp_handsize"]
+        cr["temp_handsize_applied"] = rr["temp_handsize"]
         rr["temp_handsize"] = None
 
     # Temp reroll cost (D6 Tag) — clear after round start

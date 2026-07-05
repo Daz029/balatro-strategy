@@ -325,6 +325,76 @@ def get_pack(
 _SHOP_APPEND = "sho"
 
 
+def create_shop_slot_card(
+    rng: PseudoRandom,
+    ante: int,
+    game_state: dict,
+) -> Card:
+    """Create one shop card-slot item, applying pending shop-joker tags.
+
+    Mirrors ``create_card_for_shop`` (``UI_definitions.lua:742``):
+
+    * ``store_joker_create`` (Rare/Uncommon Tag): an un-consumed tag
+      REPLACES the normal type selection for this slot — the type poll does
+      not happen; a Joker of the forced rarity is created directly.
+      TODO(in-game verify): whether vanilla still burns the type-selection
+      RNG poll for a tag-forced slot, and whether the pool append key
+      differs from ``'sho'`` for tag-created jokers.
+    * ``store_joker_modify`` (Foil/Holo/Polychrome/Negative Tag): applies to
+      the first base-edition Joker created after the tag was acquired —
+      sets the edition AND makes the card free (vanilla wording: "Next base
+      edition shop Joker is free and becomes X").
+
+    One tag per card, FIFO acquisition order, consumed on use.  Used by both
+    :func:`populate_shop` and the reroll path so tag behavior can't diverge.
+    """
+    from jackdaw.engine.card_factory import create_card
+    from jackdaw.engine.tags import fire_tag_context
+
+    gs = game_state
+
+    fired = fire_tag_context(gs, "store_joker_create", first_only=True, rng=rng)
+    if fired:
+        _entry, result = fired[0]
+        card = create_card(
+            "Joker",
+            rng,
+            ante,
+            area="shop",
+            append=_SHOP_APPEND,
+            forced_rarity=result.force_rarity,
+            game_state=gs,
+        )
+    else:
+        card_type = select_shop_card_type(
+            rng,
+            ante,
+            joker_rate=gs.get("joker_rate", 20.0),
+            tarot_rate=gs.get("tarot_rate", 4.0),
+            planet_rate=gs.get("planet_rate", 4.0),
+            spectral_rate=gs.get("spectral_rate", 0.0),
+            playing_card_rate=gs.get("playing_card_rate", 0.0),
+        )
+        card = create_card(
+            card_type,
+            rng,
+            ante,
+            area="shop",
+            append=_SHOP_APPEND,
+            game_state=gs,
+        )
+
+    card_set = card.ability.get("set", "") if isinstance(card.ability, dict) else ""
+    if card_set == "Joker" and not card.edition:
+        fired = fire_tag_context(gs, "store_joker_modify", first_only=True, rng=rng)
+        if fired:
+            _entry, result = fired[0]
+            card.set_edition({result.force_edition: True})
+            card.cost = 0
+
+    return card
+
+
 def populate_shop(
     rng: PseudoRandom,
     ante: int,
@@ -349,9 +419,10 @@ def populate_shop(
        ``'shop_pack'``.
 
     .. note::
-       Tag hooks (``store_joker_create``, ``store_joker_modify``,
-       ``voucher_add``, ``shop_final_pass``) are **not** applied here;
-       they are deferred to the M11 tag system.
+       Tag hooks: ``store_joker_create`` / ``store_joker_modify`` are applied
+       per card slot via :func:`create_shop_slot_card`. ``voucher_add`` and
+       ``shop_final_pass`` (Coupon) fire in ``game._populate_shop`` — they
+       need the assembled shop lists, which this function returns.
 
     Parameters
     ----------
@@ -378,41 +449,18 @@ def populate_shop(
         'boosters': list[Card]}``
     """
     from jackdaw.engine.card import Card as _Card
-    from jackdaw.engine.card_factory import create_card, create_voucher
+    from jackdaw.engine.card_factory import create_voucher
 
     gs = game_state
 
     shop_joker_max: int = gs.get("shop", {}).get("joker_max", 2)
-
-    joker_rate: float = gs.get("joker_rate", 20.0)
-    tarot_rate: float = gs.get("tarot_rate", 4.0)
-    planet_rate: float = gs.get("planet_rate", 4.0)
-    spectral_rate: float = gs.get("spectral_rate", 0.0)
-    playing_card_rate: float = gs.get("playing_card_rate", 0.0)
 
     banned_keys: set[str] = set(gs.get("banned_keys") or {})
 
     # -- 1. Joker slots --
     jokers: list[_Card] = []
     for _ in range(shop_joker_max):
-        card_type = select_shop_card_type(
-            rng,
-            ante,
-            joker_rate=joker_rate,
-            tarot_rate=tarot_rate,
-            planet_rate=planet_rate,
-            spectral_rate=spectral_rate,
-            playing_card_rate=playing_card_rate,
-        )
-        card = create_card(
-            card_type,
-            rng,
-            ante,
-            area="shop",
-            append=_SHOP_APPEND,
-            game_state=gs,
-        )
-        jokers.append(card)
+        jokers.append(create_shop_slot_card(rng, ante, gs))
 
     # -- 2. Voucher --
     voucher: _Card | None = None
@@ -495,7 +543,11 @@ def calculate_reroll_cost(game_state: dict) -> int:
         return 0
 
     increase = cr.get("reroll_cost_increase", 0)
-    base = rr.get("temp_reroll_cost") or rr.get("reroll_cost", _DEFAULT_BASE_REROLL_COST)
+    # NOTE: must be an `is not None` check, not `or` — Lua's `0 or x` returns
+    # 0 (only nil/false are falsy), so temp_reroll_cost=0 (D6 Tag) is a valid
+    # base. Python's `0 or x` would silently fall through to the default.
+    temp = rr.get("temp_reroll_cost")
+    base = temp if temp is not None else rr.get("reroll_cost", _DEFAULT_BASE_REROLL_COST)
     cost = base + increase
     cr["reroll_cost"] = cost
     return cost

@@ -183,6 +183,15 @@ def _handle_select_blind(gs: dict[str, Any]) -> dict[str, Any]:
     #    Must run BEFORE boss effects so that The Water/Needle/etc.
     #    can decrement from the freshly-set values.
     # ------------------------------------------------------------------
+    # Juggle Tag (round_start_bonus): request the one-round hand-size
+    # bonus BEFORE start_round, which applies rr["temp_handsize"] to
+    # hand_size and records the amount for the end-of-round revert.
+    from jackdaw.engine.tags import fire_tag_context
+
+    for _entry, tag_res in fire_tag_context(gs, "round_start_bonus"):
+        if tag_res.hand_size_delta:
+            rr["temp_handsize"] = (rr.get("temp_handsize") or 0) + tag_res.hand_size_delta
+
     start_round(gs)
 
     # ------------------------------------------------------------------
@@ -264,7 +273,7 @@ def _fire_new_blind_choice_tags(gs: dict[str, Any]) -> None:
     for entry in awarded:
         tag_key = entry.get("key", "")
         # Only fire tags that haven't been processed for new_blind_choice yet
-        if entry.get("nbc_fired"):
+        if entry.get("nbc_fired") or entry.get("consumed"):
             continue
 
         tag = Tag(tag_key)
@@ -273,6 +282,10 @@ def _fire_new_blind_choice_tags(gs: dict[str, Any]) -> None:
 
         if result is None:
             continue
+
+        # Pack/boss tags are single-use: delivered here, consumed here.
+        entry["consumed"] = True
+        entry["consumed_context"] = "new_blind_choice"
 
         if result.reroll_boss:
             from jackdaw.engine.blind import get_new_boss
@@ -402,23 +415,27 @@ def _handle_skip_blind(gs: dict[str, Any]) -> dict[str, Any]:
     tag_key = blind_tags.get(blind_on_deck)
     awarded_tags: list[dict[str, Any]] = gs.setdefault("awarded_tags", [])
 
+    awarded_entry: dict[str, Any] | None = None
     if tag_key:
         from jackdaw.engine.tags import Tag
 
         tag = Tag(tag_key)
         tag_result = tag.apply("immediate", gs, rng=gs.get("rng"))
 
-        awarded_tags.append(
-            {
-                "key": tag_key,
-                "result": tag_result,
-                "blind": blind_on_deck,
-            }
-        )
+        awarded_entry = {
+            "key": tag_key,
+            "result": tag_result,
+            "blind": blind_on_deck,
+        }
+        awarded_tags.append(awarded_entry)
 
-        # Apply immediate tag effects
+        # Apply immediate tag effects; immediate tags are single-use and
+        # deliver right here, so mark them consumed. Deferred tags (shop,
+        # eval, round-start contexts) stay un-consumed for later polls.
         if tag_result is not None:
             _apply_tag_result(gs, tag_result)
+            awarded_entry["consumed"] = True
+            awarded_entry["consumed_context"] = "immediate"
 
     # ------------------------------------------------------------------
     # 4. Fire joker skip_blind context
@@ -453,8 +470,8 @@ def _handle_skip_blind(gs: dict[str, Any]) -> dict[str, Any]:
     # ------------------------------------------------------------------
     # 6. Double Tag check
     # ------------------------------------------------------------------
-    if tag_key:
-        _check_double_tag(gs, tag_key)
+    if awarded_entry is not None:
+        _check_double_tag(gs, awarded_entry)
 
     # ------------------------------------------------------------------
     # 7. Fire new_blind_choice tags from awarded (deferred) tags
@@ -962,7 +979,28 @@ def _handle_cash_out(gs: dict[str, Any]) -> dict[str, Any]:
     if earnings:
         gs["dollars"] = gs.get("dollars", 0) + earnings.total
 
+    from jackdaw.engine.tags import fire_tag_context
+
+    # Investment Tag (eval context): pays out at cash-out, but ONLY after a
+    # Boss blind — the handler returns None otherwise, leaving the tag
+    # un-consumed for the next boss.
+    last_blind_is_boss = bool(getattr(gs.get("blind"), "boss", False))
+    for _entry, tag_res in fire_tag_context(gs, "eval", last_blind_is_boss=last_blind_is_boss):
+        _apply_tag_result(gs, tag_res)
+
     gs["previous_round"] = {"dollars": gs.get("dollars", 0)}
+
+    # D6 Tag (shop_start context): rerolls start at $0 this shop. The temp
+    # base is cleared by the NEXT round's start_round, so it covers exactly
+    # this shop session.
+    d6_fired = fire_tag_context(gs, "shop_start")
+    for _entry, tag_res in d6_fired:
+        if tag_res.temp_reroll_cost is not None:
+            gs["round_resets"]["temp_reroll_cost"] = tag_res.temp_reroll_cost
+    if d6_fired:
+        from jackdaw.engine.run_init import _calculate_reroll_cost
+
+        _calculate_reroll_cost(gs, skip_increment=True)
 
     # Populate shop
     _populate_shop(gs)
@@ -1292,9 +1330,16 @@ def _handle_reroll(gs: dict[str, Any]) -> dict[str, Any]:
     else:
         raise IllegalActionError("Cannot afford reroll")
 
-    # Increment reroll cost for next reroll
-    cr["reroll_cost_increase"] = cr.get("reroll_cost_increase", 0) + 1
-    cr["reroll_cost"] = gs.get("base_reroll_cost", 5) + cr["reroll_cost_increase"]
+    # Increment reroll cost for the next reroll. Uses the canonical
+    # calculator (mirrors common_events.lua:2263) instead of the old inline
+    # `base_reroll_cost + increase`, which silently ignored BOTH the
+    # Reroll Surplus/Glut voucher discount (they mutate
+    # round_resets.reroll_cost, not base_reroll_cost) AND the D6 Tag's
+    # temp_reroll_cost. Also matches vanilla in not escalating the price
+    # while free rerolls (Chaos the Clown) remain.
+    from jackdaw.engine.run_init import _calculate_reroll_cost
+
+    _calculate_reroll_cost(gs)
 
     # Track stat
     gs.setdefault("round_scores", {})
@@ -1593,6 +1638,12 @@ def _round_won(gs: dict[str, Any]) -> None:
     if blind_on_deck == "Boss" and getattr(blind, "name", "") == "The Manacle":
         if not getattr(blind, "disabled", False):
             gs["hand_size"] = gs.get("hand_size", 7) + 1
+
+    # Juggle Tag: revert the one-round hand-size bonus applied by start_round
+    temp_hs = cr.get("temp_handsize_applied", 0)
+    if temp_hs:
+        gs["hand_size"] = gs.get("hand_size", 8) - temp_hs
+        cr["temp_handsize_applied"] = 0
 
     # ------------------------------------------------------------------
     # 10. Calculate round earnings (for cash-out screen)
@@ -2122,6 +2173,46 @@ def _populate_shop(gs: dict[str, Any]) -> None:
     gs["shop_vouchers"] = [voucher] if voucher else []
     gs["shop_boosters"] = result.get("boosters", [])
 
+    from jackdaw.engine.tags import fire_tag_context
+
+    # Voucher Tag (voucher_add context): each adds one extra voucher,
+    # polled from the tag pool key ('Voucher_fromtag' — vouchers.py).
+    voucher_fired = fire_tag_context(gs, "voucher_add")
+    if voucher_fired:
+        from jackdaw.engine.card_factory import create_voucher
+        from jackdaw.engine.vouchers import get_next_voucher_key
+
+        for _entry, tag_res in voucher_fired:
+            if not tag_res.create_voucher:
+                continue
+            in_shop = [getattr(v, "center_key", "") for v in gs["shop_vouchers"]]
+            v_key = get_next_voucher_key(
+                rng,
+                gs.get("used_vouchers", {}),
+                in_shop=in_shop,
+                from_tag=True,
+                ante=ante,
+            )
+            if v_key is None:
+                continue
+            extra = create_voucher(v_key)
+            extra.set_cost(
+                inflation=gs.get("inflation", 0),
+                discount_percent=gs.get("discount_percent", 0),
+                ante=ante,
+            )
+            gs["shop_vouchers"].append(extra)
+
+    # Coupon Tag (shop_final_pass context): initial shop cards and booster
+    # packs become free. Vouchers stay full price, and rerolled cards are
+    # NOT free (this fires only on the populate pass, never on rerolls).
+    for _entry, tag_res in fire_tag_context(gs, "shop_final_pass"):
+        if tag_res.coupon:
+            for card in gs["shop_cards"]:
+                card.cost = 0
+            for booster in gs["shop_boosters"]:
+                booster.cost = 0
+
 
 def _reroll_shop_cards(gs: dict[str, Any]) -> None:
     """Regenerate the shop joker/consumable cards (not voucher or boosters).
@@ -2129,8 +2220,7 @@ def _reroll_shop_cards(gs: dict[str, Any]) -> None:
     Matches the repopulate step of ``reroll_shop``
     (``button_callbacks.lua:2855``).
     """
-    from jackdaw.engine.card_factory import create_card
-    from jackdaw.engine.shop import select_shop_card_type
+    from jackdaw.engine.shop import create_shop_slot_card
 
     rng = gs.get("rng")
     if rng is None:
@@ -2141,28 +2231,10 @@ def _reroll_shop_cards(gs: dict[str, Any]) -> None:
     ante = gs.get("round_resets", {}).get("ante", 1)
     shop_joker_max: int = gs.get("shop", {}).get("joker_max", 2)
 
-    new_cards = []
-    for _ in range(shop_joker_max):
-        card_type = select_shop_card_type(
-            rng,
-            ante,
-            joker_rate=gs.get("joker_rate", 20.0),
-            tarot_rate=gs.get("tarot_rate", 4.0),
-            planet_rate=gs.get("planet_rate", 4.0),
-            spectral_rate=gs.get("spectral_rate", 0.0),
-            playing_card_rate=gs.get("playing_card_rate", 0.0),
-        )
-        card = create_card(
-            card_type,
-            rng,
-            ante,
-            area="shop",
-            append="sho",
-            game_state=gs,
-        )
-        new_cards.append(card)
-
-    gs["shop_cards"] = new_cards
+    # Shared slot-creation path applies pending Rare/Uncommon/edition tags
+    # to rerolled cards too (vanilla: an unspent tag catches the next shop
+    # Joker created, whether from populate or reroll).
+    gs["shop_cards"] = [create_shop_slot_card(rng, ante, gs) for _ in range(shop_joker_max)]
 
 
 def _get_card_set(card: Any) -> str:
@@ -2334,34 +2406,44 @@ def _press_play(
 # ---------------------------------------------------------------------------
 
 
-def _check_double_tag(gs: dict[str, Any], awarded_tag_key: str) -> None:
-    """If player has a Double Tag active, duplicate the just-awarded tag."""
-    tags: list = gs.get("tags", [])
-    if not tags:
+def _check_double_tag(gs: dict[str, Any], awarded_entry: dict[str, Any]) -> None:
+    """If a Double Tag is held, duplicate the just-awarded tag.
+
+    Scans ``awarded_tags`` (the only tag store — the old ``gs["tags"]`` list
+    was never populated, so Double Tag could never fire) for an un-consumed
+    ``tag_double`` acquired BEFORE the current award. Consumes one Double
+    Tag per award; the duplicate entry behaves exactly like a fresh award:
+    immediate effects apply in full (dollars, top-up jokers, orbital
+    level-ups — the old code applied only dollars), deferred tags stay
+    un-consumed for their later context polls.
+    """
+    awarded_tag_key = awarded_entry.get("key", "")
+    if awarded_tag_key == "tag_double":
         return
 
-    # Check if any active tag is tag_double
     from jackdaw.engine.tags import Tag
 
-    for i, tag_entry in enumerate(tags):
-        tag_key = tag_entry if isinstance(tag_entry, str) else getattr(tag_entry, "key", "")
-        if tag_key == "tag_double" and awarded_tag_key != "tag_double":
-            # Fire the duplicate
-            dup_tag = Tag(awarded_tag_key)
-            dup_result = dup_tag.apply("immediate", gs, rng=gs.get("rng"))
+    awarded_tags: list = gs.setdefault("awarded_tags", [])
+    for entry in awarded_tags:
+        if entry is awarded_entry:
+            continue
+        if entry.get("key") != "tag_double" or entry.get("consumed"):
+            continue
 
-            awarded_tags: list = gs.setdefault("awarded_tags", [])
-            awarded_tags.append(
-                {
-                    "key": awarded_tag_key,
-                    "result": dup_result,
-                    "blind": "double",
-                }
-            )
+        # Consume the Double Tag and fire the duplicate award
+        entry["consumed"] = True
+        entry["consumed_context"] = "tag_add"
 
-            if dup_result and dup_result.dollars:
-                gs["dollars"] = gs.get("dollars", 0) + dup_result.dollars
+        dup_result = Tag(awarded_tag_key).apply("immediate", gs, rng=gs.get("rng"))
+        dup_entry: dict[str, Any] = {
+            "key": awarded_tag_key,
+            "result": dup_result,
+            "blind": "double",
+        }
+        awarded_tags.append(dup_entry)
 
-            # Remove the Double Tag (consumed)
-            tags.pop(i)
-            break
+        if dup_result is not None:
+            _apply_tag_result(gs, dup_result)
+            dup_entry["consumed"] = True
+            dup_entry["consumed_context"] = "immediate"
+        break

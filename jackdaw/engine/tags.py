@@ -27,7 +27,7 @@ Context types
 +------------------------+-------------------------------------------------------+
 | ``store_joker_create`` | rare (force rarity 3), uncommon (force rarity 2)      |
 +------------------------+-------------------------------------------------------+
-| ``shop_start``         | d_six (free rerolls this shop)                        |
+| ``shop_start``         | d_six (rerolls start at $0 this shop)                 |
 +------------------------+-------------------------------------------------------+
 | ``store_joker_modify`` | foil, holo, polychrome, negative                      |
 +------------------------+-------------------------------------------------------+
@@ -99,8 +99,10 @@ class TagResult:
     force_edition: str | None = None
     """Apply this edition to the shop joker (foil/holo/polychrome/negative)."""
 
-    free_rerolls: int = 0
-    """Number of free rerolls this shop session (d_six)."""
+    temp_reroll_cost: int | None = None
+    """Override for ``round_resets.temp_reroll_cost`` (d_six: rerolls start
+    at $0 this shop, climbing $1 per reroll; cleared at next round start by
+    ``start_round``)."""
 
     double: bool = False
     """Double Tag: duplicate the tag that was just added."""
@@ -330,7 +332,11 @@ class Tag:
                 return None
 
             if self.key == "tag_d_six":
-                return TagResult(free_rerolls=1)
+                # Vanilla: "Rerolls start at $0" — sets the temp base cost,
+                # which then climbs $1 per reroll (NOT one free reroll).
+                # The receiving end already exists: round_resets.temp_reroll_cost
+                # is read by _calculate_reroll_cost and cleared by start_round.
+                return TagResult(temp_reroll_cost=0)
 
             return None  # pragma: no cover
 
@@ -376,6 +382,53 @@ class Tag:
 
     def __repr__(self) -> str:
         return f"Tag({self.key!r}, id={self.id})"
+
+
+# ---------------------------------------------------------------------------
+# Context polling over awarded tags
+# ---------------------------------------------------------------------------
+
+
+def fire_tag_context(
+    game_state: dict[str, Any],
+    context: str,
+    *,
+    first_only: bool = False,
+    rng: PseudoRandom | None = None,
+    **kwargs: Any,
+) -> list[tuple[dict[str, Any], TagResult]]:
+    """Poll un-consumed awarded tags for *context*, consuming those that fire.
+
+    Tags live in ``game_state["awarded_tags"]`` as dict entries (see
+    ``_handle_skip_blind``).  They are polled in acquisition (FIFO) order —
+    matching the vanilla tag-area order — and an entry whose ``Tag.apply``
+    returns a result is marked ``consumed`` (single-use, like every vanilla
+    tag).  Entries whose handler returns ``None`` (context mismatch, or a
+    conditional tag like Investment outside its trigger) are left untouched
+    for later polls.
+
+    Parameters
+    ----------
+    first_only:
+        Stop after the first tag that fires.  Used for per-item contexts
+        (``store_joker_create`` / ``store_joker_modify``) where vanilla
+        applies exactly one tag per shop card.
+    """
+    fired: list[tuple[dict[str, Any], TagResult]] = []
+    for entry in game_state.get("awarded_tags", []):
+        if entry.get("consumed"):
+            continue
+        result = Tag(entry["key"]).apply(
+            context, game_state, rng=rng or game_state.get("rng"), **kwargs
+        )
+        if result is None:
+            continue
+        entry["consumed"] = True
+        entry["consumed_context"] = context
+        fired.append((entry, result))
+        if first_only:
+            break
+    return fired
 
 
 # ---------------------------------------------------------------------------

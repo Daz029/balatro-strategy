@@ -84,7 +84,9 @@ the two tracks ended up with different training strategies.
      of rounds since this is cooperative iterated best-response, not adversarial self-play.
 
 - **Exploration mitigations for the shop agent (150 jokers, combinatorial synergy space),
-  none requiring external data:**
+  none requiring external data** (original list — PARTLY SUPERSEDED by the grilled design
+  below: pool curriculum replaced by horizon curriculum, synergy-heuristic shaping demoted
+  to evidence-gated; count-based bonus survives as-is):
   - Curriculum on the joker pool itself: small curated synergistic subset first, widen to
     all 150 once the agent reliably finds value in the small pool.
   - Cheap synergy heuristic as potential-based reward shaping, computed directly from
@@ -99,6 +101,102 @@ the two tracks ended up with different training strategies.
   Russell 1999, "Policy Invariance Under Reward Transformations." Only speeds up/slows down
   convergence, provably cannot change which policy is optimal. Decay the shaping coefficient
   to zero over training regardless of source.
+
+### Shop-agent design — GRILLED AND LOCKED (2026-07-05); build not started
+
+- **Decision surface (s0)**: SHOP + PACK_OPENING + UseConsumable-in-shop. Blind select is
+  auto-resolved to SelectBlind — SkipBlind deferred to s1: with tag call-sites unwired (see
+  open item) skipping has cost but no benefit, so exposing it now teaches a false
+  "never skip" prior; even wired, skip's value is drowned in h0's hand-play noise at s0.
+  CashOut auto-resolved (only legal action, not a decision). Joker reordering excluded
+  (same argument as the hand agent's rejected reorder actions: multi-step chains under
+  sparse reward are an exploration trap); appendable later if eval shows order matters.
+- **Episodes: full runs, pluggable start-state sampler.** Shop-visit-scoped episodes
+  REJECTED: a shop visit has no honest local reward, and scoring it with h0's
+  P(clear next blind) is systematically myopic (zeroes economy, scaling jokers, consumable
+  banking — the point of shop play). Sampler mixture {fresh_run, reservoir_shop,
+  reservoir_pack_pending} with an always-nonzero fresh-run anchor (~50%). Reservoir =
+  engine-state snapshots harvested at decision points from rollouts of current AND past
+  checkpoints (snapshot diversity vs distribution collapse), stratified by ante + coarse
+  build features. Restart-distribution changes can't corrupt the objective (reward stays
+  honest run outcome) — the only risk is coverage bias, handled by the anchor fraction.
+  Cold start self-anneals (early reservoir has garbage builds exactly when policy can't
+  exploit realism anyway). Hard requirement: snapshot serialize/restore with exact
+  RNG-state round-trip (verify identical continuations).
+- **Reward**: `r = 1{run won} + beta(progress) * c_ante * 1{blind cleared}`, gamma=1.0.
+  c linear-increasing in ante (normalized so a full clear sums ~1) — a crude sketch of
+  true-V increments, so less objective distortion per unit of density than a uniform
+  per-blind bonus (which overpays early survival -> "grind safely" bias). beta decays to
+  zero (project-standard), so the final optimized objective is exactly P(win) regardless of
+  how wrong c is. Raw per-blind reward is NOT potential-based shaping under gamma=1
+  (doesn't telescope; it's a real objective change — hence the decay). Env emits components
+  in `info`; blending is a training-loop hyperparameter. s1 upgrade: replace c with
+  Phi = s0-critic values (true potential-based shaping from a learned V).
+- **Action space** (`jackdaw/agents/shop_action_space.py`, canonical append at 436):
+  BuyCard x4 (Overstock Plus), RedeemVoucher x4 (tag-stacking headroom), OpenBooster x2
+  (engine-fixed), SellJoker x8 (negative-edition headroom; shop obs joker rows widen to 8
+  to match — hand demo schema stays 5, pooled encoders are row-count-agnostic in
+  parameters so widening at merge is a schema bump not a retrain), SellConsumable x3 +
+  UseConsumable x3 (Crystal Ball), Reroll, NextRound, PickPackCard x5, SkipPack = 32
+  actions, plus SelectTarget x218 (reuses the hand block's COMBOS enumeration verbatim —
+  only sizes 1-3 are ever legal in vanilla, but one combo table everywhere + 4-5-target
+  future-proofing is worth 126 permanently-masked rows) = 250 appended; canonical space
+  is now Discrete(686). s0's policy head is FULL canonical width with the hand block
+  permanently masked: dead params, but merge becomes "canonical index == head row".
+- **Targeting is LEARNED via a two-step pending state** (env-side auto-target heuristics
+  REJECTED — like tarot usage, targeting has to be learned): carrier action
+  (PickPackCard k / UseConsumable j) resolves immediately if no targets needed (planets,
+  jokers, Standard-pack playing cards — covered for free); else env enters a
+  pending-target state where ONLY legal SelectTarget combos are unmasked; the combo
+  completes the engine action. The dealt `pack_hand` occupies the hand-card obs rows —
+  invariant: "targetable cards live in the hand rows", making in-blind consumable
+  targeting at merge pure reuse of the same family. Pending state must be OBSERVABLE
+  (flag in shop_context + "selected" bit on the carrier row), not mask-only — identical
+  obs with different legal sets confuses the critic. No cancel action (exploration trap).
+  Targeting-event sparsity (few per run, conditioned on dealt layout) is attacked by
+  reservoir_pack_pending oversampling — importance-shifting where experience is collected,
+  not what's optimal. Evidence-gated fallback if targeting stays noise: potential-based
+  shaping from a cheap target prior (policy-invariant, decays) — never action override.
+- **Obs**: reuse `encode_global_context` FROZEN as-is + a new small `shop_context` vector
+  (reroll cost, free rerolls, pending-target flag, pack_choices_remaining, blinds
+  cleared). Entity blocks: hand/pack_hand 8x15 (reused), owned jokers 8xD, owned
+  consumables 3xD, shop slots 4xD, pack contents 5xD, vouchers 4xD, boosters 2xD. Shop
+  slots / pack contents are mixed-type -> union encoding (type one-hot + cost + the
+  type's feature layout, absent features zeroed).
+  **Identity = learned embeddings + effect descriptors, concatenated**:
+  nn.Embedding(150,16) jokers, (~60,8) consumables, (~32,8) vouchers — shared across
+  owned/shop/pack rows (same item = same vector everywhere; that sharing is what lets
+  "own Lusty Joker" resonate with "shop offers heart synergy"). Rationale: a scalar
+  ordinal ID has false geometry (numeric neighbors are unrelated jokers; every gradient
+  corrupts neighbors) and makes synergy a 150x150 pointwise lookup; embeddings give
+  learnable geometry, descriptors (trigger type / effect family / scaling rate, from the
+  engine's own joker config data) give day-one generalization and pool-transfer; each
+  covers the other's failure mode. Embedding table is inspectable mid-training (t-SNE =
+  is synergy learning happening at all).
+- **Hand phases resolved by a `hand_policy` callable** on the env (game_state -> engine
+  action; same pattern as `adapter_factory`): `GreedyHandPolicy`
+  (rank_templates_cheaply-based, ms-fast, deterministic — the test fixture, since tests
+  can't depend on a checkpoint that changes every retrain; kept forever as the ablation
+  baseline isolating shop-value-vs-hand-skill) now; h0/h1 checkpoint wrapper when
+  trained. Partner swaps every bootstrap iteration by design.
+- **Curriculum: horizon, not pool** (supersedes the pool curriculum): full 150-joker pool
+  from step one, run horizon capped — win = clear ante 2, then 4, then full 8. Pool
+  restriction fights the embedding design (129 embeddings cold while trunk geometry
+  crystallizes on 21, then distribution shock — self-inflicting the CLAUDE.md
+  distributional-shift failure); horizon stages are prefixes of the true objective (no
+  unlearning at transitions), early episodes are short (short credit chains when the
+  critic is coldest, and cheap). Pool restriction is emergency-fallback only. Count-based
+  bonus stays: beta/sqrt(N) on (sorted owned-joker key-set) and (pending-effect,
+  target-pattern) pairs, decayed to zero.
+- **File layout / build order** (dependency-driven):
+  1. engine tag-context wiring (standalone; see open item),
+  2. `jackdaw/agents/shop_action_space.py`,
+  3. `jackdaw/agents/greedy_hand_policy.py`,
+  4. `jackdaw/env/shop_run_adapter.py` (+ snapshot RNG round-trip tests),
+  5. `jackdaw/agents/joker_descriptors.py` + `jackdaw/agents/shop_policy.py`,
+  6. `jackdaw/env/shop_gym.py` (pending-target state machine lives here),
+  7. `scripts/train_shop_ppo.py` + `scripts/eval_shop_policy.py` (smoke on ante-2 horizon
+     with greedy partner while h0 finishes).
 
 ### Data sourcing investigation — CONCLUDED, don't re-pursue without new data
 
@@ -170,6 +268,22 @@ the two tracks ended up with different training strategies.
       `held` when only one was actually selected, undercounting held-card-count-based joker
       scoring — fixed to filter by `id()`, tested in
       `tests/scripts/test_hand_solver_duplicate_cards.py`.
+      Later hardening (post-discard-cap): the future-hand MC estimator is seeded
+      per-example (`mc_seed` threads into `estimate_future_hand_distribution`, and the
+      `prob_clear_given_future` LCG is reset per solve — labels are now byte-reproducible
+      across machines, verified against a cross-machine overlap), uses 16 samples (was 40)
+      with `search_orderings=False` on hypothetical future hands (measured 1.8-11x
+      speedup; the exact current-hand path keeps the full ordering search — prescreen
+      lever "C" explicitly rejected). Known documented label bias: future hands are
+      valued play-only, so banked discards are credited at zero -> labels tilt toward
+      spending discards early; PPO-against-the-real-game is the intended corrector, and
+      eval bucketing by (hands_left, discards_left) is the diagnostic fingerprint.
+      OPERATIONAL LESSON (2026-07-05 incident): resume partitioning is fixed by
+      (total_examples, num_workers) — ALWAYS pass `--num-workers` explicitly. Copying a
+      partial run to a machine with a different CPU count silently re-partitions on
+      resume (the default is cpu_count-1): produced 925 duplicated + 321 never-generated
+      seeds in stage 2. Dedup/verify with a unique-seed count before consuming any
+      transferred dataset.
 - [x] Curriculum stage presets + realistic state injection (grilled and decided; supersedes
       "pool sizes/counts not yet decided"):
       - Named presets in `generate_hand_demos.py` (`--stage stage1_no_jokers|stage2_curated|
@@ -252,8 +366,52 @@ the two tracks ended up with different training strategies.
       against the canonical Discrete(436) mask, tier 2 executes it through the real engine
       (destructive, runs after obs encoding on the throwaway state; ~0.5ms vs 2-12s/solve).
       Failures land in `worker_N_failures.jsonl` per the existing skip-not-fatal design.
-- [ ] Shop-agent environment/action-space design (not yet started — buy/sell/reroll/skip,
-      combinatorial per-shop-slot choices).
+- [ ] Shop-agent BUILD (design grilled and locked — full decision record in "Shop-agent
+      design" section above; follow its build order 1-7). Nothing implemented yet.
+- [x] Engine tag-context wiring (all 7 previously-unwired contexts now fire; tested in
+      `tests/engine/test_tag_wiring.py`, 19 tests):
+      - `fire_tag_context(gs, context, first_only=..., **kwargs)` in `tags.py` is the
+        single poll: FIFO over `awarded_tags`, consumes entries whose handler fires
+        (`consumed`/`consumed_context` flags), leaves conditional non-fires (Investment
+        off-boss) un-consumed. Immediate tags now also marked consumed at skip-award.
+      - D6: handler CHANGED from `free_rerolls=1` (wrong) to vanilla "rerolls start at
+        $0": sets `round_resets.temp_reroll_cost=0` at `shop_start` (cash-out), cost
+        climbs $1/reroll, cleared by next `start_round` (receiving end already existed).
+      - Rare/Uncommon + editions: `shop.create_shop_slot_card` (new, used by BOTH
+        populate and reroll paths) — `store_joker_create` REPLACES the slot's type poll
+        with a forced-rarity Joker; `store_joker_modify` then makes the first
+        base-edition Joker free + Foil/Holo/Poly/Negative. One tag per card, FIFO.
+      - Voucher Tag: extra voucher per tag in `_populate_shop` via
+        `get_next_voucher_key(from_tag=True)` ('Voucher_fromtag' pool key pre-existed).
+      - Coupon: initial shop cards + boosters cost 0 (vouchers full price; rerolls NOT
+        free — fires on populate only). Investment: +$25 at cash-out only when the
+        beaten blind was a boss. Juggle: `rr["temp_handsize"]` request before
+        `start_round`, applied amount recorded in `cr["temp_handsize_applied"]`,
+        REVERTED at end-of-round (the apply existed; the revert didn't — hand size
+        would have grown permanently).
+      - THREE dormant bugs fixed en route: (1) `shop.calculate_reroll_cost` used
+        `or` on `temp_reroll_cost` — Lua `0 or x`→0, Python falls through, so D6's $0
+        base was ignored; (2) `_handle_reroll` recomputed from `base_reroll_cost`,
+        losing the Reroll Surplus/Glut discount (mutates `round_resets.reroll_cost`)
+        after the first reroll AND escalating price while Chaos free rerolls remained
+        (vanilla doesn't); (3) `_check_double_tag` read `gs["tags"]` which NOTHING ever
+        wrote (Double Tag could never fire) and applied only the dollars field of the
+        dup (Orbital/Top-up dups silently dropped) — now scans `awarded_tags`, applies
+        the full effect, dup entry behaves like a fresh award.
+      - IN-GAME VERIFICATION PENDING (user offered to test in real Balatro; assumptions
+        marked TODO in code): (a) does a tag-forced shop joker still burn the
+        type-selection RNG poll, and does its pool append key differ from 'sho'?
+        (b) exact D6 cost climb ($0 then $1,$2... assumed); (c) Coupon skips vouchers
+        and skips rerolled cards (assumed yes/yes); (d) a rerolled card is eligible for
+        a pending Rare/edition tag (assumed yes); (e) Investment pays after earnings at
+        cash-out, so it does NOT affect that round's interest (assumed).
+- [ ] Stage 4 hand-demo preset (boss blinds): h0 has never seen a Boss blind (all three
+      stages exclude "Boss" from `blind_stages`), but full-run shop episodes hit one every
+      third blind — an h0 that folds at bosses distorts every s0 shop value toward
+      "we die anyway". The config/obs already support bosses (GC carries boss features);
+      verify the solver handles boss debuffs through `score_hand`, add the preset,
+      generate after stage 3 on the fast box, fold into the BC pool before s0 trains in
+      earnest.
 - [ ] Bootstrap loop orchestration (h0 -> s0 -> rollout -> h1 -> s1 -> ...).
 - [ ] Server-log parser for money/ante/failure calibration statistics (not started; only
       manual `grep` exploration done so far on two 1000-2000 line samples).
