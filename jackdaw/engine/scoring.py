@@ -448,6 +448,7 @@ def score_hand(
         mail_card_id=gs.get("mail_card_id"),
         idol_card=gs.get("idol_card"),
         ancient_suit=gs.get("ancient_suit"),
+        skips=gs.get("skips", 0),
     )
 
     # === Phase 1-2: Hand detection ===

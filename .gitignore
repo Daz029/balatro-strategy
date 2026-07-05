@@ -214,3 +214,6 @@ checkpoints/
 # claude
 .agents/
 .claude/
+
+# data
+data/

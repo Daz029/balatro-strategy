@@ -49,7 +49,6 @@ KNOWN APPROXIMATIONS (flagged explicitly, not hidden):
 
 from __future__ import annotations
 
-import copy
 import itertools
 from dataclasses import dataclass, field
 from math import comb
@@ -57,117 +56,38 @@ from typing import Callable
 
 from jackdaw.engine.card import Card
 from jackdaw.engine.hand_levels import HandLevels
+from jackdaw.engine.play_ordering import (
+    MAX_PERMUTATIONS,  # noqa: F401 -- re-export for existing importers
+    candidate_orderings,
+)
+from jackdaw.engine.play_ordering import (
+    count_order_sensitive_sources as _count_order_sensitive_sources,  # noqa: F401
+)
+from jackdaw.engine.play_ordering import (
+    fast_clone_card as _fast_clone_card,
+)
+from jackdaw.engine.play_ordering import (
+    fast_clone_hand_levels as _fast_clone_hand_levels,
+)
+from jackdaw.engine.play_ordering import (
+    fast_clone_rng as _fast_clone_rng,
+)
+from jackdaw.engine.play_ordering import (
+    first_last_covering_permutations as _first_last_covering_permutations,  # noqa: F401
+)
+from jackdaw.engine.play_ordering import (
+    needs_permutation_search as _needs_permutation_search,  # noqa: F401
+)
 from jackdaw.engine.rng import PseudoRandom
 from jackdaw.engine.scoring import ScoreResult, score_hand
 
-MAX_PERMUTATIONS = 24  # cap on order-permutations tried per value eval
-
-# `score_hand`'s per-card loop (scoring.py: `_apply_individual_joker_effects`)
-# accumulates `mult` *sequentially* across scored cards: `mult += additive`
-# then `mult *= multiplicative`, once per scored card in order. Pure-additive
-# scoring is always commutative (order can never change a sum), so scoring
-# order can only matter when at least one per-card MULTIPLICATIVE (xmult)
-# source is present -- interleaving that with additive mult elsewhere in the
-# sequence is what makes `(m + a) * x != (m * x) + a` in general. Joker
-# *list* order (as opposed to card order) has the same "only matters with
-# xmult" shape in Phase 9's `joker_main` loop, but the solver never permutes
-# joker order (it's fixed by the real joker board), so that's not handled
-# here. Position-copying edge cases (Blueprint/Brainstorm) are out of scope
-# for now.
-_XMULT_JOKER_KEYS = frozenset(
-    {"j_photograph", "j_bloodstone", "j_ancient", "j_triboulet", "j_idol"}
-)
-
-# Hanging Chad gives extra retriggers to whichever card is scored *first* --
-# an identity effect, not an xmult one, so it stays order-sensitive even in
-# an all-additive hand (a differently-valued card becoming "first" changes
-# how much its (possibly purely additive) effect gets amplified).
-_IDENTITY_ORDER_SENSITIVE_JOKER_KEYS = frozenset({"j_hanging_chad"})
-
-
-def _card_has_xmult(c: Card) -> bool:
-    """Whether *c*'s own enhancement/edition multiplies `mult` when scored.
-
-    Glass enhancement (`ability["x_mult"]`) and Polychrome edition
-    (`edition["x_mult"]`) are the two card-level sources; see
-    `Card.get_chip_x_mult`/`Card.get_edition`.
-    """
-    if c.ability.get("x_mult", 1) > 1:
-        return True
-    edition = c.edition or {}
-    return bool(edition.get("x_mult"))
-
-
-def _count_order_sensitive_sources(played_cards: list[Card], jokers: list[Card]) -> int:
-    """Count of interior-order-sensitive contributors among `played_cards`.
-
-    Used to decide whether the (first, last)-covering permutation set (see
-    `_first_last_covering_permutations`) is sufficient, or whether interior
-    positions can interact and a full permutation search is required.
-
-    Identity-only effects (`_IDENTITY_ORDER_SENSITIVE_JOKER_KEYS`, i.e.
-    Hanging Chad) are deliberately excluded from this count -- they depend
-    solely on which card is scored first, a dimension the covering set
-    already explores exhaustively regardless of how many such jokers are
-    present.
-    """
-    joker_keys = {getattr(j, "center_key", None) for j in jokers}
-    count = sum(1 for c in played_cards if _card_has_xmult(c))
-    count += sum(1 for c in played_cards if c.ability.get("effect") == "Lucky Card")
-    if joker_keys & _XMULT_JOKER_KEYS:
-        count += 1
-    return count
-
-
-def _first_last_covering_permutations(cards: list[Card]) -> list[tuple[Card, ...]]:
-    """Deterministic permutation set covering every (first, last) ordered
-    pair of `cards` exactly once, in `len(cards) * (len(cards) - 1)`
-    permutations rather than `len(cards)!`.
-
-    For each of the `n` choices of first card (via whole-sequence rotation),
-    the remaining `n - 1` cards are cycled through their `n - 1` rotations,
-    which places each of them in the last slot exactly once. Interior
-    positions only ever see this single rotation pattern, not all `(n-2)!`
-    arrangements of the interior -- exact when there is at most one
-    order-sensitive contributor (see `_count_order_sensitive_sources`), not
-    guaranteed exact with two or more.
-    """
-    n = len(cards)
-    perms: list[tuple[Card, ...]] = []
-    for outer in range(n):
-        rotated = cards[-outer:] + cards[:-outer] if outer else list(cards)
-        first, rest = rotated[0], rotated[1:]
-        for inner in range(len(rest)):
-            rest_rotated = rest[-inner:] + rest[:-inner] if inner else list(rest)
-            perms.append(tuple([first, *rest_rotated]))
-    return perms
-
-
-def _needs_permutation_search(played_cards: list[Card], jokers: list[Card]) -> bool:
-    """Whether permuting `played_cards`' scoring order can change the total.
-
-    True when:
-      - any played card carries the Lucky Card enhancement -- rolls a shared
-        RNG stream (`rng.random("lucky_mult")`) once per qualifying scored
-        card, so which card's roll succeeds depends on scoring order; or
-      - Hanging Chad is active (identity-based, see above); or
-      - any per-card xmult source is present at all (a joker in
-        `_XMULT_JOKER_KEYS`, a Glass-enhanced card, or a Polychrome-edition
-        card) -- xmult interleaving with additive mult elsewhere in the
-        sequence is order-sensitive, and checking for xmult presence alone
-        is a small, easy-to-verify surface compared to also having to
-        enumerate every additive-mult source.
-    """
-    joker_keys = {getattr(j, "center_key", None) for j in jokers}
-
-    if any(c.ability.get("effect") == "Lucky Card" for c in played_cards):
-        return True
-    if joker_keys & _IDENTITY_ORDER_SENSITIVE_JOKER_KEYS:
-        return True
-    if joker_keys & _XMULT_JOKER_KEYS:
-        return True
-    return any(_card_has_xmult(c) for c in played_cards)
-
+# NOTE: The fast-clone helpers, order-sensitivity detection, and covering-
+# permutation construction that used to live here moved to
+# `jackdaw/engine/play_ordering.py` so the RL hand-play environment can
+# reuse them for env-side optimal ordering (the agent picks a subset;
+# ordering is delegated to the engine -- see CLAUDE.md). They are
+# re-imported above under their historical underscore names for the
+# existing tests and any external callers.
 
 RANKS = ["2", "3", "4", "5", "6", "7", "8", "9", "10", "Jack", "Queen", "King", "Ace"]
 RANK_ID = {r: i + 2 for i, r in enumerate(RANKS)}  # 2..14, Ace=14
@@ -436,6 +356,39 @@ def construct_hold(hand: list[Card], template: Template) -> tuple[list[Card], li
     return matches, non_matches
 
 
+# The engine (and real Balatro) cap a discard at 5 selected cards
+# (game.py::_handle_discard raises above 5). Template construction can
+# produce more non-matches than that (e.g. 2 flush cards held in an 8-card
+# hand -> 6 non-matches), and labeling those as one discard action produced
+# unexecutable demonstrations AND optimistic reachability math (6-8
+# replacement draws where the game allows at most 5) -- found when BC
+# training hit real stage-1 data, 8.3% of labels affected.
+DISCARD_LIMIT = 5
+
+
+def _keep_priority(c: Card) -> tuple[int, int]:
+    """Sort key for which excess non-matches to KEEP in hand when a
+    template's discard set exceeds DISCARD_LIMIT (higher = keep). Enhanced
+    cards (steel/glass/gold/bonus/...) carry value beyond their rank;
+    otherwise prefer keeping higher-nominal cards as fallback material.
+    A heuristic, flagged as such -- the exact answer would require
+    searching over which subset to keep."""
+    enhanced = c.center_key not in (None, "", "c_base")
+    nominal = c.base.nominal if c.base else 0
+    return (1 if enhanced else 0, nominal)
+
+
+def cap_discard(discard: list[Card]) -> tuple[list[Card], list[Card]]:
+    """Split a template's non-matches into (to_discard, kept_in_hand) with
+    ``len(to_discard) <= DISCARD_LIMIT``. Reachability must use
+    ``len(to_discard)`` as the draw count, and hand reconstruction must
+    carry ``kept_in_hand`` forward -- those cards stay in the hand."""
+    if len(discard) <= DISCARD_LIMIT:
+        return list(discard), []
+    ranked = sorted(discard, key=_keep_priority)  # discard-first ordering
+    return ranked[:DISCARD_LIMIT], ranked[DISCARD_LIMIT:]
+
+
 # ---------------------------------------------------------------------------
 # Value evaluation (calls the real engine)
 # ---------------------------------------------------------------------------
@@ -450,48 +403,36 @@ def evaluate_value(
     rng: PseudoRandom,
     game_state: dict | None = None,
     blind_chips: int = 0,
+    *,
+    search_orderings: bool = True,
 ) -> ScoreResult:
     """Max score over card-order permutations of `played_cards`, using
     CLONED mutable state so the live run is never touched by a hypothetical
     evaluation. This is the only place that talks to the real scoring
     engine -- all joker-specific knowledge lives here implicitly.
-    """
-    best: ScoreResult | None = None
-    n = len(played_cards)
-    perms: list[tuple[Card, ...]]
-    if n <= 1 or not _needs_permutation_search(played_cards, jokers):
-        perms = [tuple(played_cards)]
-    else:
-        all_perms = list(itertools.permutations(played_cards))
-        if len(all_perms) > MAX_PERMUTATIONS:
-            if _count_order_sensitive_sources(played_cards, jokers) > 1:
-                # Two+ order-sensitive contributors can interact at interior
-                # positions, not just at the first/last slots -- fall back
-                # to full enumeration rather than risk missing the true max.
-                perms = all_perms
-            else:
-                # Exactly one order-sensitive contributor (or none beyond an
-                # identity effect): its optimum is always achievable by some
-                # choice of first and/or last slot, so the (first, last)
-                # covering set is exact here without needing all n!.
-                perms = _first_last_covering_permutations(played_cards)
-        else:
-            perms = all_perms
 
-    for order in perms:
-        hl_copy = copy.deepcopy(hand_levels)
-        rng_copy = copy.deepcopy(rng)
-        # Deep-copy cards and jokers too -- score_hand mutates card/joker
-        # state in place for several effects (Vampire strips enhancements
-        # off scored cards, Wee Joker/Lucky Cat accumulate onto
-        # ability["extra"]/["x_mult"], Lucky Card sets a "lucky_trigger"
-        # flag). Without this, a hypothetical evaluation here would
-        # permanently corrupt the caller's real hand/joker objects, and
-        # repeated trials within this same permutation loop would
-        # contaminate each other.
-        played_copy = [copy.deepcopy(c) for c in order]
-        held_copy = [copy.deepcopy(c) for c in held_cards]
-        jokers_copy = [copy.deepcopy(j) for j in jokers]
+    ``search_orderings=False`` scores the given order only. Reserved for
+    consumers whose output is already a coarse approximation (the future-
+    hand MC sampler): paying a 6-20x permutation search to find the exact
+    best ordering of a *hypothetical* hand is precision the estimate can't
+    use. Exact consumers (labels, current-turn decisions) must leave it on.
+    """
+    if search_orderings:
+        orderings = candidate_orderings(played_cards, jokers)
+    else:
+        orderings = [tuple(played_cards)]
+    best: ScoreResult | None = None
+    for order in orderings:
+        # Fast clones, not copy.deepcopy -- see the module-level comment
+        # above _fast_clone_card for why this is safe (score_hand mutates
+        # card/joker/hand_levels/rng state in place, so isolation between
+        # trials is required either way; the fast clones just do it without
+        # generic deepcopy's reflection overhead).
+        hl_copy = _fast_clone_hand_levels(hand_levels)
+        rng_copy = _fast_clone_rng(rng)
+        played_copy = [_fast_clone_card(c) for c in order]
+        held_copy = [_fast_clone_card(c) for c in held_cards]
+        jokers_copy = [_fast_clone_card(j) for j in jokers]
         result = score_hand(
             played_copy,
             held_copy,
@@ -531,9 +472,13 @@ def best_immediate_play(
     rng: PseudoRandom,
     game_state: dict | None = None,
     blind_chips: int = 0,
+    *,
+    search_orderings: bool = True,
 ) -> tuple[list[Card], ScoreResult]:
     """No discards being considered -- brute force over all non-empty
-    subsets of size <=5 (cheap: C(8,5)=56 worst case)."""
+    subsets of size <=5 (cheap: C(8,5)=56 worst case).
+
+    `search_orderings` -- see `evaluate_value`; forwarded per subset."""
     best_subset: list[Card] | None = None
     best_result: ScoreResult | None = None
     n = len(hand)
@@ -549,7 +494,8 @@ def best_immediate_play(
             combo_ids = {id(c) for c in combo}
             held = [c for c in hand if id(c) not in combo_ids]
             result = evaluate_value(
-                list(combo), held, jokers, hand_levels, blind, rng, game_state, blind_chips
+                list(combo), held, jokers, hand_levels, blind, rng, game_state, blind_chips,
+                search_orderings=search_orderings,
             )
             if best_result is None or result.total > best_result.total:
                 best_result = result
@@ -599,6 +545,7 @@ def solve_discard_decision(
         hold, discard = construct_hold(hand, template)
         already_have = len(hold)
         still_needed = max(0, template.needed - already_have)
+        discard, kept = cap_discard(discard)  # engine caps a discard at 5 cards
         draws = len(discard)  # cards redrawn = cards discarded (hand size held constant)
 
         if still_needed == 0:
@@ -660,7 +607,7 @@ def solve_discard_decision(
             best_choice = DiscardChoice(
                 action="discard",
                 template_name=template.name,
-                hold=hold,
+                hold=hold + kept,
                 discard=discard,
                 expected_value=ev,
                 reach_probability=prob,
@@ -826,21 +773,27 @@ def rank_templates_cheaply(
     four_fingers: bool = False,
     shortcut: bool = False,
     top_k: int = 4,
-) -> list[tuple[Template, list[Card], list[Card], float, float, int]]:
-    """Returns up to `top_k` (template, hold, discard, p_reach, cheap_value,
-    still_needed) tuples, ranked by p_reach * cheap_value using the
-    jokerless `score_hand_base` (no engine joker loop, no permutation
-    search -- safe because base scoring is order-invariant without
-    jokers).
+) -> list[tuple[Template, list[Card], list[Card], list[Card], float, float, int]]:
+    """Returns up to `top_k` (template, hold, kept, discard, p_reach,
+    cheap_value, still_needed) tuples, ranked by p_reach * cheap_value
+    using the jokerless `score_hand_base` (no engine joker loop, no
+    permutation search -- safe because base scoring is order-invariant
+    without jokers).
+
+    `hold` contains only template-MATCHING cards (still_needed/eval math
+    depends on that); `kept` is excess non-matches retained in hand because
+    the discard is capped at DISCARD_LIMIT -- callers reconstructing the
+    post-discard hand must include them.
     """
     from jackdaw.engine.scoring import score_hand_base
 
     templates = build_templates(hand, four_fingers=four_fingers, shortcut=shortcut)
-    scored: list[tuple[Template, list[Card], list[Card], float, float, int]] = []
+    scored: list[tuple[Template, list[Card], list[Card], list[Card], float, float, int]] = []
 
     for template in templates:
         hold, discard = construct_hold(hand, template)
         still_needed = max(0, template.needed - len(hold))
+        discard, kept = cap_discard(discard)
         draws = len(discard)
 
         if still_needed == 0:
@@ -869,11 +822,11 @@ def rank_templates_cheaply(
             eval_cards = (hold + _best_completion_cards(deck, template, still_needed))[:5]
 
         cheap_result = score_hand_base(
-            eval_cards, [], copy.deepcopy(hand_levels), blind, copy.deepcopy(rng)
+            eval_cards, [], _fast_clone_hand_levels(hand_levels), blind, _fast_clone_rng(rng)
         )
-        scored.append((template, hold, discard, p_reach, cheap_result.total, still_needed))
+        scored.append((template, hold, kept, discard, p_reach, cheap_result.total, still_needed))
 
-    scored.sort(key=lambda t: t[3] * t[4], reverse=True)
+    scored.sort(key=lambda t: t[4] * t[5], reverse=True)
     return scored[:top_k]
 
 
@@ -884,9 +837,10 @@ def estimate_future_hand_distribution(
     blind,
     rng: PseudoRandom,
     hand_size: int = 8,
-    n_samples: int = 40,
+    n_samples: int = 16,
     game_state: dict | None = None,
     blind_chips: int = 0,
+    mc_seed: str | None = None,
 ) -> list[float]:
     """Monte Carlo stand-in for "what is a typical NEXT hand-turn worth,"
     drawn fresh from the given deck composition -- used only at the
@@ -894,9 +848,33 @@ def estimate_future_hand_distribution(
     condition on (see module-level note above). Returns a list of sampled
     best-immediate-play values.
 
-    Known biases (both understate future value, so this errs pessimistic):
+    `mc_seed` seeds a LOCAL Random for the hand draws; None falls back to
+    an unseeded instance (the pre-seeding behavior). Callers that label
+    training data must pass the example's seed so p_clear values are
+    reproducible -- historically this used the unseeded global `random`,
+    so labels carried run-to-run MC noise.
+
+    Everything here stays inside the approximation boundary, deliberately
+    (profiled 2026-07: this function was 75-97% of per-example solve time
+    at 40 samples with full ordering search):
+      - `search_orderings=False`: the exact best card ORDERING of a
+        hypothetical hand is precision a 16-point empirical distribution
+        can't use, and it cost a 6-20x multiplier on order-sensitive
+        boards. Slightly understates sample values -- same direction as
+        bias (a) below.
+      - 16 samples (down from 40) describes the distribution nearly as
+        well for a third of the cost.
+
+    Known biases (all understate future value, so this errs pessimistic):
       (a) sampled hands are scored via `best_immediate_play` only -- they
-          don't get to use their own discards.
+          don't get to use their own discards. NOTE the strategic tilt
+          this implies for in-blind play: discards spent THIS turn are
+          fully credited by the exact recursion, discards BANKED for
+          future turns are credited at zero, so labels lean toward
+          spending discards early. Accepted because PPO fine-tunes against
+          the real game where banking pays off (see CLAUDE.md); if eval
+          shows PPO gains concentrated in high-discards/multi-hand states,
+          consider a one-discard lookahead per sample here.
       (b) all samples are drawn from THIS deck snapshot; a real hand 3 or 4
           turns later draws from a further-depleted deck.
     """
@@ -904,6 +882,8 @@ def estimate_future_hand_distribution(
 
     from jackdaw.engine.card_factory import create_playing_card
     from jackdaw.engine.data.enums import Rank, Suit as SuitEnum
+
+    sampler = _random.Random(mc_seed) if mc_seed is not None else _random.Random()
 
     id_to_rank = {v: k for k, v in RANK_ID.items()}
     pool: list[tuple[int, str]] = []
@@ -915,14 +895,15 @@ def estimate_future_hand_distribution(
 
     samples: list[float] = []
     for _ in range(n_samples):
-        drawn = _random.sample(pool, hand_size)
+        drawn = sampler.sample(pool, hand_size)
         hand_cards = [
             create_playing_card(SuitEnum(suit), Rank(id_to_rank[rid])) for rid, suit in drawn
         ]
         # evaluate_value/best_immediate_play deep-copy rng internally, so
         # passing the live rng here is safe -- no mutation of real state.
         _, result = best_immediate_play(
-            hand_cards, jokers, hand_levels, blind, rng, game_state, blind_chips
+            hand_cards, jokers, hand_levels, blind, rng, game_state, blind_chips,
+            search_orderings=False,
         )
         samples.append(result.total)
     return samples
@@ -1045,11 +1026,14 @@ def solve_hand_turn(
         four_fingers=four_fingers, shortcut=shortcut, top_k=top_k,
     )
 
-    for template, hold, discard, p_reach, _cheap_val, still_needed in candidates:
+    for template, hold, kept, discard, p_reach, _cheap_val, still_needed in candidates:
+        # Post-discard hand = template matches + capped-out non-matches
+        # (kept in hand, see cap_discard) + replacement draws.
+        base_hold = hold + kept
         if still_needed == 0:
             # already satisfied -- degenerate to a deterministic recursive
             # call on the (unchanged, already-complete) hold, refilled.
-            hit_hand, hit_drawn = _fill_hand_to_size(deck, hold, [], hand_size)
+            hit_hand, hit_drawn = _fill_hand_to_size(deck, base_hold, [], hand_size)
             hit_deck = deck.without(hit_drawn)
             hit_choice = solve_hand_turn(
                 hit_hand, jokers, hand_levels, blind, rng, hit_deck, chips_needed,
@@ -1059,7 +1043,7 @@ def solve_hand_turn(
             p_clear = hit_choice.p_clear
         else:
             hit_priority = _best_completion_cards(deck, template, still_needed)
-            hit_hand, hit_drawn = _fill_hand_to_size(deck, hold, hit_priority, hand_size)
+            hit_hand, hit_drawn = _fill_hand_to_size(deck, base_hold, hit_priority, hand_size)
             hit_deck = deck.without(hit_drawn)
             hit_choice = solve_hand_turn(
                 hit_hand, jokers, hand_levels, blind, rng, hit_deck, chips_needed,
@@ -1068,7 +1052,7 @@ def solve_hand_turn(
             )
 
             miss_priority = _representative_miss_cards(deck, template, still_needed)
-            miss_hand, miss_drawn = _fill_hand_to_size(deck, hold, miss_priority, hand_size)
+            miss_hand, miss_drawn = _fill_hand_to_size(deck, base_hold, miss_priority, hand_size)
             miss_deck = deck.without(miss_drawn)
             miss_choice = solve_hand_turn(
                 miss_hand, jokers, hand_levels, blind, rng, miss_deck, chips_needed,
@@ -1081,7 +1065,7 @@ def solve_hand_turn(
             best = AnteClearChoice(
                 action="discard",
                 template_name=template.name,
-                hold=hold,
+                hold=base_hold,
                 discard=discard,
                 p_clear=p_clear,
                 immediate_value=hit_choice.immediate_value,
@@ -1106,14 +1090,27 @@ def solve_hand_for_ante_clear(
     four_fingers: bool = False,
     shortcut: bool = False,
     top_k: int = 4,
+    mc_seed: str | None = None,
 ) -> AnteClearChoice:
     """Top-level entry point: computes the future-hand distribution once
     (for `hands_left - 1` downstream hand-turns) and kicks off the
     recursive discard-chain solve. This is what to call from a live
     decision point -- `solve_hand_turn` is the internal recursive worker.
+
+    Pass `mc_seed` (e.g. the episode seed) whenever the output becomes a
+    training label -- it makes the future-hand MC draws, and therefore
+    p_clear, reproducible.
     """
+    if mc_seed is not None:
+        # `prob_clear_given_future`'s tiny LCG carries state across calls
+        # within a process; reset it per solve or p_clear would depend on
+        # how many solves this worker ran before this one.
+        import zlib
+
+        _rand_state[0] = zlib.crc32(mc_seed.encode()) & 0x7FFFFFFF or 12345
     future_samples = estimate_future_hand_distribution(
-        deck, jokers, hand_levels, blind, rng, len(hand), 40, game_state, blind_chips
+        deck, jokers, hand_levels, blind, rng, len(hand),
+        game_state=game_state, blind_chips=blind_chips, mc_seed=mc_seed,
     )
     return solve_hand_turn(
         hand, jokers, hand_levels, blind, rng, deck, chips_needed, hands_left, discards_left,

@@ -16,16 +16,20 @@ import json
 import numpy as np
 import pytest
 from generate_hand_demos import (
+    DEFAULT_COUNT_BANDS,
     MAX_HAND_CARDS,
     MAX_JOKERS,
+    STAGE2_JOKER_POOL,
     Example,
     GenerationError,
+    _worker_run,
     acted_cards_from_choice,
+    all_joker_keys,
     generate_one_example,
     indices_by_identity,
     partition_indices,
+    stage_presets,
     write_shard,
-    _worker_run,
 )
 from hand_solver import AnteClearChoice
 
@@ -242,3 +246,175 @@ def test_worker_run_writes_shards_and_logs_failures(tmp_path, monkeypatch) -> No
     failure = json.loads(lines[0])
     assert failure["seed"] == "unit_test_00000003"
     assert "simulated solver failure" in failure["error"]
+
+
+# ---------------------------------------------------------------------------
+# Curriculum stage presets
+# ---------------------------------------------------------------------------
+
+
+def test_default_count_bands_weights_sum_to_one() -> None:
+    assert sum(b.weight for b in DEFAULT_COUNT_BANDS) == pytest.approx(1.0)
+
+
+def test_default_count_bands_encode_agreed_restrictions() -> None:
+    by_count = {b.count: b for b in DEFAULT_COUNT_BANDS}
+    assert set(by_count) == {0, 1, 2, 3, 4, 5}
+    # 0/1-joker states confined to antes 1-2; 5-joker boards to ante 3+.
+    assert by_count[0].ante_range == (1, 2)
+    assert by_count[1].ante_range == (1, 2)
+    assert by_count[5].ante_range == (3, 8)
+    assert by_count[5].weight == pytest.approx(0.30)
+
+
+def test_stage2_pool_keys_all_exist_in_engine_data() -> None:
+    valid = set(all_joker_keys())
+    unknown = [k for k in STAGE2_JOKER_POOL if k not in valid]
+    assert not unknown, f"stage 2 pool names unknown joker keys: {unknown}"
+
+
+def test_stage3_pool_is_all_150_jokers() -> None:
+    keys = all_joker_keys()
+    assert len(keys) == 150
+    presets = stage_presets()
+    assert presets["stage3_full"].config.joker_pool == keys
+
+
+def test_stage_presets_are_generatable() -> None:
+    """Every preset must produce a valid HandPlayConfig that reset() accepts
+    (band counts within pool and joker_slots) — catches preset drift."""
+    from jackdaw.env.hand_play_adapter import HandPlayAdapter
+
+    for name, preset in stage_presets().items():
+        adapter = HandPlayAdapter(preset.config)
+        adapter.reset("b_red", 1, f"PRESET_SMOKE_{name}")
+        assert preset.total_examples > 0
+
+
+# ---------------------------------------------------------------------------
+# Resume after interruption
+# ---------------------------------------------------------------------------
+
+
+def _fake_example(seed: str) -> Example:
+    return Example(
+        global_context=np.zeros(1, dtype=np.float32),
+        hand_cards=np.zeros((MAX_HAND_CARDS, 1), dtype=np.float32),
+        hand_mask=np.zeros(MAX_HAND_CARDS, dtype=bool),
+        jokers=np.zeros((MAX_JOKERS, 1), dtype=np.float32),
+        joker_mask=np.zeros(MAX_JOKERS, dtype=bool),
+        action_type=int(ActionType.PlayHand),
+        card_target_mask=np.zeros(MAX_HAND_CARDS, dtype=bool),
+        p_clear=1.0,
+        seed=seed,
+    )
+
+
+def test_worker_resumes_after_interruption(tmp_path, monkeypatch) -> None:
+    """Killing a run and relaunching with identical settings must continue
+    after the last stored index — no duplicated seeds, no skipped indices,
+    and shard numbering continues rather than overwriting."""
+    import generate_hand_demos as gen_mod
+
+    calls: list[str] = []
+
+    def fake_generate(seed: str, config) -> Example:
+        calls.append(seed)
+        return _fake_example(seed)
+
+    monkeypatch.setattr(gen_mod, "generate_one_example", fake_generate)
+    out_dir = tmp_path / "stage_resume"
+
+    # First (interrupted) run: covers indices 0-4 with shard_size 2 -> two
+    # full shards (0-1, 2-3) plus index 4 flushed as a final short shard.
+    _worker_run(0, 0, 5, "resume_test", HandPlayConfig(), out_dir, shard_size=2)
+    first_run_calls = list(calls)
+    assert [s[-1] for s in first_run_calls] == ["0", "1", "2", "3", "4"]
+
+    # Relaunch the full range 0-10: must resume at index 5, not redo 0-4.
+    calls.clear()
+    _worker_run(0, 0, 10, "resume_test", HandPlayConfig(), out_dir, shard_size=2)
+    assert [s[-1] for s in calls] == ["5", "6", "7", "8", "9"]
+
+    # All shards together: every index exactly once, no overwrites.
+    all_seeds: list[str] = []
+    for path in sorted(out_dir.glob("worker_000_shard_*.npz")):
+        all_seeds.extend(str(s) for s in np.load(path)["seed"])
+    assert sorted(all_seeds) == [f"resume_test_{i:08d}" for i in range(10)]
+
+
+def test_resume_ignores_seeds_outside_worker_range(tmp_path, monkeypatch) -> None:
+    """Seeds from a run with different partitioning must not gate resume."""
+    import generate_hand_demos as gen_mod
+
+    monkeypatch.setattr(gen_mod, "generate_one_example", lambda s, c: _fake_example(s))
+    out_dir = tmp_path / "stage_repart"
+
+    # Simulate an old shard for worker 0 holding an out-of-range index (50).
+    out_dir.mkdir(parents=True)
+    write_shard(
+        out_dir / "worker_000_shard_00000.npz", [_fake_example("repart_test_00000050")]
+    )
+
+    from generate_hand_demos import _resume_point
+
+    resume_idx, next_shard = _resume_point(out_dir, 0, 0, 10)
+    assert resume_idx == 0  # index 50 is outside [0, 10) -> ignored
+    assert next_shard == 1  # but numbering still continues past the file
+
+
+# ---------------------------------------------------------------------------
+# Generation-time label executability validation (added after the 5-card
+# discard-cap bug -- see CLAUDE.md open items)
+# ---------------------------------------------------------------------------
+
+
+class TestValidateLabelExecutability:
+    """Tier 1 (canonical-mask) + tier 2 (real engine execution) guards."""
+
+    def _adapter(self, discards: tuple[int, int] = (1, 3)):
+        from jackdaw.env.hand_play_adapter import HandPlayAdapter
+
+        adapter = HandPlayAdapter(HandPlayConfig(discards_range=discards))
+        adapter.reset("b_red", 1, "validate_test_0001")
+        return adapter
+
+    def test_valid_play_executes_through_engine(self) -> None:
+        from generate_hand_demos import validate_label_executability
+
+        adapter = self._adapter()
+        hands_before = adapter.raw_state["current_round"]["hands_left"]
+        validate_label_executability(adapter, ActionType.PlayHand, [0, 1, 2])
+        # Tier 2 really ran: the engine consumed a hand.
+        assert adapter.raw_state["current_round"]["hands_played"] >= 1 or (
+            adapter.raw_state["current_round"]["hands_left"] < hands_before
+        )
+
+    def test_valid_discard_executes_through_engine(self) -> None:
+        from generate_hand_demos import validate_label_executability
+
+        adapter = self._adapter(discards=(2, 3))
+        discards_before = adapter.raw_state["current_round"]["discards_left"]
+        validate_label_executability(adapter, ActionType.Discard, [0, 4])
+        assert adapter.raw_state["current_round"]["discards_left"] == discards_before - 1
+
+    def test_six_card_discard_rejected_at_mask_tier(self) -> None:
+        from generate_hand_demos import GenerationError, validate_label_executability
+
+        adapter = self._adapter(discards=(2, 3))
+        with pytest.raises(GenerationError, match="not a canonical action"):
+            validate_label_executability(adapter, ActionType.Discard, [0, 1, 2, 3, 4, 5])
+
+    def test_discard_with_no_budget_rejected(self) -> None:
+        from generate_hand_demos import GenerationError, validate_label_executability
+
+        adapter = self._adapter(discards=(0, 0))
+        with pytest.raises(GenerationError, match="illegal"):
+            validate_label_executability(adapter, ActionType.Discard, [0])
+
+    def test_out_of_range_index_rejected(self) -> None:
+        from generate_hand_demos import GenerationError, validate_label_executability
+
+        adapter = self._adapter()
+        with pytest.raises(GenerationError, match="not a canonical action"):
+            validate_label_executability(adapter, ActionType.PlayHand, [0, 9])

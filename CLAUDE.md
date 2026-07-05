@@ -169,10 +169,89 @@ the two tracks ended up with different training strategies.
       value-equality, so an Erratic deck's duplicate-valued cards would both get excluded from
       `held` when only one was actually selected, undercounting held-card-count-based joker
       scoring — fixed to filter by `id()`, tested in
-      `tests/scripts/test_hand_solver_duplicate_cards.py`. Actual joker-pool sizes/target
-      per-stage example counts are left as CLI parameters, not hardcoded — not yet decided.
-- [ ] BC + PPO fine-tune training loop for hand-agent (design decided: partial-convergence BC,
-      critic warm-start via regression on solver values, adaptive-KL-to-BC-policy fine-tune).
+      `tests/scripts/test_hand_solver_duplicate_cards.py`.
+- [x] Curriculum stage presets + realistic state injection (grilled and decided; supersedes
+      "pool sizes/counts not yet decided"):
+      - Named presets in `generate_hand_demos.py` (`--stage stage1_no_jokers|stage2_curated|
+        stage3_full` = frozen config + example count: 2k / 4k / 20k; flags override). Stage 2
+        is a 21-joker archetype-spanning pool (jokers that *change the optimal action*, incl.
+        The Ancient); stage 3 is all 150 (legendaries and economy jokers deliberately included
+        — "irrelevant to hand-play" is itself a label worth learning).
+      - `JokerCountBand` in `HandPlayConfig`: count-first weighted sampling (30% five-joker /
+        20/20/10/10/10 down to zero), 0-1-joker states confined to antes 1-2, 5-joker to ante
+        3+. Count marginals are honored exactly; the ante marginal absorbs the tilt (deliberate).
+        Raise-don't-clamp when a band exceeds pool/joker_slots.
+      - Scaling-joker accumulated-state randomization (`_SCALING_SPECS`, 25 entries): without
+        it, Ride the Bus/Obelisk/etc. always appear at zero accumulation and BC learns "dead
+        slot" — a systematically false prior. cap = trigger_opportunities(ante) x difficulty
+        fraction (0.70 common / 0.60 uncommon / 0.50 rare; Yorick 0.70, Caino 0.50) x
+        per-trigger gain; sampled uniform-quantized in [0, cap]. Decay jokers (Ice Cream/
+        Popcorn/Ramen/Seltzer) sample only alive states; Campfire flat [x1.0, x2.5] (boss
+        reset); Loyalty Card gets a uniform charge position. Run-stat priors (skips, tarot
+        usage) seeded for formula-based jokers (Throwback, Fortune Teller). Known deferred
+        gap: hand LEVELS (Planet upgrades) and per-hand-type usage counts (Supernova) are
+        still always run-start values.
+      - Engine bug found & fixed while wiring this: `score_hand`'s `GameSnapshot` never
+        received `skips`, so Throwback could never fire through the real scoring pipeline
+        (its handler unit tests passed — the gap was integration). One-line fix in
+        `scoring.py`, integration-tested in `tests/engine/test_scoring.py`.
+- [x] BC + PPO fine-tune training loop for hand-agent (built and tested end-to-end; grilled
+      design decisions below supersede any earlier sketch):
+      - **Canonical `Discrete(436)` action space** (`jackdaw/agents/hand_action_space.py`):
+        {play, discard} x all 1-5-card subsets of 8 hand positions, size-lexicographic order,
+        APPEND-ONLY forever (BC labels and checkpoint action-head rows depend on index
+        stability; the full-run wrapper's per-step resampled Discrete(500) table is unusable
+        for BC). Shop-merge action families later append at 436+ with fresh head rows.
+      - **Env-side optimal ordering, no reorder actions**: the agent picks a card *subset*;
+        `HandPlayGymEnv` plays it in engine-optimal order via
+        `jackdaw/engine/play_ordering.py::best_play_order` when an order-sensitive joker/card
+        is present (helpers moved there from `hand_solver.py`, re-imported under old names;
+        ~7ms worst case, only on order-sensitive boards). Decided over swap/sort actions:
+        with the KL-to-BC leash active, PPO discovering multi-step reorder chains under
+        sparse reward is exactly the exploration-collapse failure mode, spent on something
+        the engine can compute exactly.
+      - **`HandPlayGymEnv`** (`jackdaw/env/hand_play_gym.py`): Dict obs == BC demo-shard
+        schema exactly, PLUS an always-masked consumable block (2x7) — with masked pooling
+        an absent entity type contributes exactly nothing (no false-zero signal), and the
+        obs space/checkpoint format survives the shop merge unchanged. Reward: terminal 1/0
+        = P(clear), gamma=1.0, NO shaping; docstring marks the h1-stage hook where the shop
+        critic's marginal-value-of-$1 adds a terminal `f(hands_left, dollars)` term (unused
+        hands aren't free forever — deliberate objective change at h1, not shaping).
+      - **Shared net** (`jackdaw/agents/hand_policy.py`): pooled per-entity-type MLP encoders
+        (no attention at 8+5+2 entities), whole trunk in a custom SB3 features extractor,
+        `net_arch=[]` so BC->PPO transfer is a plain per-module `load_state_dict`
+        (`load_bc_weights_into_policy`); tested to reproduce identical masked distributions
+        AND values (`tests/agents/test_hand_policy.py`) — the value head regresses solver
+        `p_clear`, which with 1/0 reward + gamma=1 IS the PPO critic target (calibrated warm
+        start).
+      - **`scripts/train_bc.py`**: pools stage dirs (BC is supervised; sequential stages just
+        forget), CRC32-of-seed val split, masked CE with smoothing 0.05 confined to the legal
+        set, +0.5*MSE on p_clear, early-stop patience 2 / max 10 epochs / best-epoch
+        checkpoint, per-epoch val entropy stored in checkpoint metadata (diagnose
+        over-sharpened BC after a bad PPO run). Loader hard-fails on schema drift or labels
+        illegal under their own reconstructed masks.
+      - **`scripts/train_hand_ppo.py`**: `KLToBCMaskablePPO` — train() copied from sb3-contrib
+        2.7.1 (version-pinned by a test; re-diff before bumping) + reverse KL(pi||pi_BC)
+        against the frozen BC net, `beta_eff = beta0 * progress_remaining * m`, m adaptive
+        x/1.5 toward KL target, so the leash provably reaches zero. ALL hyperparameters are
+        provisional — retune from checkpointed output (tensorboard + eval callback).
+      - **`scripts/eval_hand_policy.py`**: fixed suite on reserved `EVAL_` seed prefix (never
+        train on it), deterministic clear rate, `--solver-ceiling` caches mean solver p_clear
+        over the same seeds as the exact-play reference.
+- [x] Solver 5-card discard cap (found when BC first consumed real stage-1 data: 8.3% of
+      labels were 6-8-card discards — unexecutable, the engine caps a discard at 5, and
+      reachability had assumed 6-8 replacement draws). `cap_discard` in `hand_solver.py`
+      splits template non-matches into (<=5 discarded, kept-in-hand — enhanced/high-nominal
+      kept preferentially); `hold` stays matches-only for still_needed/eval math, `kept`
+      rides along for hand reconstruction. Tested in
+      `tests/scripts/test_hand_solver_discard_cap.py` incl. the original failing seed.
+      Pre-fix datasets backed up to `data/hand_agent_demos_pre_discard_cap/`; stages 1-2
+      regenerated with the fix. Hardening added so this class of bug (solver models an
+      action the engine can't execute) dies at the source next time:
+      `validate_label_executability` in `generate_hand_demos.py` — tier 1 checks the label
+      against the canonical Discrete(436) mask, tier 2 executes it through the real engine
+      (destructive, runs after obs encoding on the throwaway state; ~0.5ms vs 2-12s/solve).
+      Failures land in `worker_N_failures.jsonl` per the existing skip-not-fatal design.
 - [ ] Shop-agent environment/action-space design (not yet started — buy/sell/reroll/skip,
       combinatorial per-shop-slot choices).
 - [ ] Bootstrap loop orchestration (h0 -> s0 -> rollout -> h1 -> s1 -> ...).

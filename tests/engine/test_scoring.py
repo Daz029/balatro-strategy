@@ -445,3 +445,50 @@ class TestAfterPhase:
         assert r.total == 64
         assert r.saved is True
         assert bones in r.jokers_removed
+
+
+# ============================================================================
+# Throwback — skips must flow from game_state into GameSnapshot
+# ============================================================================
+
+
+class TestThrowbackIntegration:
+    """The handler was unit-tested with a hand-built JokerContext, but
+    score_hand's GameSnapshot construction silently dropped ``skips`` —
+    Throwback could never fire through the real scoring pipeline. This
+    covers the integration path end to end."""
+
+    def test_throwback_fires_through_score_hand(self):
+        played = [_card("Hearts", "Ace"), _card("Spades", "Ace")]
+        throwback = _joker("j_throwback", extra=0.25)
+        base = score_hand(
+            played, [], [], HandLevels(), _small_blind(), PseudoRandom("T")
+        )
+        r = score_hand(
+            played,
+            [],
+            [throwback],
+            HandLevels(),
+            _small_blind(),
+            PseudoRandom("T"),
+            game_state={"skips": 4},
+        )
+        # 4 skips x 0.25 = +1.0 -> x2 mult overall
+        assert r.total == base.total * 2
+
+    def test_throwback_inert_with_zero_skips(self):
+        played = [_card("Hearts", "Ace"), _card("Spades", "Ace")]
+        throwback = _joker("j_throwback", extra=0.25)
+        base = score_hand(
+            played, [], [], HandLevels(), _small_blind(), PseudoRandom("T")
+        )
+        r = score_hand(
+            played,
+            [],
+            [throwback],
+            HandLevels(),
+            _small_blind(),
+            PseudoRandom("T"),
+            game_state={"skips": 0},
+        )
+        assert r.total == base.total
