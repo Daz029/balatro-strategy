@@ -17,7 +17,6 @@ from hand_solver import (
     cap_discard,
     rank_templates_cheaply,
     solve_discard_decision,
-    solve_hand_for_ante_clear,
 )
 
 from jackdaw.engine.blind import Blind

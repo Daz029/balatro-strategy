@@ -50,9 +50,9 @@ KNOWN APPROXIMATIONS (flagged explicitly, not hidden):
 from __future__ import annotations
 
 import itertools
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from math import comb
-from typing import Callable
 
 from jackdaw.engine.card import Card
 from jackdaw.engine.hand_levels import HandLevels
@@ -110,7 +110,7 @@ class DeckComposition:
     total: int = 0
 
     @classmethod
-    def from_deck(cls, deck_cards: list[Card]) -> "DeckComposition":
+    def from_deck(cls, deck_cards: list[Card]) -> DeckComposition:
         dc = cls()
         for c in deck_cards:
             if c.base is None:
@@ -129,7 +129,7 @@ class DeckComposition:
             n for (rid, suit), n in self.by_rank_suit.items() if predicate(rid, suit)
         )
 
-    def without(self, cards: list[Card]) -> "DeckComposition":
+    def without(self, cards: list[Card]) -> DeckComposition:
         """Return a new DeckComposition with the given cards' rank/suit
         counts removed -- used when recursing into a hypothetical future
         state where those cards have been drawn out of the deck."""
@@ -269,7 +269,6 @@ def build_templates(
     # --- straight-by-window ---
     # ranks 2..14 (Ace high); Ace can also play low (id 14 treated as 1).
     windows = []
-    span = straight_need if not shortcut else straight_need  # gap handled below
     lo, hi = 2, 14
     for start in range(lo, hi - straight_need + 2):
         windows.append(list(range(start, start + straight_need)))
@@ -881,7 +880,8 @@ def estimate_future_hand_distribution(
     import random as _random
 
     from jackdaw.engine.card_factory import create_playing_card
-    from jackdaw.engine.data.enums import Rank, Suit as SuitEnum
+    from jackdaw.engine.data.enums import Rank
+    from jackdaw.engine.data.enums import Suit as SuitEnum
 
     sampler = _random.Random(mc_seed) if mc_seed is not None else _random.Random()
 
