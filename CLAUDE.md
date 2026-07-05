@@ -367,7 +367,18 @@ the two tracks ended up with different training strategies.
       (destructive, runs after obs encoding on the throwaway state; ~0.5ms vs 2-12s/solve).
       Failures land in `worker_N_failures.jsonl` per the existing skip-not-fatal design.
 - [ ] Shop-agent BUILD (design grilled and locked — full decision record in "Shop-agent
-      design" section above; follow its build order 1-7). Nothing implemented yet.
+      design" section above; follow its build order 1-7). DONE: (1) tag wiring [see own
+      item], (2) `jackdaw/agents/shop_action_space.py` — Discrete(686), offsets pinned in
+      `tests/agents/test_shop_action_space.py`, (3) `jackdaw/agents/greedy_hand_policy.py`
+      — subset-search greedy baseline (NOTE: `get_best_hand` follows Lua played-selection
+      semantics, flush/straight never detect on >5 cards — hence the C(8,5) search; wins
+      ~4/6 ante-1 runs at stake 1), (4) `jackdaw/env/shop_run_adapter.py` — full-run
+      episodes, hand_policy auto-resolve, `win_ante` horizon knob (engine advances ante
+      before the won flag halts, so a win at N leaves ante N+1), pickle snapshot/restore
+      with byte-identical RNG continuation verified in
+      `tests/env/test_shop_run_adapter.py`. REMAINING: (5) joker_descriptors + shop_policy
+      (embeddings + union encoders), (6) shop_gym (pending-target state machine, reward
+      components in info), (7) train_shop_ppo + eval_shop_policy.
 - [x] Engine tag-context wiring (all 7 previously-unwired contexts now fire; tested in
       `tests/engine/test_tag_wiring.py`, 19 tests):
       - `fire_tag_context(gs, context, first_only=..., **kwargs)` in `tags.py` is the
@@ -412,6 +423,30 @@ the two tracks ended up with different training strategies.
       verify the solver handles boss debuffs through `score_hand`, add the preset,
       generate after stage 3 on the fast box, fold into the BC pool before s0 trains in
       earnest.
+- [ ] KNOWN OBS LIMITATION — flush/straight structure invisible to the "best hand"
+      features (decided: fix at the h1 regeneration seam, NOT now):
+      `observation.py::_compute_hand_analysis` calls `get_best_hand` on the FULL 8-card
+      hand, but that function ports Lua's played-selection semantics — flush/straight
+      predicates only fire within a <=5-card selection, so on 8 cards they NEVER
+      detect (verified empirically: a hand containing a complete heart flush reports
+      "High Card"; rank-multiple types like Pair still detect fine). Consequence:
+      `is_best_hand_card` (card feature 13) and the GC hand_type_vec are
+      systematically blind to suit/sequence structure — exactly the cases hardest to
+      reconstruct from raw features (suit is a scalar ordinal; mean/max pooling
+      destroys counts). It's CONSISTENT (same at gen + inference, nothing false), so
+      it's an informativeness gap, not correctness. Expected effect: h-agent weaker on
+      flush/straight boards; second-order, s0 will undervalue flush-shaped jokers
+      (its values are "given how h0 plays"). Why the self-lock doesn't close: h1's BC
+      pool stays domain-randomized (stage 2 over-represents suit jokers), the obs fix
+      lands before s1 re-values, and the count-based bonus keeps s-agents sampling
+      underused joker sets. Fix plan: O(n) "hand potential" features (max same-suit
+      count, straight-window occupancy, rank-multiplicity profile — conveys draws
+      too, and respects the <500us encode budget; do NOT subset-search like
+      `greedy_hand_policy._best_selection`, 56 evals ~ 3ms blows it), schema-version
+      bump, regenerate at h1 (all shards store encoded arrays). DIAGNOSTIC GATE: when
+      h0 lands, decompose eval clear-rate vs solver ceiling by board archetype
+      (flush-relevant / straight-relevant / pair-family); a large flush-bucket gap
+      pulls the fix forward to the stage-4 regeneration seam instead.
 - [ ] Bootstrap loop orchestration (h0 -> s0 -> rollout -> h1 -> s1 -> ...).
 - [ ] Server-log parser for money/ante/failure calibration statistics (not started; only
       manual `grep` exploration done so far on two 1000-2000 line samples).
