@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from jackdaw.agents.greedy_hand_policy import GreedyHandPolicy
+from jackdaw.agents.greedy_hand_policy import GreedyHandPolicy, estimate_best_hand_type
 from jackdaw.engine.actions import (
     CashOut,
     Discard,
@@ -94,6 +94,52 @@ class TestDecisionRule:
             again = GreedyHandPolicy()(gs)
             assert type(again) is type(first)
             assert again.card_indices == first.card_indices
+
+
+class TestEstimateBestHandType:
+    def test_detects_flush_on_full_eight_card_hand(self):
+        # A full 8-card hand where get_best_hand on the whole hand would
+        # miss the flush entirely (it only detects within <=5-card
+        # selections) -- estimate_best_hand_type must still find it via
+        # the C(8,5) subset search.
+        hand = _cards(
+            (Suit.HEARTS, Rank.ACE),
+            (Suit.HEARTS, Rank.KING),
+            (Suit.HEARTS, Rank.NINE),
+            (Suit.HEARTS, Rank.SIX),
+            (Suit.HEARTS, Rank.TWO),
+            (Suit.SPADES, Rank.THREE),
+            (Suit.CLUBS, Rank.FOUR),
+            (Suit.DIAMONDS, Rank.JACK),
+        )
+        assert estimate_best_hand_type(hand, []) == "Flush"
+
+    def test_matches_greedy_policy_choice(self):
+        # Same hand as test_discards_chaff_on_weak_hand -- best line is a
+        # pair, which is what GreedyHandPolicy's own detection picks.
+        hand = _cards(
+            (Suit.HEARTS, Rank.ACE),
+            (Suit.SPADES, Rank.ACE),
+            (Suit.CLUBS, Rank.TEN),
+            (Suit.DIAMONDS, Rank.NINE),
+            (Suit.HEARTS, Rank.SEVEN),
+            (Suit.SPADES, Rank.FIVE),
+            (Suit.CLUBS, Rank.FOUR),
+            (Suit.DIAMONDS, Rank.TWO),
+        )
+        assert estimate_best_hand_type(hand, []) == "Pair"
+
+    def test_deterministic(self):
+        hand = _cards(
+            (Suit.HEARTS, Rank.KING),
+            (Suit.SPADES, Rank.QUEEN),
+            (Suit.CLUBS, Rank.NINE),
+            (Suit.DIAMONDS, Rank.SEVEN),
+            (Suit.HEARTS, Rank.FIVE),
+        )
+        first = estimate_best_hand_type(hand, [])
+        for _ in range(3):
+            assert estimate_best_hand_type(hand, []) == first
 
 
 class TestDrivesRealGame:

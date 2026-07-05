@@ -72,6 +72,22 @@ def _best_selection(hand: list, flags: dict[str, bool]) -> tuple[str, set[int]]:
     return best_name, best_ids
 
 
+def estimate_best_hand_type(hand: list, jokers: list) -> str:
+    """Cheap best-detectable hand-type name for ``hand`` (e.g. ``"Flush"``).
+
+    Public wrapper around ``_best_selection`` for callers that need a fast
+    "what's this hand's best line" estimate without a full policy decision
+    -- e.g. ``HandPlayAdapter``'s boss round-history sampling, which needs
+    a hand-type name in the same format ``Blind.debuff_hand`` compares
+    against (``hands_used`` keys / ``only_hand``). Uses the same
+    ``get_best_hand`` call ``debuff_hand`` does internally, so name
+    formats always agree by construction.
+    """
+    flags = get_hand_eval_flags(jokers)
+    name, _ = _best_selection(hand, flags)
+    return name
+
+
 class GreedyHandPolicy:
     """Play the engine-detected best hand; discard chaff first if it's weak.
 

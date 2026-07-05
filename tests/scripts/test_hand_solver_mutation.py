@@ -74,6 +74,59 @@ def test_wee_joker_and_lucky_cat_do_not_accumulate_on_caller_joker() -> None:
         assert after.ability == before.ability, "joker ability mutated"
 
 
+def test_eye_history_not_corrupted_by_hypothetical_evals() -> None:
+    """Regression: score_hand mutates Blind.hands_used on EVERY call (The
+    Eye), hypothetical or not. Before fast_clone_blind existed, two
+    unrelated hypothetical evaluations of the same hand type -- neither
+    ever actually played -- would corrupt each other: the second would
+    incorrectly read as already-used and score 0."""
+    hand_levels = HandLevels()
+    blind = Blind.create("bl_eye", ante=1)
+    rng = PseudoRandom("EYE_MUTATION_CHECK")
+
+    pair_a = [
+        create_playing_card(Suit.HEARTS, Rank.ACE),
+        create_playing_card(Suit.SPADES, Rank.ACE),
+    ]
+    pair_b = [
+        create_playing_card(Suit.HEARTS, Rank.KING),
+        create_playing_card(Suit.SPADES, Rank.KING),
+    ]
+
+    first = evaluate_value(pair_a, [], [], hand_levels, blind, rng, search_orderings=False)
+    second = evaluate_value(pair_b, [], [], hand_levels, blind, rng, search_orderings=False)
+
+    assert first.debuffed is False and first.total > 0
+    assert second.debuffed is False and second.total > 0
+    assert blind.hands_used == {}, "hypothetical evals must never touch the real Blind"
+
+
+def test_mouth_history_not_corrupted_by_hypothetical_evals() -> None:
+    """Same regression as the Eye test above, for The Mouth's only_hand."""
+    hand_levels = HandLevels()
+    blind = Blind.create("bl_mouth", ante=1)
+    rng = PseudoRandom("MOUTH_MUTATION_CHECK")
+
+    pair = [
+        create_playing_card(Suit.HEARTS, Rank.ACE),
+        create_playing_card(Suit.SPADES, Rank.ACE),
+    ]
+    three_of_a_kind = [
+        create_playing_card(Suit.HEARTS, Rank.KING),
+        create_playing_card(Suit.SPADES, Rank.KING),
+        create_playing_card(Suit.CLUBS, Rank.KING),
+    ]
+
+    first = evaluate_value(pair, [], [], hand_levels, blind, rng, search_orderings=False)
+    second = evaluate_value(
+        three_of_a_kind, [], [], hand_levels, blind, rng, search_orderings=False
+    )
+
+    assert first.debuffed is False and first.total > 0
+    assert second.debuffed is False and second.total > 0
+    assert blind.only_hand is None, "hypothetical evals must never touch the real Blind"
+
+
 def test_repeated_evaluation_is_idempotent() -> None:
     """Calling evaluate_value twice on the same objects must give the same
     result -- if state leaked across calls, the second call would see

@@ -15,7 +15,9 @@ import random
 
 import pytest
 
+from jackdaw.agents.greedy_hand_policy import estimate_best_hand_type
 from jackdaw.engine.actions import Discard, GamePhase, PlayHand
+from jackdaw.engine.data.hands import HAND_ORDER
 from jackdaw.env.game_interface import GameAdapter
 from jackdaw.env.hand_play_adapter import (
     _SCALING_SPECS,
@@ -23,6 +25,8 @@ from jackdaw.env.hand_play_adapter import (
     HandPlayConfig,
     JokerCountBand,
 )
+
+_ALL_HAND_TYPES = {ht.value for ht in HAND_ORDER}
 
 SEED = "TEST_HAND_PLAY_1"
 BACK = "b_red"
@@ -337,3 +341,126 @@ def test_all_scaling_spec_keys_exist_and_fields_resolve() -> None:
                 f"{key}: field path {spec.field} broken at {part!r}"
             )
             value = value[part]
+
+
+# ---------------------------------------------------------------------------
+# Boss round-history injection (The Eye / The Mouth)
+# ---------------------------------------------------------------------------
+
+
+def _force_boss(monkeypatch, boss_key: str) -> None:
+    """Pin blind selection to a specific boss key regardless of ante/RNG --
+    ``get_new_boss`` is imported lazily inside ``reset()``, so patching the
+    module attribute before calling reset() is picked up correctly."""
+    monkeypatch.setattr(
+        "jackdaw.engine.blind.get_new_boss", lambda *a, **k: boss_key, raising=True
+    )
+
+
+def _reset_boss(monkeypatch, boss_key: str, cfg: HandPlayConfig, seed: str = SEED):
+    _force_boss(monkeypatch, boss_key)
+    adapter = HandPlayAdapter(cfg)
+    adapter.reset(BACK, STAKE, seed)
+    return adapter
+
+
+def test_boss_history_noop_at_hands_played_zero(monkeypatch) -> None:
+    cfg = HandPlayConfig(blind_stages=("Boss",), boss_history_hands_played_range=(0, 0))
+    adapter = _reset_boss(monkeypatch, "bl_eye", cfg)
+    blind = adapter.raw_state["blind"]
+    assert blind.name == "The Eye"
+    assert blind.hands_used == {}
+    assert blind.only_hand is None
+
+
+def test_eye_history_marks_k_distinct_hand_types(monkeypatch) -> None:
+    cfg = HandPlayConfig(blind_stages=("Boss",), boss_history_hands_played_range=(2, 2))
+    adapter = _reset_boss(monkeypatch, "bl_eye", cfg)
+    blind = adapter.raw_state["blind"]
+    assert len(blind.hands_used) == 2
+    assert set(blind.hands_used).issubset(_ALL_HAND_TYPES)
+
+
+def test_eye_history_weight_one_always_blocks_best_hand(monkeypatch) -> None:
+    cfg = HandPlayConfig(
+        blind_stages=("Boss",),
+        boss_history_hands_played_range=(1, 1),
+        boss_history_best_hand_weight=1.0,
+    )
+    for i in range(20):
+        adapter = _reset_boss(monkeypatch, "bl_eye", cfg, seed=f"EYE_W1_{i}")
+        gs = adapter.raw_state
+        best_type = estimate_best_hand_type(gs["hand"], gs["jokers"])
+        assert best_type in gs["blind"].hands_used
+
+
+def test_eye_history_weight_zero_never_blocks_best_hand(monkeypatch) -> None:
+    cfg = HandPlayConfig(
+        blind_stages=("Boss",),
+        boss_history_hands_played_range=(1, 1),
+        boss_history_best_hand_weight=0.0,
+    )
+    for i in range(20):
+        adapter = _reset_boss(monkeypatch, "bl_eye", cfg, seed=f"EYE_W0_{i}")
+        gs = adapter.raw_state
+        best_type = estimate_best_hand_type(gs["hand"], gs["jokers"])
+        assert best_type not in gs["blind"].hands_used
+
+
+def test_mouth_history_locks_one_hand_type(monkeypatch) -> None:
+    cfg = HandPlayConfig(blind_stages=("Boss",), boss_history_hands_played_range=(1, 1))
+    adapter = _reset_boss(monkeypatch, "bl_mouth", cfg)
+    blind = adapter.raw_state["blind"]
+    assert blind.only_hand in _ALL_HAND_TYPES
+
+
+def test_mouth_history_is_uniform_not_correlated_with_best_hand(monkeypatch) -> None:
+    """The Mouth's lock represents an unseen, different hand (the round's
+    actual first hand) -- it must NOT be weighted toward the current hand's
+    best-detectable line the way The Eye's history is."""
+    cfg = HandPlayConfig(blind_stages=("Boss",), boss_history_hands_played_range=(1, 1))
+    matches = 0
+    n = 60
+    for i in range(n):
+        adapter = _reset_boss(monkeypatch, "bl_mouth", cfg, seed=f"MOUTH_UNIFORM_{i}")
+        gs = adapter.raw_state
+        best_type = estimate_best_hand_type(gs["hand"], gs["jokers"])
+        if gs["blind"].only_hand == best_type:
+            matches += 1
+    # Uniform over ~12 types -> ~n/12 matches by chance; a weighted
+    # implementation would saturate near n. Generous upper bound to avoid
+    # flaking on the small sample while still catching a correlation bug.
+    assert matches < n * 0.4, f"only_hand looks correlated with best_type ({matches}/{n})"
+
+
+def test_randomize_boss_history_false_disables_feature(monkeypatch) -> None:
+    cfg = HandPlayConfig(
+        blind_stages=("Boss",),
+        boss_history_hands_played_range=(3, 3),
+        randomize_boss_history=False,
+    )
+    adapter = _reset_boss(monkeypatch, "bl_eye", cfg)
+    blind = adapter.raw_state["blind"]
+    assert blind.hands_used == {}
+    assert blind.only_hand is None
+
+
+def test_non_history_boss_unaffected_by_range(monkeypatch) -> None:
+    cfg = HandPlayConfig(blind_stages=("Boss",), boss_history_hands_played_range=(3, 3))
+    adapter = _reset_boss(monkeypatch, "bl_flint", cfg)
+    blind = adapter.raw_state["blind"]
+    assert blind.name == "The Flint"
+    assert blind.hands_used == {}
+    assert blind.only_hand is None
+
+
+def test_the_ox_unaffected_by_boss_history(monkeypatch) -> None:
+    """The Ox is deliberately excluded -- its debuff depends on
+    HandLevels.most_played (run-cumulative usage counts), the pre-existing
+    deferred gap, not Blind-instance state this feature can fake."""
+    cfg = HandPlayConfig(blind_stages=("Boss",), boss_history_hands_played_range=(3, 3))
+    adapter = _reset_boss(monkeypatch, "bl_ox", cfg)
+    blind = adapter.raw_state["blind"]
+    assert blind.name == "The Ox"
+    assert blind.hands_used == {}
+    assert blind.only_hand is None

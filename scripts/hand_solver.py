@@ -64,6 +64,9 @@ from jackdaw.engine.play_ordering import (
     count_order_sensitive_sources as _count_order_sensitive_sources,  # noqa: F401
 )
 from jackdaw.engine.play_ordering import (
+    fast_clone_blind as _fast_clone_blind,
+)
+from jackdaw.engine.play_ordering import (
     fast_clone_card as _fast_clone_card,
 )
 from jackdaw.engine.play_ordering import (
@@ -424,11 +427,18 @@ def evaluate_value(
     for order in orderings:
         # Fast clones, not copy.deepcopy -- see the module-level comment
         # above _fast_clone_card for why this is safe (score_hand mutates
-        # card/joker/hand_levels/rng state in place, so isolation between
-        # trials is required either way; the fast clones just do it without
-        # generic deepcopy's reflection overhead).
+        # card/joker/hand_levels/rng/blind state in place, so isolation
+        # between trials is required either way; the fast clones just do it
+        # without generic deepcopy's reflection overhead). blind ALSO needs
+        # a clone here (not just hand_levels/rng/cards): under a
+        # history-dependent boss (The Eye/The Mouth), score_hand mutates
+        # blind.hands_used/only_hand on every call regardless of whether
+        # this is the chosen play -- without cloning, two purely
+        # hypothetical evaluations of the same hand type would corrupt each
+        # other (the second incorrectly reads as already-used/mismatched).
         hl_copy = _fast_clone_hand_levels(hand_levels)
         rng_copy = _fast_clone_rng(rng)
+        blind_copy = _fast_clone_blind(blind)
         played_copy = [_fast_clone_card(c) for c in order]
         held_copy = [_fast_clone_card(c) for c in held_cards]
         jokers_copy = [_fast_clone_card(j) for j in jokers]
@@ -437,7 +447,7 @@ def evaluate_value(
             held_copy,
             jokers_copy,
             hl_copy,
-            blind,
+            blind_copy,
             rng_copy,
             game_state=game_state,
             blind_chips=blind_chips,
@@ -820,8 +830,16 @@ def rank_templates_cheaply(
                 continue
             eval_cards = (hold + _best_completion_cards(deck, template, still_needed))[:5]
 
+        # blind clone: see the note in evaluate_value -- this loop tries
+        # many candidate templates per decision, and score_hand_base
+        # mutates history-dependent boss state (The Eye/The Mouth) on every
+        # hypothetical call, not just the eventually-chosen one.
         cheap_result = score_hand_base(
-            eval_cards, [], _fast_clone_hand_levels(hand_levels), blind, _fast_clone_rng(rng)
+            eval_cards,
+            [],
+            _fast_clone_hand_levels(hand_levels),
+            _fast_clone_blind(blind),
+            _fast_clone_rng(rng),
         )
         scored.append((template, hold, kept, discard, p_reach, cheap_result.total, still_needed))
 

@@ -280,6 +280,28 @@ def test_stage3_pool_is_all_150_jokers() -> None:
     assert presets["stage3_full"].config.joker_pool == keys
 
 
+def test_stage4_boss_preset_is_boss_only_full_pool() -> None:
+    presets = stage_presets()
+    cfg = presets["stage4_boss"].config
+    assert cfg.blind_stages == ("Boss",)
+    assert cfg.joker_pool == all_joker_keys()
+    assert cfg.joker_count_bands == DEFAULT_COUNT_BANDS
+    assert presets["stage4_boss"].total_examples == 8_000
+
+
+def test_stage4_boss_preset_always_samples_a_boss(monkeypatch) -> None:
+    """blind_stages=("Boss",) means sampler.choice has only one option --
+    every reset() must land on a boss, never Small/Big."""
+    from jackdaw.env.hand_play_adapter import HandPlayAdapter
+
+    cfg = stage_presets()["stage4_boss"].config
+    for i in range(10):
+        adapter = HandPlayAdapter(cfg)
+        state = adapter.reset("b_red", 1, f"STAGE4_SMOKE_{i}")
+        assert state.blind_on_deck == "Boss"
+        assert adapter.raw_state["blind"].boss is True
+
+
 def test_stage_presets_are_generatable() -> None:
     """Every preset must produce a valid HandPlayConfig that reset() accepts
     (band counts within pool and joker_slots) — catches preset drift."""

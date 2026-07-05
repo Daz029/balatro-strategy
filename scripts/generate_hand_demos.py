@@ -172,6 +172,22 @@ def stage_presets() -> dict[str, StagePreset]:
             ),
             total_examples=20_000,
         ),
+        # Boss-blind-only supplement: stages 1-3 already cover Small/Big
+        # broadly, so this stage exists purely to give h0 exposure to boss
+        # debuffs (an h0 that's never seen a Boss folds there, distorting
+        # every s0 shop value toward "we die anyway" -- see CLAUDE.md). All
+        # 150 jokers (same pool as stage3) so boss awareness and full joker
+        # coverage compound rather than trading off against each other.
+        # 8000 x 1/~24 boss keys ~= 330 appearances per boss -- provisional,
+        # same spirit as stage3's marginal-exposure-not-coverage framing.
+        "stage4_boss": StagePreset(
+            config=HandPlayConfig(
+                joker_pool=all_joker_keys(),
+                joker_count_bands=DEFAULT_COUNT_BANDS,
+                blind_stages=("Boss",),
+            ),
+            total_examples=8_000,
+        ),
     }
 
 

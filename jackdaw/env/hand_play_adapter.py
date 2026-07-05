@@ -53,7 +53,7 @@ class HandPlayConfig:
     for the initial curriculum stage (see CLAUDE.md curriculum: no jokers ->
     small random joker subsets -> full random coverage). Boss selection is
     ante-correct if enabled (see :meth:`reset`), so widening ``blind_stages``
-    to include ``"Boss"`` later is safe.
+    to include ``"Boss"`` later is safe (used by the stage-4 boss preset).
 
     ``dollars_range`` is sampled flat/uniform regardless of ante — this is a
     stage-1/2 placeholder, not a claim that money is ante-independent in real
@@ -83,6 +83,32 @@ class HandPlayConfig:
     (Throwback, Fortune Teller) read from game state.  Known gap, deferred:
     hand *levels* (Planet upgrades) and per-hand-type usage counts
     (Supernova) are still always at run-start values.
+
+    ``randomize_boss_history`` controls The Eye / The Mouth round-history
+    injection (see :func:`_randomize_boss_history`). Every generated example
+    is a single isolated snapshot (``reset()`` -> solve -> label; the engine
+    is never stepped forward through prior hand-turns before labeling), so
+    ``hands_used``/``only_hand`` can only ever be genuinely set by a real
+    decision *within this same trajectory* — which never exists at
+    generation time. Faking a plausible history is therefore an honest
+    approximation only for the two bosses whose constraint lives directly on
+    the ``Blind`` instance (The Eye, The Mouth); The Ox depends on
+    run-cumulative per-hand-type play counts (``HandLevels.most_played``),
+    which is the hand-levels/usage-count gap already noted above —
+    deliberately not duplicated here. When ``boss_history_hands_played_range``
+    samples 0, no history is injected (the correct "first hand of the round"
+    default). Otherwise: The Eye gets that many distinct hand-types marked
+    used, with probability ``boss_history_best_hand_weight`` forcing the
+    current hand's own best-detectable line (``estimate_best_hand_type``) to
+    be one of them — deliberately weighted toward the case where a build
+    that's only good at one hand type gets punished, since that is exactly
+    the resulting-state distribution a build/shop-value signal needs to see
+    to learn to value flexibility. The Mouth's lock is plain uniform over all
+    hand types (no correlation to the current hand) — its "first hand of the
+    round" is a different, unseen hand this adapter has no principled way to
+    reconstruct, so biasing it toward *this* hand's best line would just be
+    wrong, not adversarial. Both constants are provisional, same as every
+    other hyperparameter in this file.
     """
 
     ante_range: tuple[int, int] = (1, 8)
@@ -94,6 +120,9 @@ class HandPlayConfig:
     blind_stages: tuple[str, ...] = ("Small", "Big")
     joker_count_bands: tuple[JokerCountBand, ...] | None = None
     randomize_joker_state: bool = True
+    randomize_boss_history: bool = True
+    boss_history_hands_played_range: tuple[int, int] = (0, 3)
+    boss_history_best_hand_weight: float = 0.05
 
 
 # ---------------------------------------------------------------------------
@@ -228,6 +257,61 @@ def _apply_scaling_state(joker: Any, spec: _ScalingSpec, ante: int, sampler: ran
         _set_path(joker.ability, spec.field, value)
 
 
+# ---------------------------------------------------------------------------
+# Boss round-history injection (The Eye / The Mouth only -- see
+# HandPlayConfig.randomize_boss_history docstring for why The Ox is excluded
+# and why single-snapshot generation makes this an honest thing to fake in
+# the first place).
+# ---------------------------------------------------------------------------
+
+_HISTORY_BOSSES = frozenset({"The Eye", "The Mouth"})
+
+
+def _randomize_boss_history(
+    gs: dict[str, Any],
+    cfg: HandPlayConfig,
+    sampler: random.Random,
+) -> None:
+    """Populate ``blind.hands_used`` (The Eye) / ``blind.only_hand`` (The
+    Mouth) so an injected mid-round episode doesn't always look like the
+    first hand of the round. No-op for every other boss (including The Ox --
+    see the class docstring)."""
+    if not cfg.randomize_boss_history:
+        return
+    blind = gs.get("blind")
+    if blind is None or getattr(blind, "name", None) not in _HISTORY_BOSSES:
+        return
+
+    hands_played = sampler.randint(*cfg.boss_history_hands_played_range)
+    if hands_played <= 0:
+        return  # first hand of the round: empty history is already correct
+
+    from jackdaw.agents.greedy_hand_policy import estimate_best_hand_type
+    from jackdaw.engine.data.hands import HAND_ORDER
+
+    all_types = [ht.value for ht in HAND_ORDER]
+
+    if blind.name == "The Eye":
+        best_type = estimate_best_hand_type(gs.get("hand", []), gs.get("jokers", []))
+        k = min(hands_played, len(all_types))
+        others = [t for t in all_types if t != best_type]
+        sampler.shuffle(others)
+        used = set(others[:k])
+        if sampler.random() < cfg.boss_history_best_hand_weight:
+            # best_type is never already in `used` (built from `others`,
+            # which excludes it), so this always grows by one -- drop an
+            # arbitrary existing entry first to keep the count at k.
+            if len(used) >= k:
+                used.discard(next(iter(used)))
+            used.add(best_type)
+        blind.hands_used = {t: True for t in used}
+
+    elif blind.name == "The Mouth":
+        # Uniform: the round's actual first hand is a different, unseen
+        # draw this adapter has no way to reconstruct -- see docstring.
+        blind.only_hand = sampler.choice(all_types)
+
+
 class HandPlayAdapter:
     """GameAdapter that starts episodes mid-run, directly in hand-play.
 
@@ -354,6 +438,7 @@ class HandPlayAdapter:
 
         self._gs = gs
         engine_step(self._gs, SelectBlind())
+        _randomize_boss_history(self._gs, cfg, sampler)
         return snapshot(self._gs)
 
     def step(self, action: Action) -> GameState:

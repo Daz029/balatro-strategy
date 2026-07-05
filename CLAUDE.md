@@ -421,13 +421,70 @@ the two tracks ended up with different training strategies.
         and skips rerolled cards (assumed yes/yes); (d) a rerolled card is eligible for
         a pending Rare/edition tag (assumed yes); (e) Investment pays after earnings at
         cash-out, so it does NOT affect that round's interest (assumed).
-- [ ] Stage 4 hand-demo preset (boss blinds): h0 has never seen a Boss blind (all three
+- [x] Stage 4 hand-demo preset (boss blinds) — GRILLED AND LOCKED (2026-07-06); built and
+      tested, generation not yet run. h0 had never seen a Boss blind (all three earlier
       stages exclude "Boss" from `blind_stages`), but full-run shop episodes hit one every
-      third blind — an h0 that folds at bosses distorts every s0 shop value toward
-      "we die anyway". The config/obs already support bosses (GC carries boss features);
-      verify the solver handles boss debuffs through `score_hand`, add the preset,
-      generate after stage 3 on the fast box, fold into the BC pool before s0 trains in
-      earnest.
+      third blind — an h0 that folds at bosses distorts every s0 shop value toward "we die
+      anyway".
+      - **Preset** (`generate_hand_demos.py::stage_presets()["stage4_boss"]`):
+        `blind_stages=("Boss",)` only (stages 1-3 already cover Small/Big broadly, so this
+        stage exists purely for boss exposure), full 150-joker pool + `DEFAULT_COUNT_BANDS`
+        (boss awareness and joker coverage compound rather than trading off), 8000 examples
+        (provisional, same "marginal exposure not combinatorial coverage" framing as
+        stage3's 20000/150).
+      - **Key insight that shaped the design**: BC demo generation is single-snapshot —
+        `generate_one_example` calls `reset()` once, solves, labels, and does exactly one
+        `adapter.step()` purely to validate executability before discarding the state. The
+        engine is never stepped forward through a sequence of real hand-turns before
+        labeling. So a history-dependent boss's round state (`Blind.hands_used`/
+        `only_hand`) can only ever be genuinely set by a real decision *within the same
+        trajectory* — which never exists at generation time. Fabricating history is
+        therefore only an honest thing to do for bosses whose constraint lives directly on
+        the `Blind` instance; anything requiring true round history is out of scope by
+        construction, not an oversight (mid-turn PPO rollouts and full runs — which DO call
+        `step()` repeatedly across turns within one episode — are where these debuffs get
+        exercised for real, with no injection needed).
+      - **The Eye** (`HandPlayConfig.randomize_boss_history`, `boss_history_hands_played_range`
+        default `(0,3)`, `boss_history_best_hand_weight` default `0.05`): when sampled
+        hands-played-so-far > 0, marks that many distinct hand-types "used"
+        (`blind.hands_used`), with 5% probability forcing the *current* hand's own
+        best-detectable line (`greedy_hand_policy.estimate_best_hand_type`, promoted to
+        public) to be one of them. Deliberately adversarial: a build that's only good at one
+        hand type should get punished by The Eye more often than chance, since that's
+        exactly the resulting-state distribution a build/shop-value signal needs to see to
+        learn to value flexibility.
+      - **The Mouth**: locks `only_hand` to a plain uniform-random hand type, NOT weighted
+        toward the current hand's best line. Its "first hand of the round" is a genuinely
+        different, unseen hand this adapter has no way to reconstruct — correlating the lock
+        with *this* hand's best type would just be wrong, not adversarial (unlike The Eye,
+        where "already blocked" and "current hand's best type" are the same axis by
+        construction).
+      - **The Ox excluded**: its debuff reads `HandLevels.most_played()`, a run-cumulative
+        per-hand-type play count — the same hand-levels/usage-count gap already documented
+        as deferred elsewhere in this file (grouped with Supernova). Fixing it here would
+        duplicate that fix in a second place; it rides on the existing gap instead.
+      - **Bug found and fixed while building this**: `hand_solver.py` never cloned the
+        `Blind` object — every hypothetical `score_hand`/`score_hand_base` call (template
+        ranking, permutation search, discard-chain recursion, MC future-hand sampling)
+        shared and mutated the SAME blind, since `debuff_hand` has no "preview, don't
+        mutate" mode `score_hand` ever uses. Under The Eye/Mouth this meant two purely
+        hypothetical evaluations of the same hand type — neither ever actually played —
+        would corrupt each other (confirmed via repro: second eval incorrectly read as
+        already-blocked). The exact same bug existed in `play_ordering.py::best_play_order`,
+        which is worse — it drives *real, committed* plays in `HandPlayGymEnv`, so a
+        discarded ordering candidate could corrupt the live game's boss state before the
+        chosen order is even executed. Fixed with `fast_clone_blind` (mirrors the existing
+        `fast_clone_hand_levels`/`fast_clone_rng`/`fast_clone_card` pattern in
+        `play_ordering.py`), applied at every hypothetical call site in both files. This was
+        invisible before because stage1-3 never set `blind.boss=True`, so `debuff_hand`'s
+        history-mutating branches never ran.
+      - Tests: `tests/scripts/test_hand_solver_boss_debuffs.py` (Psychic min-card block,
+        Flint halving, Eye/Mouth blocking via the solver's `evaluate_value`, shared-blind
+        non-corruption through `rank_templates_cheaply`), two regressions added to
+        `tests/scripts/test_hand_solver_mutation.py` for the clone-safety bug, and boss-
+        history sampling coverage in `tests/env/test_hand_play_adapter.py` (weight-1.0/0.0
+        determinism, Mouth's uniformity, the `randomize_boss_history=False` escape hatch,
+        The Ox and non-history bosses left untouched).
 - [ ] KNOWN OBS LIMITATION — flush/straight structure invisible to the "best hand"
       features (decided: fix at the h1 regeneration seam, NOT now):
       `observation.py::_compute_hand_analysis` calls `get_best_hand` on the FULL 8-card

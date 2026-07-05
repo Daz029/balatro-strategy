@@ -29,6 +29,7 @@ from __future__ import annotations
 import itertools
 from typing import Any
 
+from jackdaw.engine.blind import Blind
 from jackdaw.engine.card import Card
 from jackdaw.engine.hand_levels import HandLevels, HandState
 from jackdaw.engine.rng import PseudoRandom
@@ -62,6 +63,17 @@ MAX_PERMUTATIONS = 24  # cap on order-permutations tried per value eval
 #     (a flat dataclass of primitives) is reconstructed fresh.
 #   - PseudoRandom._state: mutated via .seed() (Lucky Card et al.) -- all
 #     values are floats/strings, so a shallow dict copy fully suffices.
+#   - Blind.hands_used / .only_hand / .triggered: mutated by debuff_hand on
+#     EVERY call, hypothetical or not (The Eye marks the hand type used, The
+#     Mouth locks the first type it sees) -- score_hand has no "preview,
+#     don't mutate" mode, so every hypothetical evaluation must run against
+#     a throwaway clone or successive hypothetical evaluations corrupt each
+#     other (confirmed: two independent hypothetical evals of the same hand
+#     type under a shared Blind -- neither ever actually played -- would
+#     otherwise see the second one incorrectly blocked). ``hands_used`` is a
+#     dict, so it's the one field needing an explicit copy; everything else
+#     is an immutable scalar (str/float/bool/None), safe by value via
+#     ``__dict__.update``.
 
 
 def fast_clone_ability(ability: dict) -> dict:
@@ -87,6 +99,13 @@ def fast_clone_hand_levels(hl: HandLevels) -> HandLevels:
 def fast_clone_rng(rng: PseudoRandom) -> PseudoRandom:
     clone = PseudoRandom.__new__(PseudoRandom)
     clone._state = dict(rng._state)
+    return clone
+
+
+def fast_clone_blind(blind: Blind) -> Blind:
+    clone = Blind.__new__(Blind)
+    clone.__dict__.update(blind.__dict__)
+    clone.hands_used = dict(blind.hands_used)
     return clone
 
 
@@ -255,8 +274,16 @@ def best_play_order(
     best_order: tuple[Card, ...] | None = None
     best_total = float("-inf")
     for order in orderings:
+        # blind clone (not just hand_levels/rng/cards): this loop scores
+        # several candidate orderings before picking one, and score_hand
+        # mutates history-dependent boss state (The Eye/The Mouth) on
+        # EVERY call. Without this, evaluating a discarded ordering could
+        # corrupt the real, live Blind (e.g. mark a hand type "used" that
+        # was never actually played) before the caller re-executes the
+        # chosen order through the real engine.
         hl_copy = fast_clone_hand_levels(hand_levels)
         rng_copy = fast_clone_rng(rng)
+        blind_copy = fast_clone_blind(blind)
         played_copy = [fast_clone_card(c) for c in order]
         held_copy = [fast_clone_card(c) for c in held_cards]
         jokers_copy = [fast_clone_card(j) for j in jokers]
@@ -265,7 +292,7 @@ def best_play_order(
             held_copy,
             jokers_copy,
             hl_copy,
-            blind,
+            blind_copy,
             rng_copy,
             game_state=game_state,
             blind_chips=blind_chips,
