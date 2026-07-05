@@ -164,9 +164,14 @@ the two tracks ended up with different training strategies.
   slots / pack contents are mixed-type -> union encoding (type one-hot + cost + the
   type's feature layout, absent features zeroed).
   **Identity = learned embeddings + effect descriptors, concatenated**:
-  nn.Embedding(150,16) jokers, (~60,8) consumables, (~32,8) vouchers — shared across
-  owned/shop/pack rows (same item = same vector everywhere; that sharing is what lets
-  "own Lusty Joker" resonate with "shop offers heart synergy"). Rationale: a scalar
+  IMPLEMENTED AS one unified nn.Embedding(NUM_CENTER_KEYS+1=300, 16, padding_idx=0)
+  over the whole centers.json vocabulary (`observation.center_key_id` — the mapping
+  already existed "for embedding table sizing"), instead of the originally-sketched
+  per-type tables — same param budget, sharing property (same item = same vector in
+  owned/shop/pack rows) holds trivially, and mixed-type shop slots need no routing.
+  VOCABULARY FREEZE: ids come from sorted centers.json keys; changing that file
+  reorders ids and corrupts every shop checkpoint (pinned in
+  `tests/agents/test_shop_policy.py::TestVocabularyFreeze`). Rationale: a scalar
   ordinal ID has false geometry (numeric neighbors are unrelated jokers; every gradient
   corrupts neighbors) and makes synergy a 150x150 pointwise lookup; embeddings give
   learnable geometry, descriptors (trigger type / effect family / scaling rate, from the
