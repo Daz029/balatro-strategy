@@ -73,6 +73,14 @@ from jackdaw.env.observation import (  # noqa: E402
 )
 
 SCHEMA_VERSION = 1
+# Demo write width for the hand block. Stays 8 even though the gym env's
+# observation is wider (hand_play_gym.MAX_HAND_CARDS_OBS=12, for The
+# Serpent's over-draw): generation is single-snapshot -- it labels reset
+# states only, whose hands never exceed 8 -- and labels must be encodable
+# in the 8-position canonical action space regardless. train_bc.py's loader
+# zero-pads shard hand blocks up to the observation width at load time
+# (semantically exact under masked pooling), so the invariant is
+# "write width <= MAX_HAND_CARDS_OBS", enforced there.
 MAX_HAND_CARDS = 8
 MAX_JOKERS = 5
 BACK_KEY = "b_red"
