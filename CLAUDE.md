@@ -356,7 +356,12 @@ the two tracks ended up with different training strategies.
         provisional — retune from checkpointed output (tensorboard + eval callback).
       - **`scripts/eval_hand_policy.py`**: fixed suite on reserved `EVAL_` seed prefix (never
         train on it), deterministic clear rate, `--solver-ceiling` caches mean solver p_clear
-        over the same seeds as the exact-play reference.
+        over the same seeds as the exact-play reference. NOTE: for a *ballpark* per-stage
+        ceiling, don't pay `--solver-ceiling` (~12s/seed; 30min+ for joker stages under core
+        contention) — take the mean of the `p_clear` labels already stored in that stage's
+        demo shards (same solver output, thousands of samples, instant; validated 2026-07-06,
+        stage3 label-mean 0.307 vs 50-eval-seed 0.295 agree). `--solver-ceiling` is only worth
+        it for a paired comparison on the exact EVAL_ seeds.
 - [x] Solver 5-card discard cap (found when BC first consumed real stage-1 data: 8.3% of
       labels were 6-8-card discards — unexecutable, the engine caps a discard at 5, and
       reachability had assumed 6-8 replacement draws). `cap_discard` in `hand_solver.py`
@@ -371,6 +376,28 @@ the two tracks ended up with different training strategies.
       against the canonical Discrete(436) mask, tier 2 executes it through the real engine
       (destructive, runs after obs encoding on the throwaway state; ~0.5ms vs 2-12s/solve).
       Failures land in `worker_N_failures.jsonl` per the existing skip-not-fatal design.
+- [x] h0 first real BC run + eval (2026-07-06). `scripts/train_bc.py` on all four stages
+      pooled (stage1+2+3+4 = 33,977 examples, 30,668 train / 3,309 val), max-epochs 25 /
+      patience 2 -> early-stopped at epoch 20, best epoch 18 (val_ce 2.119, val_acc 0.563,
+      val_entropy 2.322, val p_clear MSE 0.057). Checkpoint `runs/bc/h0_s1234_25ep/` (runs/ is
+      gitignored — lives only in the main checkout). CPU-only torch; dataset load over ~3.6k
+      shards is the slow part (~3-4 min). Eval vs solver ceiling (ceiling = mean p_clear from
+      demo labels): stage1 3.7%/0.141 (~26% recovery), stage2 17.3%/0.390 (~44%), stage3
+      16%/0.307 (~52%). Median p_clear is 0.0 in EVERY stage — most domain-randomized states
+      are unwinnable by design, so absolute clear-rate is dominated by the winnable fraction
+      and the ceiling ratio is the real signal. Recovery is a sane pre-PPO BC baseline (weakest
+      on barren no-joker stage1, best on joker stage3), entropy 2.32 preserved for PPO. stage4
+      policy eval is BLOCKED — see the MAX_HAND_CARDS known-obs-limitation item below.
+      - Engine bug found + fixed during this eval (branch `worktree-riffraff-room-check`):
+        Riff-raff created Common Jokers at blind start with NO room check
+        (`game.py::_apply_setting_blind_mutations`, the `ctype=="Joker"` branch), unlike the
+        other create path (`create_jokers`, ~L363). A `GameSnapshot` joker_count taken once up
+        front went stale, so the handler over-returned count=2 and the applier produced 6
+        jokers in a 5-slot game — corrupts real scoring AND crashes the fixed-width obs
+        encoders (MAX_JOKERS=5), which blocked stage3/4 eval. Fixed by capping creation at the
+        actual `len(jokers)` at apply time (true vanilla "if you have room" semantics).
+        Regression tests in `tests/engine/test_jokers_integration.py::TestRiffRaff`; 210 engine
+        tests pass.
 - [ ] Shop-agent BUILD (design grilled and locked — full decision record in "Shop-agent
       design" section above; follow its build order 1-7). DONE: (1) tag wiring [see own
       item], (2) `jackdaw/agents/shop_action_space.py` — Discrete(686), offsets pinned in
@@ -509,6 +536,26 @@ the two tracks ended up with different training strategies.
       h0 lands, decompose eval clear-rate vs solver ceiling by board archetype
       (flush-relevant / straight-relevant / pair-family); a large flush-bucket gap
       pulls the fix forward to the stage-4 regeneration seam instead.
+- [ ] KNOWN OBS LIMITATION — hand-card obs width (`MAX_HAND_CARDS=8`) too small for the
+      boss The Serpent (decided: fix at the h1 regeneration seam TOGETHER WITH the
+      flush/straight fix above, NOT now): The Serpent always draws 3 cards after a play or
+      discard, so discarding fewer than 3 from a full hand legitimately grows the hand to
+      9-10 cards. The hand obs block is fixed at 8 rows (demo schema is 8x15), so
+      `hand_play_gym.py::build_observation` raises `entity count 9 exceeds max 8` mid-round on
+      `step` (verified 2026-07-06, stage4 seed `EVAL_00000236`, blind The Serpent, hand grew
+      to 9). This is NOT a bug — it's a faithful engine state the obs simply can't represent.
+      At reset hand_size is only 7-8; the overflow appears only after a play/discard under The
+      Serpent. Demo generation is single-snapshot (never rolls forward past reset), so it
+      never hit this — training data has zero >8-hand states — but eval AND PPO rollouts on
+      stage4_boss DO. Consequence: no policy clear-rate is obtainable on stage4 until fixed
+      (its solver ceiling, 0.209, is still available from demo labels, since generation only
+      solves the reset state). Fix: widen `MAX_HAND_CARDS` to ~10-12 — but the obs width in
+      `hand_play_gym.py` and the demo write width in `generate_hand_demos.py` must move
+      together — schema-version bump, regenerate all shards + retrain. Same regeneration seam
+      as the flush/straight fix; do them in one pass. Interim option rejected: skipping
+      un-encodable episodes in eval biases stage4 down by dropping The Serpent (a real boss),
+      so it's not a clean number. Distinct from the Riff-raff MAX_JOKERS overfill (that was an
+      engine bug, now fixed; this is a genuine obs-width shortfall, no engine bug involved).
 - [ ] Bootstrap loop orchestration (h0 -> s0 -> rollout -> h1 -> s1 -> ...).
 - [ ] Server-log parser for money/ante/failure calibration statistics (not started; only
       manual `grep` exploration done so far on two 1000-2000 line samples).
