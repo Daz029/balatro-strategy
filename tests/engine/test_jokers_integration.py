@@ -215,6 +215,30 @@ class TestRiffRaff:
         )
         assert calculate_joker(j, ctx) is None
 
+    def test_application_respects_room_even_if_count_too_high(self):
+        """Regression: the setting-blind mutation applier must not overfill
+        past joker_slots even when handed a create-count larger than the
+        available room (a stale GameSnapshot could over-count). Without the
+        room guard, Riff-raff produced 6 jokers in a 5-slot game -- a state
+        the fixed-width obs encoders (MAX_JOKERS=5) cannot represent.
+        """
+        from jackdaw.engine.game import _apply_setting_blind_mutations
+
+        jokers = [_joker("j_joker") for _ in range(4)]  # 1 slot free
+        gs = {"joker_slots": 5}
+        mutations = [{"create": {"type": "Joker", "rarity": "Common", "count": 2}}]
+        _apply_setting_blind_mutations(gs, mutations, jokers)
+        assert len(jokers) == 5  # created 1, not 2 -- capped at joker_slots
+
+    def test_application_creates_nothing_when_full(self):
+        from jackdaw.engine.game import _apply_setting_blind_mutations
+
+        jokers = [_joker("j_joker") for _ in range(5)]  # no room
+        gs = {"joker_slots": 5}
+        mutations = [{"create": {"type": "Joker", "rarity": "Common", "count": 2}}]
+        _apply_setting_blind_mutations(gs, mutations, jokers)
+        assert len(jokers) == 5
+
 
 class TestEightBall:
     def test_rank_8_high_probability(self):
