@@ -7,12 +7,15 @@ ante-play track), deliberately NOT reusing ``BalatroGymnasiumEnv``:
     hand_action_space.py``) instead of the full-run wrapper's per-step,
     randomly-subsampled action table. BC labels map onto fixed indices and
     the policy head's outputs keep stable meanings across BC and PPO.
-  - **Observation = the BC demo-shard schema exactly** (same keys, same
-    shapes as ``scripts/generate_hand_demos.py`` writes), plus an
+  - **Observation = the BC demo-shard schema** (same keys and feature
+    layouts as ``scripts/generate_hand_demos.py`` writes), plus an
     always-masked consumable block reserved for the eventual shop-merge:
     with masked pooling an absent entity type contributes exactly nothing,
     so the dormant block costs nothing and freezes the observation space /
-    checkpoint format across that merge.
+    checkpoint format across that merge. The hand block is wider than the
+    shards' (``MAX_HAND_CARDS_OBS`` = 12 vs 8) for The Serpent's over-draw
+    and +hand-size effects; the BC loader zero-pads shard rows up to it
+    (exact under masked pooling), so shards need no regeneration.
   - **Env-side optimal ordering**: the agent picks a card *subset*; when an
     order-sensitive joker/card is present (Photograph, Hanging Chad, Glass,
     ...), the env submits the subset in the engine-optimal scoring order
@@ -49,7 +52,6 @@ import numpy as np
 from gymnasium import spaces
 
 from jackdaw.agents.hand_action_space import (
-    MAX_HAND_CARDS,
     NUM_HAND_ACTIONS,
     action_to_combo,
     legal_action_mask,
@@ -69,6 +71,27 @@ from jackdaw.env.observation import (
     encode_jokers_batch,
     encode_playing_cards_batch,
 )
+
+# Observation width of the hand block -- deliberately WIDER than the action
+# space's MAX_HAND_CARDS=8 (frozen, see hand_action_space.py): under The
+# Serpent the engine draws exactly 3 cards after every play/discard with no
+# hand-size cap, so the hand legitimately grows past 8 (and growth
+# compounds: each 1-card action nets +2). +hand-size effects (Turtle Bean,
+# Troubadour, Juggler, the Juggle tag, vouchers) push full-run hands to
+# 10-13 as well. 12 covers the realistic range; cards beyond row 12 are
+# TRUNCATED, not an error: the hand is engine-sorted descending and the
+# action space can only address positions 0-7, so dropped rows are the
+# lowest cards and unplayable anyway (the only cost is a sliver of
+# held-card-effect visibility in an extreme tail). Positions 8-11 are
+# visible-but-unplayable by construction -- a known systemic ceiling of the
+# 8-position action space, recorded as an open item in CLAUDE.md (decision
+# deferred to the h1 seam).
+#
+# BC demo shards keep writing 8-wide hand blocks (generation is
+# single-snapshot; reset hands never exceed 8) -- train_bc.py's loader
+# zero-pads them up to this width, which is semantically exact under masked
+# pooling. Widening this constant is therefore NOT a demo-schema change.
+MAX_HAND_CARDS_OBS = 12
 
 MAX_JOKERS = 5
 MAX_CONSUMABLES = 2  # dormant this stage; reserved seam for the shop merge
@@ -102,7 +125,13 @@ def build_observation(gs: dict[str, Any]) -> dict[str, np.ndarray]:
     """
     hand_arr = encode_playing_cards_batch(gs.get("hand", []), gs)
     joker_arr = encode_jokers_batch(gs.get("jokers", []), gs)
-    hand_padded, hand_mask = _pad(hand_arr, MAX_HAND_CARDS, D_PLAYING_CARD)
+    # Truncate (don't raise) on hand overflow -- see MAX_HAND_CARDS_OBS.
+    # Encode the FULL hand first: per-card features (is_best_hand_card, ...)
+    # consider the whole hand, and rows 0..7 must stay index-aligned with
+    # the positions the action space addresses regardless of overflow.
+    hand_padded, hand_mask = _pad(
+        hand_arr[:MAX_HAND_CARDS_OBS], MAX_HAND_CARDS_OBS, D_PLAYING_CARD
+    )
     joker_padded, joker_mask = _pad(joker_arr, MAX_JOKERS, D_JOKER)
     return {
         "global_context": encode_global_context(gs).astype(np.float32),
@@ -122,9 +151,9 @@ def observation_space() -> spaces.Dict:
         {
             "global_context": spaces.Box(-np.inf, np.inf, shape=(D_GLOBAL,), dtype=np.float32),
             "hand_cards": spaces.Box(
-                -np.inf, np.inf, shape=(MAX_HAND_CARDS, D_PLAYING_CARD), dtype=np.float32
+                -np.inf, np.inf, shape=(MAX_HAND_CARDS_OBS, D_PLAYING_CARD), dtype=np.float32
             ),
-            "hand_mask": spaces.Box(0.0, 1.0, shape=(MAX_HAND_CARDS,), dtype=np.float32),
+            "hand_mask": spaces.Box(0.0, 1.0, shape=(MAX_HAND_CARDS_OBS,), dtype=np.float32),
             "jokers": spaces.Box(-np.inf, np.inf, shape=(MAX_JOKERS, D_JOKER), dtype=np.float32),
             "joker_mask": spaces.Box(0.0, 1.0, shape=(MAX_JOKERS,), dtype=np.float32),
             "consumables": spaces.Box(
