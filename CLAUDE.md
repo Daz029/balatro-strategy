@@ -387,9 +387,10 @@ the two tracks ended up with different training strategies.
       are unwinnable by design, so absolute clear-rate is dominated by the winnable fraction
       and the ceiling ratio is the real signal. Recovery is a sane pre-PPO BC baseline (weakest
       on barren no-joker stage1, best on joker stage3), entropy 2.32 preserved for PPO. stage4
-      policy eval was blocked on the hand-obs-width limitation, since fixed (see the
-      MAX_HAND_CARDS_OBS item below); stage4 reference = label-mean ceiling 0.209, h0 stage4
-      rollout deferred until a comparison needs it.
+      policy eval was blocked on the hand-obs-width limitation; after that fix (see the
+      MAX_HAND_CARDS_OBS item below) it ran clean over all 300 eval seeds incl. the
+      previously-crashing EVAL_00000236: 8.7%/0.209 (~41% recovery) — in line with the other
+      joker stages, no boss-specific collapse (stage4 demos were already in the BC pool).
       - Engine bug found + fixed during this eval (branch `worktree-riffraff-room-check`):
         Riff-raff created Common Jokers at blind start with NO room check
         (`game.py::_apply_setting_blind_mutations`, the `ctype=="Joker"` branch), unlike the
@@ -569,10 +570,9 @@ the two tracks ended up with different training strategies.
         enforced in the loader.
       - The flush/straight fix above is now DECOUPLED from this one: it still needs its
         own schema bump + regeneration at the h1 seam (it changes feature layout).
-      - Stage4 eval is unblocked. Baseline decision: use the stage4 demo-label mean
-        p_clear (0.209) as the stage4 reference (per the solver-ceiling-from-labels
-        practice); an h0 policy clear-rate rollout on stage4 is cheap but deliberately
-        deferred — run it when a comparison actually needs it (e.g. pre/post PPO).
+      - Stage4 eval unblocked and RUN (300 episodes, h0): clear_rate 8.7% vs label-mean
+        ceiling 0.209 (~41% recovery, consistent with stages 2-3) — see the h0 BC run
+        item above; `runs/bc/h0_s1234_25ep/eval_stage4_boss.json`.
 - [ ] KNOWN ACTION-SPACE CEILING — 8-position combo enumeration vs big hands (decision
       record 2026-07-06; decide + build at the h1 seam, NOT now): the canonical
       Discrete(436) can only select among hand positions 0-7, but >8-card hands are
