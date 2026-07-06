@@ -408,9 +408,52 @@ the two tracks ended up with different training strategies.
       episodes, hand_policy auto-resolve, `win_ante` horizon knob (engine advances ante
       before the won flag halts, so a win at N leaves ante N+1), pickle snapshot/restore
       with byte-identical RNG continuation verified in
-      `tests/env/test_shop_run_adapter.py`. REMAINING: (5) joker_descriptors + shop_policy
-      (embeddings + union encoders), (6) shop_gym (pending-target state machine, reward
-      components in info), (7) train_shop_ppo + eval_shop_policy.
+      `tests/env/test_shop_run_adapter.py`, (5) `jackdaw/agents/joker_descriptors.py`
+      (300x24 engine-derived descriptor matrix, row 0 = pad) + `jackdaw/env/shop_obs.py`
+      (23-key Dict obs, union item rows, `*_ids` via `center_key_id`, PendingTarget
+      observable bits) + `jackdaw/agents/shop_policy.py` (unified embedding + frozen
+      descriptor buffer + masked-pool trunk; VOCABULARY FREEZE pinned in
+      `tests/agents/test_shop_policy.py`), (6) `jackdaw/env/shop_gym.py` — `ShopGymEnv`,
+      Discrete(686), tested in `tests/env/test_shop_gym.py` (19 tests). Key decisions
+      made while building (6):
+      - Env reward = `1{run won}` ONLY; the per-blind density term is emitted every step
+        as `info["reward_components"]` (`win`, `blinds_cleared`, `blind_bonus` =
+        `blind_clear_bonus(ante_before)` per clear, ante/108 so a full no-skip clear sums
+        to exactly 1) — the beta blend lives in the training script via a wrapper, never
+        in the env. Blind-cleared detection = diff of `gs["round"]` (the engine increments
+        it exactly at blind defeat). The ante-1 Small blind is auto-cleared during
+        `reset()` (no decision precedes it) so episodes see at most 23 credited clears.
+      - Pending-target state machine: carrier (PickPackCard/UseConsumable) with
+        `needs_targets` does NOT step the engine — env stores `PendingTarget`, masks only
+        legal SelectTarget combos (`select_target_mask` over `len(gs["hand"])`), the combo
+        completes as `target_indices` (hand indices; pack_hand lives in `gs["hand"]`).
+        Carrier step returns reward 0/non-terminal. No cancel action. `c_aura` is
+        special-cased to (1,1,True) — its centers.json config is empty (its 1-target rule
+        lives in `can_use_consumable`), so `get_consumable_target_info` alone would treat
+        it as untargeted and use it as a no-op.
+      - PACK_OPENING PickPackCard rows are rebuilt ENV-SIDE (`pack_row_legal`): the
+        engine's `_handle_pick_pack_card` applies picks with NO can_use validation — an
+        unmasked Buffoon pick at full joker slots would overfill past `joker_slots`
+        (Riff-raff-class corruption; TODO: engine-side validation is the real fix). Rules:
+        joker picks need a free slot (negative editions exempt, same as the BuyCard mask);
+        untargeted consumables gate on `can_use_consumable`; targeted ones on
+        `len(hand) >= min_cards`. This also LIFTS `get_action_mask`'s blanket
+        Spectral-pack skip-only restriction (a balatrobot RPC limitation — the engine
+        handles Spectral picks natively and two-step targeting supplies the targets).
+      - `env.snapshot()` bundles the adapter's engine blob + the pending state (restore
+        via `reset(options={"snapshot": blob})` or the `start_state_sampler` hook —
+        `() -> bytes | None`, None = fresh run; the reservoir mixture policy belongs to
+        the training script). Restoring a terminal snapshot raises. Fresh resets retry
+        past (rare) seeds where the hand policy loses the auto-resolved first blind.
+      - s0 fact confirmed while building: targeted consumables are unusable from the
+        owned rows all through s0 — in SHOP the hand is empty (vanilla-consistent), and
+        the engine forbids UseConsumable during PACK_OPENING. The pending-"consumable"
+        path is implemented and unit-tested anyway (the in-blind merge activates it, and
+        `get_action_mask`'s carrier legality — evaluated with an empty highlight set —
+        must be upgraded then).
+      REMAINING: (7) `scripts/train_shop_ppo.py` (MaskablePPO, beta/c blend wrapper,
+      count-based bonus, reservoir sampler) + `scripts/eval_shop_policy.py`; smoke on
+      ante-2 horizon with greedy partner.
 - [x] Engine tag-context wiring (all 7 previously-unwired contexts now fire; tested in
       `tests/engine/test_tag_wiring.py`, 19 tests):
       - `fire_tag_context(gs, context, first_only=..., **kwargs)` in `tags.py` is the
