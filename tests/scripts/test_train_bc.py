@@ -28,9 +28,11 @@ from jackdaw.agents.hand_action_space import (  # noqa: E402
     action_to_combo,
 )
 from jackdaw.agents.hand_policy import HandPlayBCModel  # noqa: E402
-from jackdaw.env.hand_play_gym import observation_space  # noqa: E402
+from jackdaw.env.hand_play_gym import MAX_HAND_CARDS_OBS, observation_space  # noqa: E402
 from jackdaw.env.observation import D_GLOBAL, D_JOKER, D_PLAYING_CARD  # noqa: E402
 
+# Shards write 8-wide hand blocks (the action space's position count); the
+# loader up-pads them to MAX_HAND_CARDS_OBS.
 MAX_HAND_CARDS = 8
 MAX_JOKERS = 5
 
@@ -93,6 +95,10 @@ class TestLoadDataset:
         ds = load_dataset([stage_dir], {})
         assert len(ds) == 80
         assert ds.obs["global_context"].shape == (80, D_GLOBAL)
+        # 8-wide shard hand blocks are up-padded to the observation width.
+        assert ds.obs["hand_cards"].shape == (80, MAX_HAND_CARDS_OBS, D_PLAYING_CARD)
+        assert ds.obs["hand_mask"].shape == (80, MAX_HAND_CARDS_OBS)
+        assert torch.all(ds.obs["hand_mask"][:, MAX_HAND_CARDS:] == 0)
         assert ds.obs["consumables"].shape[0] == 80  # synthesized dormant block
         assert ds.legal_masks.shape == (80, NUM_HAND_ACTIONS)
         # Every label decodes to a 1-5 card combo and is legal.
@@ -131,6 +137,26 @@ class TestLoadDataset:
     def test_missing_dir_raises(self, tmp_path):
         with pytest.raises(FileNotFoundError):
             load_dataset([tmp_path / "empty"], {})
+
+    def test_rejects_overwide_hand_block(self, tmp_path):
+        # A shard wider than the observation space means the widths have
+        # drifted the wrong way round -- must fail, not silently truncate.
+        d = tmp_path / "wide"
+        d.mkdir()
+        rng = np.random.default_rng(3)
+        path = d / "worker_000_shard_00000.npz"
+        _write_synthetic_shard(path, 4, rng=rng)
+        data = dict(np.load(path))
+        extra = MAX_HAND_CARDS_OBS - MAX_HAND_CARDS + 1
+        data["hand_cards"] = np.concatenate(
+            [data["hand_cards"], np.zeros((4, extra, D_PLAYING_CARD), np.float32)], axis=1
+        )
+        data["hand_mask"] = np.concatenate(
+            [data["hand_mask"], np.zeros((4, extra), bool)], axis=1
+        )
+        np.savez_compressed(path, **data)
+        with pytest.raises(ValueError, match="MAX_HAND_CARDS_OBS"):
+            load_dataset([d], {})
 
     def test_stage_weights_applied(self, stage_dir):
         ds = load_dataset([stage_dir], {"stage_synth": 2.5})

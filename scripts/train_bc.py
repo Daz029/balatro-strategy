@@ -58,6 +58,7 @@ from jackdaw.agents.hand_action_space import (  # noqa: E402
 from jackdaw.agents.hand_policy import HandPlayBCModel  # noqa: E402
 from jackdaw.env.hand_play_gym import (  # noqa: E402
     MAX_CONSUMABLES,
+    MAX_HAND_CARDS_OBS,
     observation_space,
 )
 from jackdaw.env.observation import D_CONSUMABLE  # noqa: E402
@@ -94,6 +95,27 @@ class DemoDataset:
             sample_weights=self.sample_weights[idx],
             seeds=[self.seeds[i] for i in idx.tolist()],
         )
+
+
+def _pad_hand_width(arr: np.ndarray, shard_path) -> np.ndarray:
+    """Zero-pad a shard's hand-axis (axis 1) up to ``MAX_HAND_CARDS_OBS``.
+
+    Shards store 8-wide hand blocks (reset hands never exceed the action
+    space's 8 positions); the observation space is wider for The Serpent's
+    over-draw. Zero rows beyond the ``hand_mask`` are exactly what a live
+    ``build_observation`` would produce, so up-padding is semantically
+    exact -- old shards need no regeneration.
+    """
+    width = arr.shape[1]
+    if width > MAX_HAND_CARDS_OBS:
+        raise ValueError(
+            f"{shard_path}: hand width {width} exceeds MAX_HAND_CARDS_OBS="
+            f"{MAX_HAND_CARDS_OBS} -- dataset/code drift"
+        )
+    if width == MAX_HAND_CARDS_OBS:
+        return arr
+    pad = [(0, 0), (0, MAX_HAND_CARDS_OBS - width)] + [(0, 0)] * (arr.ndim - 2)
+    return np.pad(arr, pad)
 
 
 def _reconstruct_legal_mask(global_context: np.ndarray, hand_mask: np.ndarray) -> np.ndarray:
@@ -139,7 +161,10 @@ def load_dataset(data_dirs: list[Path], stage_weights: dict[str, float]) -> Demo
                 )
             n = shard["action_type"].shape[0]
             for key in obs_parts:
-                obs_parts[key].append(shard[key])
+                arr = shard[key]
+                if key in ("hand_cards", "hand_mask"):
+                    arr = _pad_hand_width(arr, shard_path)
+                obs_parts[key].append(arr)
             shard_actions = np.array(
                 [
                     mask_to_action(int(shard["action_type"][i]), shard["card_target_mask"][i])

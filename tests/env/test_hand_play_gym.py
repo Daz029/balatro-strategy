@@ -24,7 +24,11 @@ from jackdaw.agents.hand_action_space import (
 from jackdaw.engine.actions import PlayHand
 from jackdaw.env.action_space import ActionType
 from jackdaw.env.hand_play_adapter import HandPlayConfig
-from jackdaw.env.hand_play_gym import HandPlayGymEnv
+from jackdaw.env.hand_play_gym import (
+    MAX_HAND_CARDS_OBS,
+    HandPlayGymEnv,
+    build_observation,
+)
 
 _DEMO_SCHEMA_KEYS = {"global_context", "hand_cards", "hand_mask", "jokers", "joker_mask"}
 _RESERVED_KEYS = {"consumables", "consumable_mask"}
@@ -128,6 +132,67 @@ class TestEpisodes:
         for seed in range(4):
             total_reward, _, _ = self._run_episode(env, seed, rng)
             assert total_reward in (0.0, 1.0)
+
+
+class TestHandOverflow:
+    """The Serpent (and +hand-size effects) legitimately grow the hand past
+    the action space's 8 positions. The obs block is MAX_HAND_CARDS_OBS=12
+    wide and must encode 9-12 cards, truncating beyond -- never raise."""
+
+    def _grow_hand(self, env: HandPlayGymEnv, target: int) -> dict:
+        gs = env._adapter.raw_state
+        deck = gs["deck"]
+        while len(gs["hand"]) < target and deck:
+            gs["hand"].append(deck.pop())
+        return gs
+
+    def test_oversized_hand_is_encodable(self):
+        env = _no_joker_env()
+        env.reset(seed=0)
+        gs = self._grow_hand(env, MAX_HAND_CARDS_OBS)
+        obs = build_observation(gs)
+        assert env.observation_space.contains(obs)
+        assert int(obs["hand_mask"].sum()) == MAX_HAND_CARDS_OBS
+
+    def test_hand_beyond_obs_width_truncates(self):
+        env = _no_joker_env()
+        env.reset(seed=0)
+        gs = self._grow_hand(env, MAX_HAND_CARDS_OBS + 3)
+        assert len(gs["hand"]) > MAX_HAND_CARDS_OBS
+        obs = build_observation(gs)
+        assert env.observation_space.contains(obs)
+        # Truncated, fully-masked hand block -- and rows stay index-aligned
+        # with action positions (row i is hand[i]).
+        assert int(obs["hand_mask"].sum()) == MAX_HAND_CARDS_OBS
+
+    def test_serpent_overdraw_episode_is_encodable(self):
+        """Regression for the stage4 eval blocker: under The Serpent a
+        discard of fewer than 3 cards grows the hand past 8 mid-round;
+        build_observation used to raise 'entity count 9 exceeds max 8'."""
+        env = HandPlayGymEnv(
+            config=HandPlayConfig(
+                blind_stages=("Boss",), ante_range=(5, 8), discards_range=(2, 3)
+            ),
+            seed_prefix="TESTENV",
+        )
+        for seed in range(300):
+            obs, info = env.reset(seed=seed)
+            if getattr(env._adapter.raw_state["blind"], "name", "") != "The Serpent":
+                continue
+            grew = False
+            for _ in range(2):  # 2nd discard is always Serpent-drawn (+3)
+                action = combo_to_action(ActionType.Discard, (0,))
+                if not env.action_masks()[action]:
+                    break
+                obs, _, terminated, truncated, info = env.step(action)
+                assert env.observation_space.contains(obs)
+                if len(env._adapter.raw_state["hand"]) > 8:
+                    grew = True
+                if terminated or truncated:
+                    break
+            if grew:
+                return
+        pytest.fail("no seed in range produced a growable Serpent hand")
 
 
 class TestEnvSideOrdering:
