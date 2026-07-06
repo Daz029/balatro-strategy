@@ -102,7 +102,7 @@ the two tracks ended up with different training strategies.
   convergence, provably cannot change which policy is optimal. Decay the shaping coefficient
   to zero over training regardless of source.
 
-### Shop-agent design — GRILLED AND LOCKED (2026-07-05); build not started
+### Shop-agent design — GRILLED AND LOCKED (2026-07-05); build COMPLETE (2026-07-06)
 
 - **Decision surface (s0)**: SHOP + PACK_OPENING + UseConsumable-in-shop. Blind select is
   auto-resolved to SelectBlind — SkipBlind deferred to s1: with tag call-sites unwired (see
@@ -401,7 +401,7 @@ the two tracks ended up with different training strategies.
         actual `len(jokers)` at apply time (true vanilla "if you have room" semantics).
         Regression tests in `tests/engine/test_jokers_integration.py::TestRiffRaff`; 210 engine
         tests pass.
-- [ ] Shop-agent BUILD (design grilled and locked — full decision record in "Shop-agent
+- [x] Shop-agent BUILD (design grilled and locked — full decision record in "Shop-agent
       design" section above; follow its build order 1-7). DONE: (1) tag wiring [see own
       item], (2) `jackdaw/agents/shop_action_space.py` — Discrete(686), offsets pinned in
       `tests/agents/test_shop_action_space.py`, (3) `jackdaw/agents/greedy_hand_policy.py`
@@ -433,7 +433,12 @@ the two tracks ended up with different training strategies.
         Carrier step returns reward 0/non-terminal. No cancel action. `c_aura` is
         special-cased to (1,1,True) — its centers.json config is empty (its 1-target rule
         lives in `can_use_consumable`), so `get_consumable_target_info` alone would treat
-        it as untargeted and use it as a no-op.
+        it as untargeted and use it as a no-op. Per-card target constraints live in
+        `legal_target` (currently: Aura requires an editionless target, matching vanilla's
+        disabled-button rule) and apply in TWO places by necessity: filtering the
+        pending-state combo mask, AND gating carrier legality via eligible-target counts
+        (`pack_row_legal` / pending entry) — a carrier entering a pending state with zero
+        legal targets would deadlock the episode, since there is no cancel action.
       - PACK_OPENING PickPackCard rows are rebuilt ENV-SIDE (`pack_row_legal`): the
         engine's `_handle_pick_pack_card` applies picks with NO can_use validation — an
         unmasked Buffoon pick at full joker slots would overfill past `joker_slots`
@@ -454,9 +459,35 @@ the two tracks ended up with different training strategies.
         path is implemented and unit-tested anyway (the in-blind merge activates it, and
         `get_action_mask`'s carrier legality — evaluated with an empty highlight set —
         must be upgraded then).
-      REMAINING: (7) `scripts/train_shop_ppo.py` (MaskablePPO, beta/c blend wrapper,
-      count-based bonus, reservoir sampler) + `scripts/eval_shop_policy.py`; smoke on
-      ante-2 horizon with greedy partner.
+      (7) `scripts/train_shop_ppo.py` + `scripts/eval_shop_policy.py`, tested in
+      `tests/scripts/test_train_shop_ppo.py` (16 tests) and smoke-verified end-to-end
+      (2048 steps, win_ante=2, greedy partner, ~31 fps on this CPU; schedules decayed,
+      reservoir harvested, checkpoint saved+reloaded through eval):
+      - Training-loop side of the split: `ShopRewardWrapper` blends
+        `r + blend_beta * blind_bonus + count_beta * novelty` from
+        `info["reward_components"]`; both coefficients decay linearly to zero via a
+        shared mutable `TrainingSchedules` updated by `ScheduleCallback` from PPO
+        progress (SB3 updates progress at the START of each rollout collection, so a
+        run whose total_timesteps == n_steps never advances it — test gotcha).
+      - `CountBonus`: 1/sqrt(N) on the sorted owned-joker key-set, awarded ONLY when
+        the set changes (per-step awarding would reward loitering in the shop), and on
+        (carrier key, combo size) at pending-target completion.
+      - `ShopReservoir`: strata = (ante, pack_pending) bounded deques; sample() = fresh
+        anchor prob (must be nonzero, enforced) -> pack stratum with prob `pack_frac`
+        (targeting oversampler) -> uniform ante stratum. Harvesting is env-side in the
+        wrapper (`harvest_prob` per non-terminal step). Sharing schedules/counts/
+        reservoir across envs REQUIRES DummyVecEnv (single process; documented).
+      - Horizon curriculum = one invocation per stage; `--init-from prev.zip`
+        (canonical action space + obs schema frozen, so weights load verbatim).
+      - `eval_shop_policy.py`: reserved `EVAL_` seed suite; metrics win_rate,
+        mean_final_ante, mean_rounds_cleared, mean_steps; seeds where the hand policy
+        loses the auto-resolved FIRST blind are excluded and reported as
+        `n_dead_at_reset` (no shop decision influenced them). `--policy nextround` =
+        do-nothing baseline (same partner) isolating shop value from hand skill.
+        BASELINE NUMBER (2026-07-06): nextround @ win_ante=2, greedy partner, 50 eval
+        seeds -> win_rate 0.0 (0/49 played, 1 dead at reset), mean final ante 1.53 —
+        a never-buys shop cannot clear ante 2 with greedy hands, so headroom above the
+        floor is wide open for s0.
 - [x] Engine tag-context wiring (all 7 previously-unwired contexts now fire; tested in
       `tests/engine/test_tag_wiring.py`, 19 tests):
       - `fire_tag_context(gs, context, first_only=..., **kwargs)` in `tags.py` is the
@@ -487,13 +518,18 @@ the two tracks ended up with different training strategies.
         wrote (Double Tag could never fire) and applied only the dollars field of the
         dup (Orbital/Top-up dups silently dropped) — now scans `awarded_tags`, applies
         the full effect, dup entry behaves like a fresh award.
-      - IN-GAME VERIFICATION PENDING (user offered to test in real Balatro; assumptions
-        marked TODO in code): (a) does a tag-forced shop joker still burn the
-        type-selection RNG poll, and does its pool append key differ from 'sho'?
-        (b) exact D6 cost climb ($0 then $1,$2... assumed); (c) Coupon skips vouchers
-        and skips rerolled cards (assumed yes/yes); (d) a rerolled card is eligible for
-        a pending Rare/edition tag (assumed yes); (e) Investment pays after earnings at
-        cash-out, so it does NOT affect that round's interest (assumed).
+      - IN-GAME VERIFICATION COMPLETE (user tested in real Balatro, 2026-07-06):
+        (a) the tag-forced shop joker is generated ON THE SPOT on its own RNG stream —
+        it does NOT grab the next joker from the shop pool sequence. Code CHANGED to
+        match: `create_shop_slot_card` now uses vanilla's tag append keys
+        (`_TAG_APPEND_BY_RARITY` = {2:'uta', 3:'rta'}) instead of 'sho' for the forced
+        create, so the normal shop sequence is untouched (the card that would have
+        filled the slot appears in the next slot); regression-pinned in
+        `test_tag_wiring.py::test_tag_create_does_not_consume_shop_stream`.
+        (b)-(e) all confirmed as implemented, no changes: D6 climb is exactly $0 then
+        $1, $2, ...; Coupon leaves vouchers full price and does NOT apply to rerolled
+        cards; a rerolled card IS eligible for a pending Rare/edition tag; Investment
+        pays after earnings at cash-out, so it does not affect that round's interest.
 - [x] Stage 4 hand-demo preset (boss blinds) — GRILLED AND LOCKED (2026-07-06); built and
       tested, generation not yet run. h0 had never seen a Boss blind (all three earlier
       stages exclude "Boss" from `blind_stages`), but full-run shop episodes hit one every
@@ -662,7 +698,34 @@ the two tracks ended up with different training strategies.
         binds identity to position only via the engine's descending sort; both A and B
         would make that binding direct, which is an independent argument for doing ONE
         of them eventually even if the counter reads low.
-- [ ] Bootstrap loop orchestration (h0 -> s0 -> rollout -> h1 -> s1 -> ...).
+- [x] h0-checkpoint hand-policy wrapper for the shop env's `hand_policy` slot —
+      `jackdaw/agents/hand_checkpoint_policy.py::HandCheckpointPolicy`, tested in
+      `tests/agents/test_hand_checkpoint_policy.py` (10 tests, both BC .pt and PPO .zip
+      kinds). Deterministic masked-argmax, drop-in for `GreedyHandPolicy`. Refactored the
+      shared decode path out of `HandPlayGymEnv` into module-level
+      `hand_play_gym.hand_action_mask` + `action_to_engine_action` (the env methods now
+      delegate; the play path still routes through `best_play_order`), so the wrapper
+      feeds h0 byte-identical inputs to `eval_hand_policy`'s `_BCPolicy` and the >8-card
+      Serpent over-draw degrades identically (obs truncates to 12, Discrete(436) mask
+      spans positions 0-7 = always a legal play; no greedy fallback needed).
+      - EMPIRICAL FINDING (2026-07-07, real h0 = `runs/bc/h0_s1234_25ep`): h0-as-partner
+        is currently WEAKER than the greedy baseline on easy blinds. On EVAL_0..19 at
+        win_ante=1, greedy clears the auto-resolved ante-1 Small blind 20/20; h0 clears
+        it ~13/20 (loses ~35%). Action traces confirm the wrapper is faithful (legal,
+        coherent plays, correct scoring) — h0 simply misplays: undersized plays (e.g. a
+        1-card PlayHand for 16 chips when it needed to score), over-discarding (the
+        documented play-only future-hand label bias), poor budget management. This is
+        expected pre-PPO BC behavior (h0 recovers only ~26-52% of solver ceiling and was
+        deliberately under-trained to preserve entropy) and is exactly what the
+        PPO-fine-tune / bootstrap loop corrects. IMPLICATION for s0: an h0 that folds
+        35% of ante-1 Smalls injects large variance into shop-value estimates (a good
+        purchase looks bad when the partner randomly loses the next blind). Open choice
+        for the bootstrap kickoff — train s0 against greedy first (reliable, low-noise,
+        but the ablation baseline not the real partner) vs h0 (real distribution, noisy),
+        or fine-tune h0 with PPO before wiring it in. Not yet decided.
+- [ ] Bootstrap loop orchestration (h0 -> s0 -> rollout -> h1 -> s1 -> ...). Partner
+      wrapper (HandCheckpointPolicy) and both training scripts now exist; kickoff blocked
+      only on the s0-partner choice recorded in the h0-wrapper item above.
 - [ ] Server-log parser for money/ante/failure calibration statistics (not started; only
       manual `grep` exploration done so far on two 1000-2000 line samples).
 

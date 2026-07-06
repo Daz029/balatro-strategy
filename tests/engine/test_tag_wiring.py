@@ -136,6 +136,22 @@ class TestRareUncommonTags:
             assert card.ability.get("set") == "Joker"
             assert _rarity(card) == 2
 
+    def test_tag_create_does_not_consume_shop_stream(self):
+        # Verified in real Balatro (2026-07-06): the tag joker is generated
+        # on the spot on its OWN RNG stream ('rta'/'uta' appends), so the
+        # normal shop sequence is untouched — the card that would have
+        # filled the slot simply appears in the next slot instead.
+        baseline = _init_gs()
+        _to_shop(baseline)
+
+        tagged = _init_gs()
+        _award(tagged, "tag_rare")
+        _to_shop(tagged)
+
+        assert tagged["shop_cards"][1].center_key == baseline["shop_cards"][0].center_key
+        # And the forced joker itself came from a different stream.
+        assert _rarity(tagged["shop_cards"][0]) == 3
+
     def test_pending_tag_applies_on_reroll(self):
         gs = _init_gs()
         _to_shop(gs)

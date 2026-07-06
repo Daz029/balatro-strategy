@@ -50,9 +50,14 @@ Known s0-scope notes (documented, not bugs):
   pending-``consumable`` path is implemented anyway; it goes live at the
   in-blind merge, where ``get_action_mask``'s carrier legality (it evaluates
   ``can_use_consumable`` with an empty highlight set) must be upgraded.
-* ``select_target_mask`` constrains combo size only; per-card constraints
-  (Aura wants an editionless target) are not expressible, and the handlers
-  degrade gracefully on a bad choice.
+
+``select_target_mask`` constrains combo size only; per-card target
+constraints live in :func:`legal_target` and are applied twice — filtering
+the pending-state combo mask, and gating the carrier itself (a carrier must
+never enter a pending state with zero legal targets: there is no cancel
+action, so that would deadlock the episode). Currently one rule: Aura
+requires an editionless target (vanilla disables it otherwise; the engine
+handler would happily re-edition the card).
 """
 
 from __future__ import annotations
@@ -143,6 +148,28 @@ def consumable_target_info(card: Any) -> tuple[int, int, bool]:
     return get_consumable_target_info(card)
 
 
+# Carriers with per-card target constraints (see legal_target); mask
+# filtering is skipped entirely for everything else.
+_CONSTRAINED_TARGET_KEYS = frozenset({"c_aura"})
+
+
+def legal_target(carrier_key: str, target: Any) -> bool:
+    """Per-card target constraints the size-only combo mask can't express.
+
+    Mirrors the per-card rules in ``can_use_consumable`` that depend on the
+    highlighted card itself (which carrier legality evaluates with an empty
+    highlight set, so they must be re-checked against concrete targets).
+    """
+    if carrier_key == "c_aura":
+        return not getattr(target, "edition", None)
+    return True
+
+
+def _eligible_target_count(card: Any, gs: dict[str, Any]) -> int:
+    key = getattr(card, "center_key", "")
+    return sum(1 for c in gs.get("hand", []) if legal_target(key, c))
+
+
 def pack_row_legal(card: Any, gs: dict[str, Any]) -> bool:
     """Whether picking this pack card is a legal, engine-faithful action.
 
@@ -158,7 +185,7 @@ def pack_row_legal(card: Any, gs: dict[str, Any]) -> bool:
     if card_set in ("Tarot", "Planet", "Spectral"):
         min_cards, _, needs_targets = consumable_target_info(card)
         if needs_targets:
-            return len(gs.get("hand", [])) >= max(1, min_cards)
+            return _eligible_target_count(card, gs) >= max(1, min_cards)
         return can_use_consumable(
             card,
             hand_cards=gs.get("hand", []),
@@ -330,11 +357,19 @@ class ShopGymEnv(gymnasium.Env):
         gs = self._adapter.raw_state
 
         if self._pending is not None:
-            return select_target_mask(
-                len(gs.get("hand", [])),
+            hand = gs.get("hand", [])
+            mask = select_target_mask(
+                len(hand),
                 self._pending.min_cards,
                 self._pending.max_cards,
             )
+            carrier_key = getattr(self._pending_carrier(), "center_key", "")
+            if carrier_key in _CONSTRAINED_TARGET_KEYS:
+                for a in np.flatnonzero(mask):
+                    combo = target_combo_for_action(int(a))
+                    if not all(legal_target(carrier_key, hand[i]) for i in combo):
+                        mask[a] = False
+            return mask
 
         if self._adapter.done or gs.get("phase") not in DECISION_PHASES:
             return np.zeros(NUM_TOTAL_ACTIONS, dtype=bool)
@@ -354,6 +389,20 @@ class ShopGymEnv(gymnasium.Env):
             mask[offset : offset + MAX_PACK_CARDS] = rows
 
         return mask
+
+    # ------------------------------------------------------------------
+    # Public state (training wrappers / diagnostics)
+    # ------------------------------------------------------------------
+
+    @property
+    def raw_state(self) -> dict[str, Any]:
+        """The live engine game-state dict (read-only by convention)."""
+        return self._adapter.raw_state
+
+    @property
+    def pending(self) -> PendingTarget | None:
+        """The pending-target state, if a carrier is awaiting SelectTarget."""
+        return self._pending
 
     # ------------------------------------------------------------------
     # Snapshot / restore (start-state reservoir substrate)
@@ -379,6 +428,14 @@ class ShopGymEnv(gymnasium.Env):
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    def _pending_carrier(self) -> Any:
+        """The card whose pending action is awaiting a SelectTarget combo."""
+        assert self._pending is not None
+        gs = self._adapter.raw_state
+        if self._pending.kind == "pack":
+            return gs.get("pack_cards", [])[self._pending.slot]
+        return gs.get("consumables", [])[self._pending.slot]
 
     def _resolve_action(self, action: int) -> Action | None:
         """Canonical index -> engine action, or ``None`` for a carrier
@@ -408,7 +465,7 @@ class ShopGymEnv(gymnasium.Env):
         if family is ShopActionFamily.UseConsumable:
             card = gs.get("consumables", [])[slot]
             min_cards, max_cards, needs_targets = consumable_target_info(card)
-            if needs_targets and gs.get("hand", []):
+            if needs_targets and _eligible_target_count(card, gs) > 0:
                 self._pending = PendingTarget("consumable", slot, min_cards, max_cards)
                 return None
             return UseConsumable(card_index=slot, target_indices=None)
@@ -419,7 +476,7 @@ class ShopGymEnv(gymnasium.Env):
         if family is ShopActionFamily.PickPackCard:
             card = gs.get("pack_cards", [])[slot]
             min_cards, max_cards, needs_targets = consumable_target_info(card)
-            if needs_targets and gs.get("hand", []):
+            if needs_targets and _eligible_target_count(card, gs) > 0:
                 self._pending = PendingTarget("pack", slot, min_cards, max_cards)
                 return None
             # Untargeted, or (degenerate) no dealt cards to target: the

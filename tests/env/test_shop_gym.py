@@ -22,7 +22,8 @@ from jackdaw.agents.shop_action_space import (
     target_combo_for_action,
 )
 from jackdaw.engine.actions import GamePhase
-from jackdaw.engine.card_factory import create_consumable, create_joker
+from jackdaw.engine.card_factory import create_consumable, create_joker, create_playing_card
+from jackdaw.engine.data.enums import Rank, Suit
 from jackdaw.env.shop_gym import (
     ShopGymEnv,
     blind_clear_bonus,
@@ -197,6 +198,48 @@ class TestPackRowLegality:
 
     def test_aura_special_case(self):
         assert consumable_target_info(create_consumable("c_aura")) == (1, 1, True)
+
+    def test_aura_needs_an_editionless_target(self):
+        # Vanilla disables Aura unless an editionless card can be targeted;
+        # without this gate the carrier could enter a pending state with
+        # zero legal targets (deadlock: no cancel action).
+        aura = create_consumable("c_aura")
+        plain = create_playing_card(Suit.HEARTS, Rank.ACE)
+        foiled = create_playing_card(Suit.SPADES, Rank.KING)
+        foiled.set_edition({"foil": True})
+        assert not pack_row_legal(aura, self._gs(0, hand=[foiled]))
+        assert pack_row_legal(aura, self._gs(0, hand=[foiled, plain]))
+
+
+class TestAuraTargetMask:
+    def test_pending_mask_excludes_editioned_cards(self):
+        env = ShopGymEnv()
+        env.reset(options={"episode_seed": "SHOPGYM_CONTRACT"})
+        gs = env._adapter.raw_state
+        plain = create_playing_card(Suit.HEARTS, Rank.ACE)
+        foiled = create_playing_card(Suit.SPADES, Rank.KING)
+        foiled.set_edition({"foil": True})
+        gs["phase"] = GamePhase.PACK_OPENING
+        gs["pack_cards"] = [create_consumable("c_aura")]
+        gs["pack_choices_remaining"] = 1
+        gs["pack_type"] = "Spectral"
+        gs["hand"] = [foiled, plain]
+
+        pick = shop_action(ShopActionFamily.PickPackCard, 0)
+        assert env.action_masks()[pick]
+        env.step(pick)
+        assert env._pending is not None
+
+        mask = env.action_masks()
+        legal = np.flatnonzero(mask)
+        # Exactly one legal combo: the size-1 combo on the plain card.
+        assert legal.size == 1
+        assert target_combo_for_action(int(legal[0])) == (1,)
+
+        # Completing on the plain card applies a real edition.
+        env.step(int(legal[0]))
+        assert env._pending is None
+        assert plain.edition
 
 
 class TestPendingTargetFlow:

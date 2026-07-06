@@ -324,6 +324,11 @@ def get_pack(
 # key_append used by create_card when called from the shop joker area
 _SHOP_APPEND = "sho"
 
+# key_appends for tag-forced joker creates (vanilla: Uncommon Tag 'uta',
+# Rare Tag 'rta') — their own RNG streams, so a tag-forced joker is
+# generated on the spot and does NOT consume the shop pool sequence.
+_TAG_APPEND_BY_RARITY = {2: "uta", 3: "rta"}
+
 
 def create_shop_slot_card(
     rng: PseudoRandom,
@@ -337,9 +342,10 @@ def create_shop_slot_card(
     * ``store_joker_create`` (Rare/Uncommon Tag): an un-consumed tag
       REPLACES the normal type selection for this slot — the type poll does
       not happen; a Joker of the forced rarity is created directly.
-      TODO(in-game verify): whether vanilla still burns the type-selection
-      RNG poll for a tag-forced slot, and whether the pool append key
-      differs from ``'sho'`` for tag-created jokers.
+      VERIFIED in real Balatro (2026-07-06): the forced joker is generated
+      on the spot on its OWN RNG stream (vanilla appends ``'uta'``/``'rta'``),
+      not drawn from the shop pool sequence — the next normal shop joker is
+      unaffected by the tag create.
     * ``store_joker_modify`` (Foil/Holo/Polychrome/Negative Tag): applies to
       the first base-edition Joker created after the tag was acquired —
       sets the edition AND makes the card free (vanilla wording: "Next base
@@ -361,7 +367,7 @@ def create_shop_slot_card(
             rng,
             ante,
             area="shop",
-            append=_SHOP_APPEND,
+            append=_TAG_APPEND_BY_RARITY.get(result.force_rarity, _SHOP_APPEND),
             forced_rarity=result.force_rarity,
             game_state=gs,
         )

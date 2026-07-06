@@ -129,9 +129,7 @@ def build_observation(gs: dict[str, Any]) -> dict[str, np.ndarray]:
     # Encode the FULL hand first: per-card features (is_best_hand_card, ...)
     # consider the whole hand, and rows 0..7 must stay index-aligned with
     # the positions the action space addresses regardless of overflow.
-    hand_padded, hand_mask = _pad(
-        hand_arr[:MAX_HAND_CARDS_OBS], MAX_HAND_CARDS_OBS, D_PLAYING_CARD
-    )
+    hand_padded, hand_mask = _pad(hand_arr[:MAX_HAND_CARDS_OBS], MAX_HAND_CARDS_OBS, D_PLAYING_CARD)
     joker_padded, joker_mask = _pad(joker_arr, MAX_JOKERS, D_JOKER)
     return {
         "global_context": encode_global_context(gs).astype(np.float32),
@@ -162,6 +160,62 @@ def observation_space() -> spaces.Dict:
             "consumable_mask": spaces.Box(0.0, 1.0, shape=(MAX_CONSUMABLES,), dtype=np.float32),
         }
     )
+
+
+def hand_action_mask(gs: dict[str, Any]) -> np.ndarray:
+    """Discrete(436) legality mask for a hand-play game state.
+
+    All-False off the SELECTING_HAND phase. Module-level so any standalone
+    hand policy (e.g. a checkpoint partner in the shop env) masks exactly
+    like ``HandPlayGymEnv``. On a >8-card hand (The Serpent over-draw) every
+    combo stays in-range (combos only touch positions 0-7), so the mask is
+    always a legal play — the same graceful degradation as the truncating
+    observation.
+    """
+    if gs.get("phase") != GamePhase.SELECTING_HAND:
+        return np.zeros(NUM_HAND_ACTIONS, dtype=bool)
+    cr = gs.get("current_round", {})
+    return legal_action_mask(
+        len(gs.get("hand", [])),
+        cr.get("hands_left", 0),
+        cr.get("discards_left", 0),
+    )
+
+
+def action_to_engine_action(action: int, gs: dict[str, Any]) -> EnginePlayHand | EngineDiscard:
+    """Decode a canonical Discrete(436) index into an engine action.
+
+    A play submits its card *subset* in engine-optimal scoring order via
+    ``best_play_order`` when an order-sensitive joker/card is present (the
+    agent picks a subset; ordering is a mechanical optimization delegated to
+    the engine). Module-level so ``HandPlayGymEnv`` and standalone policies
+    share one decode path.
+    """
+    action_type, combo = action_to_combo(action)
+    if action_type == ActionType.Discard:
+        return EngineDiscard(card_indices=combo)
+
+    hand = gs["hand"]
+    played = [hand[i] for i in combo]
+    jokers = gs.get("jokers", [])
+    if len(played) > 1 and needs_permutation_search(played, jokers):
+        held = [c for i, c in enumerate(hand) if i not in set(combo)]
+        blind = gs.get("blind")
+        ordered = best_play_order(
+            played,
+            held,
+            jokers,
+            gs["hand_levels"],
+            blind,
+            gs["rng"],
+            game_state=gs,
+            blind_chips=getattr(blind, "chips", 0) if blind else 0,
+        )
+        # Map back to hand indices by identity (duplicate-valued cards exist
+        # in Erratic decks; value-equality would collide).
+        id_to_index = {id(c): i for i, c in enumerate(hand)}
+        combo = tuple(id_to_index[id(c)] for c in ordered)
+    return EnginePlayHand(card_indices=combo)
 
 
 class HandPlayGymEnv(gymnasium.Env):
@@ -227,9 +281,7 @@ class HandPlayGymEnv(gymnasium.Env):
             "action_mask": self.action_masks(),
         }
 
-    def step(
-        self, action: int
-    ) -> tuple[dict[str, np.ndarray], float, bool, bool, dict[str, Any]]:
+    def step(self, action: int) -> tuple[dict[str, np.ndarray], float, bool, bool, dict[str, Any]]:
         mask = self.action_masks()
         if not mask[action]:
             # A masked policy can never select these; reaching here means a
@@ -260,47 +312,16 @@ class HandPlayGymEnv(gymnasium.Env):
         return build_observation(gs), reward, terminated, truncated, info
 
     def action_masks(self) -> np.ndarray:
-        """Legality mask for sb3-contrib's MaskablePPO."""
-        gs = self._adapter.raw_state
-        if gs.get("phase") != GamePhase.SELECTING_HAND:
-            # Terminal phases: nothing is legal; MaskablePPO never queries
-            # a done env, but a defensive all-False beats a stale mask.
-            return np.zeros(NUM_HAND_ACTIONS, dtype=bool)
-        cr = gs.get("current_round", {})
-        return legal_action_mask(
-            len(gs.get("hand", [])),
-            cr.get("hands_left", 0),
-            cr.get("discards_left", 0),
-        )
+        """Legality mask for sb3-contrib's MaskablePPO.
+
+        Terminal phases return all-False; MaskablePPO never queries a done
+        env, but that beats a stale mask.
+        """
+        return hand_action_mask(self._adapter.raw_state)
 
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
 
     def _to_engine_action(self, action: int) -> EnginePlayHand | EngineDiscard:
-        action_type, combo = action_to_combo(action)
-        if action_type == ActionType.Discard:
-            return EngineDiscard(card_indices=combo)
-
-        gs = self._adapter.raw_state
-        hand = gs["hand"]
-        played = [hand[i] for i in combo]
-        jokers = gs.get("jokers", [])
-        if len(played) > 1 and needs_permutation_search(played, jokers):
-            held = [c for i, c in enumerate(hand) if i not in set(combo)]
-            blind = gs.get("blind")
-            ordered = best_play_order(
-                played,
-                held,
-                jokers,
-                gs["hand_levels"],
-                blind,
-                gs["rng"],
-                game_state=gs,
-                blind_chips=getattr(blind, "chips", 0) if blind else 0,
-            )
-            # Map back to hand indices by identity (duplicate-valued cards
-            # exist in Erratic decks; value-equality would collide).
-            id_to_index = {id(c): i for i, c in enumerate(hand)}
-            combo = tuple(id_to_index[id(c)] for c in ordered)
-        return EnginePlayHand(card_indices=combo)
+        return action_to_engine_action(action, self._adapter.raw_state)
