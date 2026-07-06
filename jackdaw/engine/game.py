@@ -1726,9 +1726,17 @@ def _apply_setting_blind_mutations(
                     c.seal = "Gold"  # Certificate default
                 deck.append(c)
             elif ctype == "Joker":
-                # Riff-raff: create Common jokers
+                # Riff-raff: create Common jokers, but only "if you have room"
+                # (vanilla checks G.jokers.config.card_limit before each
+                # creation). Mirrors the room guard on the other creation
+                # path (see create_jokers handling ~L363); without it Riff-raff
+                # overfills past joker_slots, producing states the fixed-width
+                # obs encoders cannot represent.
+                joker_slots = gs.get("joker_slots", 5)
                 count = create.get("count", 1)
                 for _ in range(count):
+                    if len(jokers) >= joker_slots:
+                        break
                     from jackdaw.engine.card import Card as _Card
 
                     j = _Card(center_key="j_joker")
