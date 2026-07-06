@@ -19,7 +19,13 @@ torch = pytest.importorskip("torch")
 sb3_contrib = pytest.importorskip("sb3_contrib")
 
 from eval_hand_policy import eval_seeds, load_policy, run_suite  # noqa: E402
-from train_hand_ppo import KLToBCMaskablePPO, build_model  # noqa: E402
+from train_hand_ppo import (  # noqa: E402
+    DEFAULT_FINETUNE_STAGES,
+    KLToBCMaskablePPO,
+    build_model,
+    make_vec_env,
+    resolve_stage_configs,
+)
 
 from jackdaw.agents.hand_policy import HandPlayBCModel  # noqa: E402
 from jackdaw.env.hand_play_adapter import HandPlayConfig  # noqa: E402
@@ -73,9 +79,7 @@ class TestBCWarmStart:
             k: torch.as_tensor(np.stack([o[k] for o in obs_list]), device=model.device)
             for k in obs_list[0]
         }
-        masks = torch.as_tensor(
-            np.stack(mask_list), dtype=torch.float32, device=model.device
-        )
+        masks = torch.as_tensor(np.stack(mask_list), dtype=torch.float32, device=model.device)
         return obs_t, masks
 
     def test_kl_to_bc_is_zero_at_init(self, tiny_model):
@@ -127,6 +131,36 @@ class TestLearnSmoke:
         model.bc_model = None
         with pytest.raises(AssertionError, match="set_bc_model"):
             model.learn(total_timesteps=8)
+
+
+class TestStageMixture:
+    def test_default_includes_boss(self):
+        # The whole reason for the mixture: stages 1-3 have no Boss blind,
+        # so a boss-free fine-tune would let boss play drift as the KL leash
+        # decays. stage4_boss must be in the default mix.
+        assert "stage4_boss" in DEFAULT_FINETUNE_STAGES
+
+    def test_resolve_configs_distinct(self):
+        configs = resolve_stage_configs(["stage1_no_jokers", "stage4_boss"])
+        assert len(configs) == 2
+        assert configs[1].blind_stages == ("Boss",)
+        assert configs[0].blind_stages != ("Boss",)
+
+    def test_round_robin_assignment(self):
+        configs = resolve_stage_configs(["stage1_no_jokers", "stage4_boss"])
+        vec = make_vec_env(configs, seed_prefix="MIXT", n_envs=4)
+        assert vec.num_envs == 4
+        assert [vec.envs[i]._config for i in range(4)] == [
+            configs[0],
+            configs[1],
+            configs[0],
+            configs[1],
+        ]
+
+    def test_single_config_backward_compatible(self):
+        vec = make_vec_env(HandPlayConfig(), seed_prefix="ONE", n_envs=2)
+        assert vec.num_envs == 2
+        assert vec.envs[0]._config is vec.envs[1]._config
 
 
 class TestEvalSuite:

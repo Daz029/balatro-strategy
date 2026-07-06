@@ -1772,7 +1772,16 @@ def _apply_setting_blind_mutations(
                 c = Card()
                 enhancement = create.get("enhancement")
                 if enhancement:
-                    c.ability = {"effect": enhancement, "set": "Enhanced"}
+                    # Resolve the enhancement CENTER (e.g. "m_stone") via
+                    # set_ability, matching the deck-init path (~L2058).
+                    # Hand-building {"effect": enhancement} stored the center
+                    # KEY ("m_stone") where the effect NAME ("Stone Card") was
+                    # expected, so every Marble-Joker stone card was malformed:
+                    # it scored as a normal card everywhere (all Stone logic
+                    # checks effect == "Stone Card") AND crashed
+                    # reset_round_targets (it leaked the Stone filter, then hit
+                    # the base=None a stone card carries).
+                    c.set_ability(enhancement)
                 if create.get("seal"):
                     c.seal = "Gold"  # Certificate default
                 deck.append(c)

@@ -206,8 +206,17 @@ def reset_round_targets(
     cr = game_state["current_round"]
     deck: list[Card] = game_state.get("deck", [])
 
-    # Filter out Stone cards — only non-Stone playing cards are eligible
-    valid_cards = [c for c in deck if _card_effect(c) != "Stone Card"]
+    # Filter out Stone cards — only non-Stone playing cards are eligible.
+    # Also require a real base: the idol/mail/castle draws read the card's
+    # rank/suit/id, and a base-less card (any Stone card, or a malformed one)
+    # can't supply them (mail reads mail.base.id unguarded). Excluding them
+    # here is semantically exact — they can never BE the idol/mail/castle
+    # card — and defends the draw against any future base-less card.
+    valid_cards = [
+        c
+        for c in deck
+        if _card_effect(c) != "Stone Card" and getattr(c, "base", None) is not None
+    ]
 
     # ------------------------------------------------------------------
     # reset_idol_card — common_events.lua:2271-2286

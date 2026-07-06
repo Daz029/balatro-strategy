@@ -121,9 +121,7 @@ class KLToBCMaskablePPO(MaskablePPO):
         cur_log_probs = cur_dist.distribution.logits  # normalized masked log-probs
         with th.no_grad():
             bc_log_probs = self.bc_model.masked_log_probs(observations, masks_bool)
-        diff = th.where(
-            masks_bool, cur_log_probs - bc_log_probs, th.zeros_like(cur_log_probs)
-        )
+        diff = th.where(masks_bool, cur_log_probs - bc_log_probs, th.zeros_like(cur_log_probs))
         cur_probs = th.where(masks_bool, cur_log_probs.exp(), th.zeros_like(cur_log_probs))
         return (cur_probs * diff).sum(dim=-1).mean()
 
@@ -260,29 +258,57 @@ def load_bc_model(checkpoint_path: Path) -> HandPlayBCModel:
     return model
 
 
+# Default fine-tune distribution: the SAME four stages BC pooled. Boss
+# blinds live ONLY in stage4 (stages 1-3 are Small/Big), so a single-stage
+# fine-tune would leave the KL leash decaying over a boss-free distribution
+# and the policy's boss play free to drift -- a real regression for a
+# full-run partner that faces a Boss every ante. Round-robin across envs
+# weights the stages equally (not by BC example count), which deliberately
+# over-emphasizes the weak spots (ante-1 no-joker, bosses) we're fixing.
+DEFAULT_FINETUNE_STAGES = (
+    "stage1_no_jokers",
+    "stage2_curated",
+    "stage3_full",
+    "stage4_boss",
+)
+
+
 def resolve_stage_config(stage: str | None) -> HandPlayConfig:
-    """Training env distribution should match the BC dataset's generating
-    distribution (stage presets from generate_hand_demos.py)."""
+    """Single stage preset's config (or the no-joker default for ``None``)."""
     if stage is None:
         return HandPlayConfig()
     return stage_presets()[stage].config
 
 
+def resolve_stage_configs(stages: list[str]) -> list[HandPlayConfig]:
+    """Configs for a stage mixture; env distribution should match the BC
+    dataset's generating distribution (presets from generate_hand_demos.py)."""
+    presets = stage_presets()
+    return [presets[s].config for s in stages]
+
+
 def make_vec_env(
-    config: HandPlayConfig, seed_prefix: str, n_envs: int
+    configs: HandPlayConfig | list[HandPlayConfig], seed_prefix: str, n_envs: int
 ) -> DummyVecEnv:
-    # Env steps are ~1 ms; subprocess IPC overhead isn't worth it.
-    return DummyVecEnv(
-        [
-            (lambda rank=rank: HandPlayGymEnv(config=config, seed_prefix=f"{seed_prefix}{rank}"))
-            for rank in range(n_envs)
-        ]
-    )
+    """Vectorized env over a single config or a round-robin stage mixture.
+
+    A list assigns ``configs[rank % len]`` per env, so the rollout (and eval)
+    distribution is an even mixture over the stages. Env steps are ~1 ms;
+    subprocess IPC overhead isn't worth it, hence DummyVecEnv.
+    """
+    if isinstance(configs, HandPlayConfig):
+        configs = [configs]
+
+    def factory(rank: int):
+        config = configs[rank % len(configs)]
+        return lambda: HandPlayGymEnv(config=config, seed_prefix=f"{seed_prefix}{rank}")
+
+    return DummyVecEnv([factory(rank) for rank in range(n_envs)])
 
 
 def build_model(
     bc_checkpoint: Path,
-    config: HandPlayConfig,
+    config: HandPlayConfig | list[HandPlayConfig],
     *,
     seed: int = 0,
     n_envs: int = 8,
@@ -332,10 +358,17 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bc-checkpoint", type=Path, required=True)
     parser.add_argument(
+        "--stages",
+        default=",".join(DEFAULT_FINETUNE_STAGES),
+        help="Comma-separated stage presets to mix (round-robin across envs). "
+        "Default = the four stages BC pooled (includes stage4_boss so boss "
+        "play is fine-tuned, not left to drift).",
+    )
+    parser.add_argument(
         "--stage",
         default=None,
-        help="Stage preset name (generate_hand_demos.py) for the env distribution; "
-        "default = no-joker HandPlayConfig",
+        help="Single stage preset; overrides --stages when given (e.g. to "
+        "fine-tune one stage in isolation).",
     )
     parser.add_argument("--total-timesteps", type=int, default=2_000_000)
     parser.add_argument("--log-dir", type=str, default="runs/hand_ppo/default")
@@ -354,11 +387,17 @@ def main() -> None:
 
     log_path = Path(args.log_dir)
     log_path.mkdir(parents=True, exist_ok=True)
-    config = resolve_stage_config(args.stage)
+
+    if args.stage is not None:
+        stages = [args.stage]
+    else:
+        stages = [s for s in args.stages.split(",") if s]
+    configs = resolve_stage_configs(stages)
+    print(f"Fine-tuning against stage mixture: {stages}")
 
     model = build_model(
         args.bc_checkpoint,
-        config,
+        configs,
         seed=args.seed,
         n_envs=args.n_envs,
         n_steps=args.n_steps,
@@ -371,8 +410,9 @@ def main() -> None:
     )
 
     # Eval on the reserved EVAL_* seed stream; mean episode reward IS the
-    # clear rate (terminal 1/0). Deterministic actions, best-model saving.
-    eval_env = make_vec_env(config, seed_prefix=EVAL_SEED_PREFIX, n_envs=1)
+    # clear rate (terminal 1/0). One env per stage so the aggregate best-
+    # model metric weights the stages evenly (matches the training mixture).
+    eval_env = make_vec_env(configs, seed_prefix=EVAL_SEED_PREFIX, n_envs=len(configs))
     eval_callback = MaskableEvalCallback(
         eval_env,
         n_eval_episodes=args.eval_episodes,

@@ -240,6 +240,40 @@ class TestRiffRaff:
         assert len(jokers) == 5
 
 
+class TestMarbleJoker:
+    _MARBLE_MUT = {"create": {"type": "playing_card", "enhancement": "m_stone", "key": "marble"}}
+
+    def test_creates_well_formed_stone_card(self):
+        """Regression: Marble's stone card must carry effect 'Stone Card'.
+
+        The applier hand-built ``{"effect": enhancement}`` storing the center
+        KEY ('m_stone') where the effect NAME ('Stone Card') belongs, so the
+        card scored as a normal card everywhere (all Stone logic checks
+        ``effect == "Stone Card"``) and later crashed reset_round_targets.
+        """
+        from jackdaw.engine.game import _apply_setting_blind_mutations
+
+        gs = {"deck": []}
+        _apply_setting_blind_mutations(gs, [self._MARBLE_MUT], [])
+        assert len(gs["deck"]) == 1
+        stone = gs["deck"][0]
+        assert stone.ability["effect"] == "Stone Card"
+        assert stone.ability["set"] == "Enhanced"
+
+    def test_stone_card_survives_round_target_reset(self):
+        """The malformed stone card leaked reset_round_targets' Stone filter
+        and hit the ``base is None`` a stone card carries -> AttributeError.
+        """
+        from jackdaw.engine.game import _apply_setting_blind_mutations
+        from jackdaw.engine.round_lifecycle import reset_round_targets
+
+        gs = {"deck": [_card("Hearts", "5")], "current_round": {}}
+        _apply_setting_blind_mutations(gs, [self._MARBLE_MUT], [])
+        # Must not raise even though a base-less stone card is in the deck.
+        reset_round_targets(PseudoRandom("MARB_RT"), 1, gs)
+        assert gs["current_round"]["mail_card"]["id"]  # computed off a real card
+
+
 class TestEightBall:
     def test_rank_8_high_probability(self):
         j = _joker("j_8_ball", extra=4)
