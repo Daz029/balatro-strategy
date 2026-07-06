@@ -387,7 +387,9 @@ the two tracks ended up with different training strategies.
       are unwinnable by design, so absolute clear-rate is dominated by the winnable fraction
       and the ceiling ratio is the real signal. Recovery is a sane pre-PPO BC baseline (weakest
       on barren no-joker stage1, best on joker stage3), entropy 2.32 preserved for PPO. stage4
-      policy eval is BLOCKED — see the MAX_HAND_CARDS known-obs-limitation item below.
+      policy eval was blocked on the hand-obs-width limitation, since fixed (see the
+      MAX_HAND_CARDS_OBS item below); stage4 reference = label-mean ceiling 0.209, h0 stage4
+      rollout deferred until a comparison needs it.
       - Engine bug found + fixed during this eval (branch `worktree-riffraff-room-check`):
         Riff-raff created Common Jokers at blind start with NO room check
         (`game.py::_apply_setting_blind_mutations`, the `ctype=="Joker"` branch), unlike the
@@ -536,26 +538,87 @@ the two tracks ended up with different training strategies.
       h0 lands, decompose eval clear-rate vs solver ceiling by board archetype
       (flush-relevant / straight-relevant / pair-family); a large flush-bucket gap
       pulls the fix forward to the stage-4 regeneration seam instead.
-- [ ] KNOWN OBS LIMITATION — hand-card obs width (`MAX_HAND_CARDS=8`) too small for the
-      boss The Serpent (decided: fix at the h1 regeneration seam TOGETHER WITH the
-      flush/straight fix above, NOT now): The Serpent always draws 3 cards after a play or
-      discard, so discarding fewer than 3 from a full hand legitimately grows the hand to
-      9-10 cards. The hand obs block is fixed at 8 rows (demo schema is 8x15), so
-      `hand_play_gym.py::build_observation` raises `entity count 9 exceeds max 8` mid-round on
-      `step` (verified 2026-07-06, stage4 seed `EVAL_00000236`, blind The Serpent, hand grew
-      to 9). This is NOT a bug — it's a faithful engine state the obs simply can't represent.
-      At reset hand_size is only 7-8; the overflow appears only after a play/discard under The
-      Serpent. Demo generation is single-snapshot (never rolls forward past reset), so it
-      never hit this — training data has zero >8-hand states — but eval AND PPO rollouts on
-      stage4_boss DO. Consequence: no policy clear-rate is obtainable on stage4 until fixed
-      (its solver ceiling, 0.209, is still available from demo labels, since generation only
-      solves the reset state). Fix: widen `MAX_HAND_CARDS` to ~10-12 — but the obs width in
-      `hand_play_gym.py` and the demo write width in `generate_hand_demos.py` must move
-      together — schema-version bump, regenerate all shards + retrain. Same regeneration seam
-      as the flush/straight fix; do them in one pass. Interim option rejected: skipping
-      un-encodable episodes in eval biases stage4 down by dropping The Serpent (a real boss),
-      so it's not a clean number. Distinct from the Riff-raff MAX_JOKERS overfill (that was an
-      engine bug, now fixed; this is a genuine obs-width shortfall, no engine bug involved).
+- [x] Hand-card obs width too small for The Serpent (fixed 2026-07-06; SUPERSEDES the
+      earlier "regenerate at the h1 seam" plan — the fix turned out not to need
+      regeneration at all): The Serpent draws exactly 3 cards after every play/discard
+      with no hand-size cap, so hands legitimately grow past 8 mid-round — and growth
+      COMPOUNDS (each 1-card action nets +2; worst case with default hands/discards
+      budgets is ~20), so no fixed width alone is crash-proof. +Hand-size effects (Turtle
+      Bean, Troubadour, Juggler, Juggle tag, vouchers) push full-run hands to 10-13 too.
+      Fix (obs-only; action space and demo schema untouched):
+      - `hand_play_gym.MAX_HAND_CARDS_OBS = 12`, decoupled from the action space's
+        `MAX_HAND_CARDS = 8` (frozen positions). Rows beyond 12 TRUNCATE, never raise:
+        the hand is engine-sorted descending and the action space can only address
+        positions 0-7, so dropped rows are the lowest cards and unplayable anyway.
+        Positions 8-11 are visible-but-unplayable (see the action-space ceiling item
+        below). Joker/consumable blocks keep the strict raise (a Riff-raff-class engine
+        bug should stay loud).
+      - KEY INSIGHT that killed the regeneration plan: widening a masked padded block is
+        semantically exact — zero rows beyond the mask are literally what
+        `build_observation` produces — so `train_bc.py`'s loader just zero-pads the
+        shards' 8-wide hand blocks to 12 at load time (hard-fails if a shard is ever
+        WIDER than the obs). No schema bump (feature layout unchanged; width is
+        shape-inferable), no shard regeneration, no forced retrain: the pooled encoders
+        are row-count-agnostic in parameters, so the existing h0 checkpoint loads into
+        the widened model unchanged (verified: real stage1 shards through the new loader
+        + h0 checkpoint forward pass; Serpent over-draw episode encodes in-space —
+        regression tests in `tests/env/test_hand_play_gym.py::TestHandOverflow`).
+      - `generate_hand_demos.py` keeps writing 8-wide blocks (generation is
+        single-snapshot; reset hands never exceed 8, and labels must fit the 8-position
+        action space regardless). Invariant is now "write width <= MAX_HAND_CARDS_OBS",
+        enforced in the loader.
+      - The flush/straight fix above is now DECOUPLED from this one: it still needs its
+        own schema bump + regeneration at the h1 seam (it changes feature layout).
+      - Stage4 eval is unblocked. Baseline decision: use the stage4 demo-label mean
+        p_clear (0.209) as the stage4 reference (per the solver-ceiling-from-labels
+        practice); an h0 policy clear-rate rollout on stage4 is cheap but deliberately
+        deferred — run it when a comparison actually needs it (e.g. pre/post PPO).
+- [ ] KNOWN ACTION-SPACE CEILING — 8-position combo enumeration vs big hands (decision
+      record 2026-07-06; decide + build at the h1 seam, NOT now): the canonical
+      Discrete(436) can only select among hand positions 0-7, but >8-card hands are
+      SYSTEMIC, not a Serpent tail — +hand-size builds a competent shop agent should buy
+      (Turtle Bean, Troubadour, Juggler, Juggle tag, vouchers) mean 10-13-card hands at
+      every hand-turn, where the agent can never play a flush completion sitting at
+      position 9 or discard below position 7 (discarding LOW cards is exactly what you
+      do). Downstream distortion: s0's values are "given how h0 plays", so the cap
+      systematically undervalues the whole +hand-size joker family — same distortion
+      class as the flush/straight obs gap, but on the action side.
+      - RETRACTION: the earlier blanket "multi-step chains under sparse reward are an
+        exploration trap" argument does NOT apply to autoregressive action *decoding*
+        (grilled 2026-07-06): the rejected reorder/cancel actions were extra ENV steps
+        competing with direct actions; autoregressive selection is a factorization of
+        one decision within a single env step — no wasted turns, joint log-prob = sum of
+        sub-pick log-probs, per-sub-step masking is natural (AlphaStar-style compound
+        distribution). Per-card INDEPENDENT scoring (multi-binary "pick your top k")
+        stays rejected on expressiveness: subset value is joint (a 6H is only worth
+        picking with four other hearts), which independent Bernoullis structurally
+        cannot represent.
+      - Candidate A — widened enumeration with computed logits: extend positions to 12
+        (append the new combos after the shop block per the append-only contract,
+        ~3,170 hand actions), and compute each combo's logit from its cards' embeddings
+        (pool + MLP) instead of a dense head row. Keeps MaskablePPO, masked-CE BC, the
+        KL leash, and the shop-merge "canonical index == head row" plan; BC data reuses
+        as-is (labels are sets). Costs: ugly split index layout (hand combos in [0,436)
+        AND post-686), O(n^5) growth caps it at ~12 positions for good.
+      - Candidate B — autoregressive pointer head: action = (type, pick, ..., done)
+        over card embeddings. Unbounded width, linear compute, identity-conditioned by
+        construction, would also subsume the shop's SelectTarget combo block later.
+        Costs: exits vanilla MaskablePPO (custom compound distribution;
+        `KLToBCMaskablePPO` rewrite; KL leash becomes teacher-forced per-step KL sum),
+        BC becomes sequence CE (easy — canonicalize set -> sorted picks), and it
+        unwinds the locked shop-merge flat-head design. Probably the right end-state,
+        but wrong to put ahead of s0 on the critical path (its distortion at s0 is
+        second-order by the same argument that deferred SkipBlind).
+      - EVIDENCE GATE (cheap, no training needed): when `shop_gym.py` is built,
+        instrument hand-turns with a counter for (a) fraction of turns with hand > 8,
+        and (b) fraction where `GreedyHandPolicy`'s UNRESTRICTED C(n,5) choice touches a
+        position >= 8 (greedy searches the full hand, so it's a free oracle for what
+        the cap forbids). If 12 positions covers ~all of it -> A; if the distribution
+        runs past 12 routinely -> B. Also note: the trunk is permutation-invariant
+        (masked mean/max pooling) while the action space is positional — the model
+        binds identity to position only via the engine's descending sort; both A and B
+        would make that binding direct, which is an independent argument for doing ONE
+        of them eventually even if the counter reads low.
 - [ ] Bootstrap loop orchestration (h0 -> s0 -> rollout -> h1 -> s1 -> ...).
 - [ ] Server-log parser for money/ante/failure calibration statistics (not started; only
       manual `grep` exploration done so far on two 1000-2000 line samples).
