@@ -723,9 +723,43 @@ the two tracks ended up with different training strategies.
         for the bootstrap kickoff — train s0 against greedy first (reliable, low-noise,
         but the ablation baseline not the real partner) vs h0 (real distribution, noisy),
         or fine-tune h0 with PPO before wiring it in. Not yet decided.
+- [ ] h0 -> h0.5 PPO fine-tune (DECIDED 2026-07-07: fine-tune h0 with PPO BEFORE wiring
+      it into s0, per the h0-wrapper finding that raw h0 folds 35% of ante-1 Smalls and
+      would inject huge variance into shop-value estimates). Setup COMPLETE, run pending
+      on the 9600X (heavy training runs go there, not this machine):
+      - `train_hand_ppo.py` extended to a STAGE MIXTURE (`--stages` comma-list, default =
+        the four stages BC pooled; `--stage` still forces one). Round-robin across envs.
+        RATIONALE: bosses live ONLY in stage4 (stages 1-3 are Small/Big), so a single-stage
+        fine-tune would leave boss play to drift as the KL leash decays — a real regression
+        for a full-run partner. `make_vec_env` now takes a config OR a list (single-config
+        callers unchanged). Tested in `test_train_hand_ppo.py::TestStageMixture`.
+      - ENGINE BUG found + fixed while shaking this out (blocked the run entirely, and was
+        a latent scoring bug too): Marble Joker's setting-blind create-applier
+        (`game.py::_apply_setting_blind_mutations`, `ctype=="playing_card"`) hand-built
+        `{"effect": enhancement}` storing the enhancement CENTER KEY ("m_stone") where the
+        effect NAME ("Stone Card") belongs. Consequences: (1) every Marble stone card
+        scored as a NORMAL card everywhere (all Stone logic checks `effect == "Stone Card"`
+        — no +50 chips, not stone in flushes, not counted by Stone Joker), (2) it crashed
+        `round_lifecycle.reset_round_targets` (leaked the Stone filter, then hit the
+        base=None a stone card carries via an unguarded `mail.base.id`). Fixed by using
+        `set_ability(enhancement)` (matches the deck-init path ~L2058), and hardened
+        `reset_round_targets`'s valid-card filter to also exclude base-less cards
+        (defense: they can never be the idol/mail/castle card). Regression tests in
+        `test_jokers_integration.py::TestMarbleJoker`; 996 engine tests pass. NOTE: some
+        stage3/stage4 demo seeds with Marble Joker were silently skipped during generation
+        (the crash was caught per-example) — not worth regenerating (rare, and PPO against
+        the fixed engine is the corrector).
+      - RUN COMMAND (on the 9600X, needs the h0 checkpoint transferred to
+        `runs/bc/h0_s1234_25ep/` since runs/ is gitignored, plus this branch's code):
+        `uv run python scripts/train_hand_ppo.py --bc-checkpoint
+        runs/bc/h0_s1234_25ep/bc_checkpoint.pt --total-timesteps 2000000 --n-envs 8
+        --log-dir runs/hand_ppo/h0_finetune_s0 --seed 0`. Shakeout verified end-to-end on
+        this machine (kl_bc≈0.008 at warm start, leash decaying, model saved). Eval the
+        result with `eval_hand_policy.py` and re-run the h0-vs-greedy ante-1 comparison
+        before the s0 kickoff.
 - [ ] Bootstrap loop orchestration (h0 -> s0 -> rollout -> h1 -> s1 -> ...). Partner
       wrapper (HandCheckpointPolicy) and both training scripts now exist; kickoff blocked
-      only on the s0-partner choice recorded in the h0-wrapper item above.
+      only on the h0.5 fine-tune above.
 - [ ] Server-log parser for money/ante/failure calibration statistics (not started; only
       manual `grep` exploration done so far on two 1000-2000 line samples).
 
