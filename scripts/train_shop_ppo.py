@@ -462,21 +462,29 @@ def _install_finite_grad_guard(model: MaskablePPO) -> None:
 
     model.policy.optimizer.register_step_post_hook(_sanitize_weights)
 
-    warned = {"logits": False}
+    # Running count of forward passes that produced a non-finite action logit.
+    # Stashed on the model so end-of-training can report the total; a one-shot
+    # boolean would collapse "transient blip" and "diverging every step" into
+    # the same single log line, defeating the diagnostic.
+    model._finite_guard_logit_catches = 0
 
     def _bound_logits(_module, _inputs, output):
         safe = torch.nan_to_num(output, nan=0.0, posinf=0.0, neginf=0.0).clamp(
             -30.0, 30.0
         )
-        if not warned["logits"] and not torch.isfinite(output).all():
-            warned["logits"] = True
-            print(
-                "[finite-guard] non-finite ACTION LOGITS caught + clamped "
-                "(forward-generated from finite weights; layers 1-2 could not "
-                "see this). Run continues.",
-                file=sys.stderr,
-                flush=True,
-            )
+        if not torch.isfinite(output).all():
+            model._finite_guard_logit_catches += 1
+            n = model._finite_guard_logit_catches
+            # Print the first catch, then on a widening cadence, so a stream of
+            # catches is visible in the log without flooding it.
+            if n == 1 or n % 100 == 0:
+                print(
+                    f"[finite-guard] non-finite ACTION LOGITS caught + clamped "
+                    f"(count={n}; forward-generated from finite weights, layers "
+                    f"1-2 could not see this). Run continues.",
+                    file=sys.stderr,
+                    flush=True,
+                )
         return safe
 
     model.policy.action_net.register_forward_hook(_bound_logits)
@@ -663,6 +671,10 @@ def main() -> None:
     print(
         f"Model saved to {save_path}; reservoir ({len(reservoir)} snapshots) "
         f"saved to {reservoir_path}"
+    )
+    catches = getattr(model, "_finite_guard_logit_catches", 0)
+    print(
+        f"[finite-guard] total non-finite action-logit catches this run: {catches}"
     )
 
 

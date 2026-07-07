@@ -293,6 +293,7 @@ class TestFiniteGradGuard:
             batch_size=8,
             device="cpu",
         )
+        assert model._finite_guard_logit_catches == 0
         latent = torch.zeros(4, model.policy.action_net.in_features)
         # Poison the logit layer's bias so its raw output is non-finite.
         with torch.no_grad():
@@ -301,6 +302,17 @@ class TestFiniteGradGuard:
         logits = model.policy.action_net(latent)
         assert torch.isfinite(logits).all()
         assert logits.abs().max() <= 30.0
+        # The catch is counted (so a stream vs a one-off is distinguishable in
+        # the log), and a finite forward does not increment it.
+        assert model._finite_guard_logit_catches == 1
+        model.policy.action_net(torch.zeros(4, model.policy.action_net.in_features))
+        # (bias is still poisoned, so this forward is also non-finite)
+        assert model._finite_guard_logit_catches == 2
+        with torch.no_grad():
+            model.policy.action_net.bias.view(-1)[0] = 0.0
+            model.policy.action_net.bias.view(-1)[1] = 0.0
+        model.policy.action_net(torch.zeros(4, model.policy.action_net.in_features))
+        assert model._finite_guard_logit_catches == 2  # finite forward: no bump
 
 
 class TestEvalSuite:
