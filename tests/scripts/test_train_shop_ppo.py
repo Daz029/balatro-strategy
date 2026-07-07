@@ -255,6 +255,29 @@ class TestFiniteGradGuard:
         loss.backward()
         assert torch.isfinite(param.grad).all()
 
+    def test_nonfinite_weight_is_scrubbed_after_step(self):
+        # Backstop: even if a NaN reaches the weights through a path the grad
+        # hook can't see (the second a4 crash, guard already active), the
+        # optimizer step-post hook must scrub it so no forward sees a NaN
+        # weight and MaskableCategorical never fails the simplex check.
+        model, _ = build_model(
+            win_ante=1,
+            schedules=TrainingSchedules(),
+            reservoir=ShopReservoir(seed=0),
+            seed=0,
+            n_envs=1,
+            n_steps=8,
+            batch_size=8,
+            device="cpu",
+        )
+        opt = model.policy.optimizer
+        param = next(model.policy.parameters())
+        param.grad = torch.zeros_like(param)
+        with torch.no_grad():
+            param.view(-1)[0] = float("nan")
+        opt.step()
+        assert torch.isfinite(param).all()
+
 
 class TestEvalSuite:
     def test_eval_seeds_reserved_prefix(self):

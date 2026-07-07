@@ -413,28 +413,48 @@ def make_train_env(
 
 
 def _install_finite_grad_guard(model: MaskablePPO) -> None:
-    """Sanitize non-finite gradients before the optimizer step.
+    """Keep NaN/inf out of the policy weights so every forward stays valid.
 
-    A single NaN/inf gradient poisons the network weights permanently: once
-    that happens every forward pass yields all-invalid logits and the next
+    A single non-finite weight poisons the network permanently: once one is
+    present, every forward pass yields all-invalid logits and the next
     ``MaskableCategorical`` construction fails the simplex check (observed
     ~719k steps into an a4 run whose metrics were healthy right up to the
-    crash). ``max_grad_norm`` clipping cannot catch it — the clip coefficient
-    is ``max_norm / (grad_norm + eps)``, so a NaN ``grad_norm`` makes the
+    crash — TWICE, the second time with the gradient hook already active).
+    ``max_grad_norm`` clipping cannot catch it — the clip coefficient is
+    ``max_norm / (grad_norm + eps)``, so a NaN ``grad_norm`` makes the
     coefficient NaN and *spreads* the poison to every parameter.
 
     The origin is the standard PPO tail: a large importance ratio on a
     negative-advantage transition drives the UNCLIPPED surrogate term (the one
     PPO's ``clip_range`` deliberately leaves unbounded on that side) to +inf,
-    so the loss is +inf and its gradient is NaN. Registering a per-parameter
-    backward hook that maps NaN/±inf to 0 turns that fatal step into a skipped
-    (near-no-op) update while keeping every weight finite — the correct
-    robustness property for the long s0/s1 runs this script drives.
+    so the loss is +inf and its gradient is NaN.
+
+    TWO layers, because the second a4 crash proved the gradient hook alone is
+    not sufficient — a NaN still reached the weights through a path it can't
+    see (e.g. Adam moment state, or an overflow that only manifests after the
+    grad passes the hook):
+
+    1. A per-parameter backward hook maps NaN/±inf *gradients* to 0, so the
+       common bad step becomes a near-no-op before it can touch the optimizer.
+    2. An optimizer step-post hook maps any NaN/±inf *weight* to 0 after every
+       update — a source-agnostic backstop that GUARANTEES no forward pass ever
+       sees a non-finite weight, whatever the leak. Zeroing a handful of
+       weights is a negligible perturbation next to crashing a multi-hour run
+       700k steps in; a fully-poisoned layer resets and re-learns.
     """
     for param in model.policy.parameters():
         param.register_hook(
             lambda grad: torch.nan_to_num(grad, nan=0.0, posinf=0.0, neginf=0.0)
         )
+
+    def _sanitize_weights(optimizer, *_args, **_kwargs):
+        with torch.no_grad():
+            for group in optimizer.param_groups:
+                for param in group["params"]:
+                    if not torch.isfinite(param).all():
+                        torch.nan_to_num_(param, nan=0.0, posinf=0.0, neginf=0.0)
+
+    model.policy.optimizer.register_step_post_hook(_sanitize_weights)
 
 
 def build_model(
