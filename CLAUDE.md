@@ -652,6 +652,29 @@ the two tracks ended up with different training strategies.
       - Stage4 eval unblocked and RUN (300 episodes, h0): clear_rate 8.7% vs label-mean
         ceiling 0.209 (~41% recovery, consistent with stages 2-3) — see the h0 BC run
         item above; `runs/bc/h0_s1234_25ep/eval_stage4_boss.json`.
+- [x] Joker obs width too small in full runs (fixed 2026-07-07; PARTIALLY SUPERSEDES the
+      Serpent item's "joker block keeps the strict raise" line): `build_observation`'s
+      joker block raised `entity count 6 exceeds max 5` and killed the first s0 training
+      run. Root cause is NOT an engine bug — >5 physical jokers is a LEGITIMATE full-run
+      state two ways: (1) Negative-edition jokers don't consume a joker slot (engine
+      buy-legality at `actions.py:429` is `len(jokers) >= joker_slots and not is_negative`),
+      (2) slot-expanding vouchers raise `joker_slots` above 5. The hand agent never saw
+      this because `HandPlayAdapter` injects only base/no-edition jokers within count bands
+      (max 5); the shop agent buying a Negative joker is the first path that produces it,
+      and the auto-resolved hand phase calls `build_observation` via `HandCheckpointPolicy`.
+      Fix (obs-only, NO checkpoint/schema change — the width-5 block is FROZEN until the
+      shop merge widens it to 8 at the h1 seam, so h0.5's `.zip` obs space is untouched and
+      `predict()` sees the exact width it trained on): encode every joker, then TRUNCATE to
+      `MAX_JOKERS=5` (jokers aren't positionally addressed by any hand action, so this is a
+      pure informativeness gap like the >12 hand-card tail — the engine still scores all
+      jokers). "Bugs stay loud" preserved by raising ONLY on genuine overfill: non-negative
+      jokers exceeding `joker_slots` (true Riff-raff-class state). Regression tests in
+      `tests/env/test_hand_play_gym.py::TestJokerOverflow` (negative excess truncates,
+      voucher-expanded slots truncate, non-negative overfill raises); full h0.5 partner
+      path verified on a live 6-joker SELECTING_HAND state (returns a legal PlayHand, no
+      crash). Second-order distortion (h0.5 plays 6+-joker states blind to the truncated
+      rows -> s0 slightly undervalues Negative/wide-joker builds) is the same class as the
+      flush/straight obs gap and self-corrects at h1 when the block widens to 8.
 - [ ] KNOWN ACTION-SPACE CEILING — 8-position combo enumeration vs big hands (decision
       record 2026-07-06; decide + build at the h1 seam, NOT now): the canonical
       Discrete(436) can only select among hand positions 0-7, but >8-card hands are

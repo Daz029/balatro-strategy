@@ -12,6 +12,8 @@ Covers:
 
 from __future__ import annotations
 
+import copy
+
 import numpy as np
 import pytest
 
@@ -193,6 +195,52 @@ class TestHandOverflow:
             if grew:
                 return
         pytest.fail("no seed in range produced a growable Serpent hand")
+
+
+class TestJokerOverflow:
+    """Negative-edition jokers don't consume a slot, and slot-expanding
+    vouchers raise joker_slots, so a full-run state legitimately holds >5
+    physical jokers. The width-5 hand-obs joker block (frozen BC demo schema,
+    widened only at the shop merge) truncates such states -- an informativeness
+    gap, not a crash. A non-negative overfill stays a loud engine bug. This is
+    the s0 blocker: the shop agent buys a Negative joker, an auto-resolved hand
+    phase calls build_observation via HandCheckpointPolicy, and it used to raise
+    'entity count 6 exceeds max 5'."""
+
+    def _joker_state(self, n: int, joker_slots: int, negatives: int = 0) -> tuple:
+        env = HandPlayGymEnv(
+            config=HandPlayConfig(joker_pool=("j_jolly",), joker_count_range=(1, 1)),
+            seed_prefix="TESTENV",
+        )
+        env.reset(seed=0)
+        gs = env._adapter.raw_state
+        base = gs["jokers"][0]
+        gs["jokers"] = [copy.deepcopy(base) for _ in range(n)]
+        gs["joker_slots"] = joker_slots
+        for j in range(negatives):
+            gs["jokers"][n - 1 - j].edition = {"negative": True}
+        return env, gs
+
+    def test_negative_excess_truncates(self):
+        # 6 physical jokers in 5 slots, but 2 are Negative -> legal build.
+        env, gs = self._joker_state(n=6, joker_slots=5, negatives=2)
+        obs = build_observation(gs)
+        assert env.observation_space.contains(obs)
+        assert int(obs["joker_mask"].sum()) == 5  # truncated to MAX_JOKERS
+
+    def test_expanded_slots_truncates(self):
+        # joker_slots raised to 7 by a voucher -> 6 non-negative jokers legal.
+        env, gs = self._joker_state(n=6, joker_slots=7)
+        obs = build_observation(gs)
+        assert env.observation_space.contains(obs)
+        assert int(obs["joker_mask"].sum()) == 5
+
+    def test_nonnegative_overfill_raises(self):
+        # 6 base-edition jokers in 5 slots with no negatives -> Riff-raff-class
+        # overfill, still loud.
+        _env, gs = self._joker_state(n=6, joker_slots=5)
+        with pytest.raises(ValueError, match="overfill"):
+            build_observation(gs)
 
 
 class TestEnvSideOrdering:

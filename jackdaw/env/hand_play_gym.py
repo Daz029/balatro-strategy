@@ -124,13 +124,35 @@ def build_observation(gs: dict[str, Any]) -> dict[str, np.ndarray]:
     block the shards don't carry (BC's loader synthesizes zeros for it).
     """
     hand_arr = encode_playing_cards_batch(gs.get("hand", []), gs)
-    joker_arr = encode_jokers_batch(gs.get("jokers", []), gs)
+    jokers = gs.get("jokers", [])
+    # Negative-edition jokers don't consume a joker slot, and slot-expanding
+    # vouchers raise joker_slots above 5, so a full-run state legitimately
+    # holds more than MAX_JOKERS physical jokers. The hand-obs joker block
+    # stays width-5 (the frozen BC demo schema; the shop merge widens it to 8
+    # at the h1 seam per CLAUDE.md), so encode every joker then TRUNCATE to
+    # MAX_JOKERS. Jokers are not positionally addressed by any hand action, so
+    # this is a pure informativeness gap (the engine still scores every joker),
+    # exactly like the >12 hand-card tail -- and it keeps h0.5's obs width
+    # identical to what it was trained on (no checkpoint-compat break).
+    # A GENUINE overfill -- more non-negative jokers than joker_slots -- is a
+    # Riff-raff-class engine bug, not a legal build, and stays loud.
+    if len(jokers) > MAX_JOKERS:
+        negatives = sum(
+            1 for j in jokers if getattr(j, "edition", None) and j.edition.get("negative")
+        )
+        joker_slots = gs.get("joker_slots", 5)
+        if len(jokers) - negatives > joker_slots:
+            raise ValueError(
+                f"{len(jokers)} jokers ({negatives} negative) exceeds "
+                f"joker_slots={joker_slots}: non-negative overfill (engine bug)"
+            )
+    joker_arr = encode_jokers_batch(jokers, gs)
     # Truncate (don't raise) on hand overflow -- see MAX_HAND_CARDS_OBS.
     # Encode the FULL hand first: per-card features (is_best_hand_card, ...)
     # consider the whole hand, and rows 0..7 must stay index-aligned with
     # the positions the action space addresses regardless of overflow.
     hand_padded, hand_mask = _pad(hand_arr[:MAX_HAND_CARDS_OBS], MAX_HAND_CARDS_OBS, D_PLAYING_CARD)
-    joker_padded, joker_mask = _pad(joker_arr, MAX_JOKERS, D_JOKER)
+    joker_padded, joker_mask = _pad(joker_arr[:MAX_JOKERS], MAX_JOKERS, D_JOKER)
     return {
         "global_context": encode_global_context(gs).astype(np.float32),
         "hand_cards": hand_padded,
