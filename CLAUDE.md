@@ -260,7 +260,7 @@ build — all s0-independent] -> harvest pass -> labels -> regen -> BC -> PPO ->
   step exists for). The shard schema stops encoding an action-space assumption: a
   combo-lookup head consumes them as subset lookups, a pointer head as sorted pick
   sequences — the head choice never forces relabeling. Obs width becomes the only cap:
-  `MAX_HAND_CARDS_OBS` 12 -> 16, truncate lowest-first (masked-block widening is free
+  `MAX_HAND_CARDS_OBS` 12 -> 40, truncate lowest-first (masked-block widening is free
   per the Serpent item; the FEATURE bump below is what forces regen).
 - **Solver big-hand cost** (`best_immediate_play` is C(n,5) per recursion node: 56 at
   n=8, ~4.4k at n=16): template-prescreen for n>8 — rank lines via
