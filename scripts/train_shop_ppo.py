@@ -71,6 +71,7 @@ for _p in (str(_SCRIPTS_DIR), str(_REPO_ROOT)):
         sys.path.insert(0, _p)
 
 import gymnasium  # noqa: E402
+import torch  # noqa: E402
 from sb3_contrib import MaskablePPO  # noqa: E402
 from sb3_contrib.common.maskable.callbacks import MaskableEvalCallback  # noqa: E402
 from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback  # noqa: E402
@@ -411,6 +412,31 @@ def make_train_env(
     return DummyVecEnv([factory(rank) for rank in range(n_envs)])
 
 
+def _install_finite_grad_guard(model: MaskablePPO) -> None:
+    """Sanitize non-finite gradients before the optimizer step.
+
+    A single NaN/inf gradient poisons the network weights permanently: once
+    that happens every forward pass yields all-invalid logits and the next
+    ``MaskableCategorical`` construction fails the simplex check (observed
+    ~719k steps into an a4 run whose metrics were healthy right up to the
+    crash). ``max_grad_norm`` clipping cannot catch it — the clip coefficient
+    is ``max_norm / (grad_norm + eps)``, so a NaN ``grad_norm`` makes the
+    coefficient NaN and *spreads* the poison to every parameter.
+
+    The origin is the standard PPO tail: a large importance ratio on a
+    negative-advantage transition drives the UNCLIPPED surrogate term (the one
+    PPO's ``clip_range`` deliberately leaves unbounded on that side) to +inf,
+    so the loss is +inf and its gradient is NaN. Registering a per-parameter
+    backward hook that maps NaN/±inf to 0 turns that fatal step into a skipped
+    (near-no-op) update while keeping every weight finite — the correct
+    robustness property for the long s0/s1 runs this script drives.
+    """
+    for param in model.policy.parameters():
+        param.register_hook(
+            lambda grad: torch.nan_to_num(grad, nan=0.0, posinf=0.0, neginf=0.0)
+        )
+
+
 def build_model(
     win_ante: int,
     *,
@@ -446,6 +472,7 @@ def build_model(
         # obs schema, so the previous stage's weights load verbatim.
         model = MaskablePPO.load(str(init_from), env=env, device=device)
         model.tensorboard_log = log_dir
+        _install_finite_grad_guard(model)
         return model, schedules
 
     model = MaskablePPO(
@@ -470,6 +497,7 @@ def build_model(
             net_arch=[],  # trunk lives in the extractor; heads are single Linears
         ),
     )
+    _install_finite_grad_guard(model)
     return model, schedules
 
 
