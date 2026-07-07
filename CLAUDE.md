@@ -723,10 +723,28 @@ the two tracks ended up with different training strategies.
         for the bootstrap kickoff — train s0 against greedy first (reliable, low-noise,
         but the ablation baseline not the real partner) vs h0 (real distribution, noisy),
         or fine-tune h0 with PPO before wiring it in. Not yet decided.
-- [ ] h0 -> h0.5 PPO fine-tune (DECIDED 2026-07-07: fine-tune h0 with PPO BEFORE wiring
+- [x] h0 -> h0.5 PPO fine-tune (DECIDED 2026-07-07: fine-tune h0 with PPO BEFORE wiring
       it into s0, per the h0-wrapper finding that raw h0 folds 35% of ante-1 Smalls and
-      would inject huge variance into shop-value estimates). Setup COMPLETE, run pending
-      on the 9600X (heavy training runs go there, not this machine):
+      would inject huge variance into shop-value estimates). RUN COMPLETE 2026-07-07 (2M
+      steps on the 9600X, mixture of all four stages, checkpoint transferred back to
+      `runs/hand_ppo/hand_ppo_2000000_steps.zip`):
+      - RESULT — the fine-tune fixed exactly the partner-reliability problem it targeted.
+        h0.5-vs-greedy-vs-h0 on the auto-resolved ante-1 Small (50 EVAL_ seeds, greedy
+        partner semantics): greedy 49/50, h0(BC) 32/50 (the ~35% fold confirmed), **h0.5
+        47/50** — fold rate 36% -> 6%, on par with greedy (94% vs 98%) while keeping real
+        hand skill greedy lacks. Domain-randomized per-stage clear rates moved only
+        modestly (those distributions are mostly-unwinnable by design, so absolute
+        clear-rate is dominated by the unwinnable fraction — see the median-p_clear=0 note
+        on the h0 BC item): stage1 3.7%->3.7% (flat, barren no-joker), stage2 17.3%->20.0%
+        (44%->51% recovery), stage3 16%->17% (52%->55%), stage4 8.7%->9.0% (41%->43%).
+        Evals in `runs/hand_ppo/eval_stage{1,2,3,4}.json`; comparison via the throwaway
+        `compare_partners.py` (survival test = phase != GAME_OVER after `ShopRunAdapter.reset`,
+        NOT a RuntimeError catch — reset returns a terminal GAME_OVER snapshot on a lost
+        blind, it does not raise; the earlier RuntimeError-catch version falsely read 20/20).
+      - DECISION for s0 kickoff: use h0.5 as the partner (reliable early blinds now, so
+        shop-value estimates aren't drowned in partner-loss variance). Greedy stays the
+        ablation baseline.
+      Setup notes from the build (kept for reference):
       - `train_hand_ppo.py` extended to a STAGE MIXTURE (`--stages` comma-list, default =
         the four stages BC pooled; `--stage` still forces one). Round-robin across envs.
         RATIONALE: bosses live ONLY in stage4 (stages 1-3 are Small/Big), so a single-stage
@@ -754,12 +772,29 @@ the two tracks ended up with different training strategies.
         `uv run python scripts/train_hand_ppo.py --bc-checkpoint
         runs/bc/h0_s1234_25ep/bc_checkpoint.pt --total-timesteps 2000000 --n-envs 8
         --log-dir runs/hand_ppo/h0_finetune_s0 --seed 0`. Shakeout verified end-to-end on
-        this machine (kl_bc≈0.008 at warm start, leash decaying, model saved). Eval the
-        result with `eval_hand_policy.py` and re-run the h0-vs-greedy ante-1 comparison
-        before the s0 kickoff.
-- [ ] Bootstrap loop orchestration (h0 -> s0 -> rollout -> h1 -> s1 -> ...). Partner
-      wrapper (HandCheckpointPolicy) and both training scripts now exist; kickoff blocked
-      only on the h0.5 fine-tune above.
+        this machine (kl_bc≈0.008 at warm start, leash decaying, model saved).
+- [ ] Bootstrap loop orchestration (h0.5 -> s0 -> rollout -> h1 -> s1 -> ...). Partner
+      wrapper (HandCheckpointPolicy) and both training scripts now exist; h0.5 fine-tune is
+      DONE and chosen as the s0 partner (above). WIRING DONE 2026-07-07: both
+      `train_shop_ppo.py` and `eval_shop_policy.py` take `--hand-policy <ckpt>` (omit =
+      greedy baseline). Threads a SINGLE shared HandCheckpointPolicy instance through
+      make_train_env/build_model into every ShopGymEnv AND the eval env (DummyVecEnv is
+      single-process + the policy is deterministic/stateless, so one instance is correct
+      and avoids N torch copies). `load_hand_policy(path)` helper; smoke-verified
+      end-to-end with the h0.5 zip (train 512 steps @ ~28 fps + nextround eval, partner
+      loads, reservoir harvests, checkpoint round-trips). NOTE: with h0.5 as partner,
+      `n_dead_at_reset` drops toward 0 (vs greedy's occasional loss), so re-baseline the
+      nextround floor against h0.5 before reading s0's win rate.
+      NEXT ACTION — kick off s0 on the 9600X (horizon curriculum, one invocation per
+      stage, `--init-from` chains them; runs/ is gitignored so transfer the h0.5 zip to
+      `runs/hand_ppo/hand_ppo_2000000_steps.zip` first). Stage a2 (single line):
+      `uv run python scripts/train_shop_ppo.py --win-ante 2 --total-timesteps 2000000
+      --n-envs 8 --hand-policy runs/hand_ppo/hand_ppo_2000000_steps.zip
+      --log-dir runs/shop_ppo/s0_a2 --seed 0`
+      then a4 with `--win-ante 4 --init-from runs/shop_ppo/s0_a2/shop_ppo_final.zip
+      --log-dir runs/shop_ppo/s0_a4`, then a8 likewise. Eval each with
+      `eval_shop_policy.py --policy <best_model.zip> --win-ante N --hand-policy <h0.5 zip>`
+      (MATCH the partner to what s0 trained against) and the `--policy nextround` floor.
 - [ ] Server-log parser for money/ante/failure calibration statistics (not started; only
       manual `grep` exploration done so far on two 1000-2000 line samples).
 

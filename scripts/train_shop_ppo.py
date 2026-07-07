@@ -58,6 +58,7 @@ import argparse
 import math
 import sys
 from collections import deque
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -300,6 +301,20 @@ class ShopRewardWrapper(gymnasium.Wrapper):
 # ---------------------------------------------------------------------------
 
 
+def load_hand_policy(path: Path | None):
+    """Build the shop episode's hand partner from a checkpoint path.
+
+    ``None`` -> greedy baseline (env default). A ``.pt``/``.zip`` path ->
+    :class:`HandCheckpointPolicy` (h0.5 and later bootstrap partners). One
+    instance is returned and shared across all envs (see ``make_train_env``).
+    """
+    if path is None:
+        return None
+    from jackdaw.agents.hand_checkpoint_policy import HandCheckpointPolicy
+
+    return HandCheckpointPolicy(str(path))
+
+
 def make_train_env(
     win_ante: int,
     schedules: TrainingSchedules,
@@ -309,11 +324,17 @@ def make_train_env(
     n_envs: int = 4,
     seed_prefix: str = "SHOPPPO",
     harvest_prob: float = 0.02,
+    hand_policy: Callable[[dict[str, Any]], Any] | None = None,
 ) -> DummyVecEnv:
+    # One partner instance shared across all envs: DummyVecEnv is single-process
+    # and the hand policy is a deterministic, stateless argmax, so sharing is
+    # both correct and avoids loading N copies of a torch checkpoint. None ->
+    # ShopGymEnv falls back to a fresh GreedyHandPolicy per env (also cheap).
     def factory(rank: int):
         def _make() -> gymnasium.Env:
             env = ShopGymEnv(
                 config=ShopRunConfig(win_ante=win_ante),
+                hand_policy=hand_policy,
                 seed_prefix=f"{seed_prefix}{rank}",
                 start_state_sampler=reservoir.sample if reservoir is not None else None,
             )
@@ -346,6 +367,7 @@ def build_model(
     ent_coef: float = 0.01,
     log_dir: str | None = None,
     device: str = "auto",
+    hand_policy: Callable[[dict[str, Any]], Any] | None = None,
 ) -> tuple[MaskablePPO, TrainingSchedules]:
     """Construct (or resume) the shop MaskablePPO with its training env."""
     schedules = schedules or TrainingSchedules()
@@ -357,6 +379,7 @@ def build_model(
         reservoir,
         n_envs=n_envs,
         seed_prefix=f"SHOPPPO_S{seed}_R",
+        hand_policy=hand_policy,
     )
 
     if init_from is not None:
@@ -395,6 +418,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--win-ante", type=int, default=2, help="horizon-curriculum stage")
     parser.add_argument("--init-from", type=Path, default=None, help="previous stage .zip")
+    parser.add_argument(
+        "--hand-policy",
+        type=Path,
+        default=None,
+        help="hand-partner checkpoint (.pt BC / .zip PPO); omit for the greedy baseline",
+    )
     parser.add_argument("--total-timesteps", type=int, default=500_000)
     parser.add_argument("--log-dir", type=str, default="runs/shop_ppo/default")
     parser.add_argument("--seed", type=int, default=0)
@@ -425,6 +454,9 @@ def main() -> None:
         capacity_per_stratum=args.reservoir_capacity,
         seed=args.seed,
     )
+    # Shared partner instance — same one drives training and eval so the eval
+    # win rate is measured against the real hand policy, not the greedy baseline.
+    hand_policy = load_hand_policy(args.hand_policy)
     model, schedules = build_model(
         args.win_ante,
         schedules=schedules,
@@ -438,6 +470,7 @@ def main() -> None:
         ent_coef=args.ent_coef,
         log_dir=str(log_path),
         device=args.device,
+        hand_policy=hand_policy,
     )
 
     # Eval on the reserved EVAL_* stream: plain env, no wrapper — mean
@@ -445,7 +478,9 @@ def main() -> None:
     eval_env = DummyVecEnv(
         [
             lambda: ShopGymEnv(
-                config=ShopRunConfig(win_ante=args.win_ante), seed_prefix=EVAL_SEED_PREFIX
+                config=ShopRunConfig(win_ante=args.win_ante),
+                hand_policy=hand_policy,
+                seed_prefix=EVAL_SEED_PREFIX,
             )
         ]
     )
@@ -466,9 +501,10 @@ def main() -> None:
         ),
     ]
 
+    partner_desc = str(args.hand_policy) if args.hand_policy is not None else "greedy (baseline)"
     print(
         f"Training shop agent: win_ante={args.win_ante}, "
-        f"{args.total_timesteps} timesteps (seed={args.seed})..."
+        f"{args.total_timesteps} timesteps (seed={args.seed}), partner={partner_desc}..."
     )
     model.learn(total_timesteps=args.total_timesteps, callback=callbacks)
 

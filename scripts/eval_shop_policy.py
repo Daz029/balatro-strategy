@@ -88,8 +88,8 @@ def load_policy(policy: str, device: str):
     return PPOPolicy(Path(policy), device)
 
 
-def run_suite(policy, win_ante: int, n_episodes: int) -> dict:
-    env = ShopGymEnv(config=ShopRunConfig(win_ante=win_ante))
+def run_suite(policy, win_ante: int, n_episodes: int, hand_policy=None) -> dict:
+    env = ShopGymEnv(config=ShopRunConfig(win_ante=win_ante), hand_policy=hand_policy)
     wins: list[bool] = []
     final_antes: list[int] = []
     rounds_cleared: list[int] = []
@@ -141,11 +141,25 @@ def main() -> None:
     parser.add_argument("--n-episodes", type=int, default=200)
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--device", default="cpu")
+    parser.add_argument(
+        "--hand-policy",
+        type=Path,
+        default=None,
+        help="hand-partner checkpoint (.pt/.zip); omit for the greedy baseline. "
+        "Match this to the partner s0 was TRAINED against.",
+    )
     args = parser.parse_args()
 
+    hand_policy = None
+    if args.hand_policy is not None:
+        from jackdaw.agents.hand_checkpoint_policy import HandCheckpointPolicy
+
+        hand_policy = HandCheckpointPolicy(str(args.hand_policy))
+
     policy = load_policy(args.policy, args.device)
-    result = run_suite(policy, args.win_ante, args.n_episodes)
+    result = run_suite(policy, args.win_ante, args.n_episodes, hand_policy=hand_policy)
     result["policy"] = args.policy
+    result["hand_policy"] = str(args.hand_policy) if args.hand_policy is not None else "greedy"
 
     print(json.dumps(result, indent=2))
     if args.output:
