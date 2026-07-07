@@ -278,6 +278,30 @@ class TestFiniteGradGuard:
         opt.step()
         assert torch.isfinite(param).all()
 
+    def test_nonfinite_forward_logits_are_bounded(self):
+        # The layer that stops the OBSERVED crash: even when action_net emits
+        # non-finite logits from finite weights (the forward-generated failure
+        # that reproduced byte-identically with layers 1-2 active), the values
+        # reaching MaskableCategorical must be finite and softmax-safe.
+        model, _ = build_model(
+            win_ante=1,
+            schedules=TrainingSchedules(),
+            reservoir=ShopReservoir(seed=0),
+            seed=0,
+            n_envs=1,
+            n_steps=8,
+            batch_size=8,
+            device="cpu",
+        )
+        latent = torch.zeros(4, model.policy.action_net.in_features)
+        # Poison the logit layer's bias so its raw output is non-finite.
+        with torch.no_grad():
+            model.policy.action_net.bias.view(-1)[0] = float("inf")
+            model.policy.action_net.bias.view(-1)[1] = float("nan")
+        logits = model.policy.action_net(latent)
+        assert torch.isfinite(logits).all()
+        assert logits.abs().max() <= 30.0
+
 
 class TestEvalSuite:
     def test_eval_seeds_reserved_prefix(self):
