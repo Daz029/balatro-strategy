@@ -127,6 +127,26 @@ class ScheduleCallback(BaseCallback):
         return True
 
 
+class ReservoirCheckpointCallback(BaseCallback):
+    """Pickles the shared reservoir on the same cadence as model checkpoints.
+
+    Mirrors ``CheckpointCallback``'s ``save_freq`` (in per-env steps) so a
+    killed run can be resumed from the latest model checkpoint AND its
+    matching reservoir, not an empty one.
+    """
+
+    def __init__(self, reservoir: ShopReservoir, save_freq: int, save_path: Path) -> None:
+        super().__init__()
+        self._reservoir = reservoir
+        self._save_freq = max(save_freq, 1)
+        self._save_path = save_path
+
+    def _on_step(self) -> bool:
+        if self.n_calls % self._save_freq == 0:
+            self._reservoir.save(self._save_path)
+        return True
+
+
 # ---------------------------------------------------------------------------
 # Count-based exploration bonus
 # ---------------------------------------------------------------------------
@@ -205,6 +225,45 @@ class ShopReservoir:
         key = keys[int(self._rng.integers(len(keys)))]
         stratum = self._strata[key]
         return stratum[int(self._rng.integers(len(stratum)))]
+
+    # -- persistence -------------------------------------------------------
+    # The reservoir is built fresh per training invocation; without this the
+    # horizon-curriculum chain (a2 -> a4 -> a8, one invocation per stage) and
+    # the later s0 -> s1 hop would each start EMPTY, discarding the "current
+    # AND past checkpoints" snapshot diversity the design relies on. Pickle it
+    # at save time and reload with --init-reservoir. RNG state round-trips too
+    # so a resumed run's sampling stream continues rather than restarting.
+
+    def save(self, path: str | Path) -> None:
+        import pickle
+
+        state = {
+            "fresh_frac": self.fresh_frac,
+            "pack_frac": self.pack_frac,
+            "capacity": self._capacity,
+            "strata": {key: list(dq) for key, dq in self._strata.items()},
+            "rng_state": self._rng.bit_generator.state,
+        }
+        with open(path, "wb") as fh:
+            pickle.dump(state, fh, protocol=pickle.HIGHEST_PROTOCOL)
+
+    @classmethod
+    def load(cls, path: str | Path) -> "ShopReservoir":
+        import pickle
+
+        with open(path, "rb") as fh:
+            state = pickle.load(fh)
+        obj = cls(
+            fresh_frac=state["fresh_frac"],
+            pack_frac=state["pack_frac"],
+            capacity_per_stratum=state["capacity"],
+        )
+        obj._strata = {
+            key: deque(blobs, maxlen=state["capacity"])
+            for key, blobs in state["strata"].items()
+        }
+        obj._rng.bit_generator.state = state["rng_state"]
+        return obj
 
 
 # ---------------------------------------------------------------------------
@@ -438,6 +497,13 @@ def main() -> None:
     parser.add_argument("--pack-frac", type=float, default=0.3)
     parser.add_argument("--harvest-prob", type=float, default=0.02)
     parser.add_argument("--reservoir-capacity", type=int, default=256, help="per stratum")
+    parser.add_argument(
+        "--init-reservoir",
+        type=Path,
+        default=None,
+        help="load a prior stage's pickled reservoir (carries snapshot diversity "
+        "across the a2->a4->a8 chain and the s0->s1 hop); omit to start empty",
+    )
     parser.add_argument("--eval-episodes", type=int, default=50)
     parser.add_argument("--eval-freq", type=int, default=20_000, help="in total env steps")
     parser.add_argument("--checkpoint-freq", type=int, default=100_000, help="in total env steps")
@@ -448,12 +514,16 @@ def main() -> None:
     log_path.mkdir(parents=True, exist_ok=True)
 
     schedules = TrainingSchedules(blend_beta0=args.blend_beta0, count_beta0=args.count_beta0)
-    reservoir = ShopReservoir(
-        fresh_frac=args.fresh_frac,
-        pack_frac=args.pack_frac,
-        capacity_per_stratum=args.reservoir_capacity,
-        seed=args.seed,
-    )
+    if args.init_reservoir is not None:
+        reservoir = ShopReservoir.load(args.init_reservoir)
+        print(f"Loaded reservoir from {args.init_reservoir} (size {len(reservoir)})")
+    else:
+        reservoir = ShopReservoir(
+            fresh_frac=args.fresh_frac,
+            pack_frac=args.pack_frac,
+            capacity_per_stratum=args.reservoir_capacity,
+            seed=args.seed,
+        )
     # Shared partner instance — same one drives training and eval so the eval
     # win rate is measured against the real hand policy, not the greedy baseline.
     hand_policy = load_hand_policy(args.hand_policy)
@@ -499,6 +569,11 @@ def main() -> None:
             save_path=str(log_path / "checkpoints"),
             name_prefix="shop_ppo",
         ),
+        ReservoirCheckpointCallback(
+            reservoir,
+            save_freq=max(args.checkpoint_freq // args.n_envs, 1),
+            save_path=log_path / "reservoir.pkl",
+        ),
     ]
 
     partner_desc = str(args.hand_policy) if args.hand_policy is not None else "greedy (baseline)"
@@ -510,7 +585,12 @@ def main() -> None:
 
     save_path = log_path / "shop_ppo_final"
     model.save(str(save_path))
-    print(f"Model saved to {save_path} (reservoir size {len(reservoir)})")
+    reservoir_path = log_path / "reservoir.pkl"
+    reservoir.save(reservoir_path)
+    print(
+        f"Model saved to {save_path}; reservoir ({len(reservoir)} snapshots) "
+        f"saved to {reservoir_path}"
+    )
 
 
 if __name__ == "__main__":

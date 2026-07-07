@@ -346,11 +346,20 @@ build — all s0-independent] -> harvest pass -> labels -> regen -> BC -> PPO ->
   doesn't apply. The original deferral rationale is fully expired (tags wired and
   in-game verified; the partner is h1, not noisy h0).
 - **Reservoir persistence** (BUILD BEFORE s0 KICKOFF — the one pre-s0 code change):
-  verified 2026-07-07 that `train_shop_ppo.py` constructs the reservoir fresh per
-  invocation and never serializes it (only the model saves), so the a2->a4->a8 chain
-  discards snapshots between stages and s1 would start empty — the "current AND past
-  checkpoints" diversity rule doesn't survive invocations. Fix: pickle the reservoir
-  at save time + `--init-reservoir` to load (~20 lines + a round-trip test).
+  DONE 2026-07-07 (branch `worktree-shop-reservoir-persistence`). Root cause confirmed:
+  `train_shop_ppo.py` built the reservoir fresh per invocation and only the model saved,
+  so the a2->a4->a8 chain discarded snapshots between stages and s1 would start empty —
+  the "current AND past checkpoints" diversity rule didn't survive invocations. Fix:
+  `ShopReservoir.save()`/`.load()` pickle strata + config + RNG bit-generator state (so
+  a resumed run's sampling stream continues, not restarts); `main()` saves to
+  `{log_dir}/reservoir.pkl` at final-save AND on the checkpoint cadence
+  (`ReservoirCheckpointCallback`, so a killed run resumes with a matching reservoir, not
+  an empty one); `--init-reservoir <path>` loads a prior stage's reservoir (omit = fresh,
+  seeded once at a2). Round-trip tests in
+  `tests/scripts/test_train_shop_ppo.py::TestReservoir` (strata/config/RNG-stream
+  identity + post-reload capacity enforcement); end-to-end verified a2->a4: stage a4
+  loaded the a2 reservoir and grew it (diversity carried across invocations). Wire it
+  into the a4/a8 stages via `--init-reservoir` (see the s0 kickoff command below).
 - Phi = s0-critic potential-based shaping replaces the crude `c_ante` blind bonus
   (state-only potential, decays — pure training-script change), and the nextround
   floor re-baselines against s1's actual partner (h1). Both as already documented.
@@ -944,18 +953,19 @@ build — all s0-independent] -> harvest pass -> labels -> regen -> BC -> PPO ->
       loads, reservoir harvests, checkpoint round-trips). NOTE: with h0.5 as partner,
       `n_dead_at_reset` drops toward 0 (vs greedy's occasional loss), so re-baseline the
       nextround floor against h0.5 before reading s0's win rate.
-      NEXT ACTION — FIRST build reservoir persistence (pickle at save +
-      `--init-reservoir`; see the "h1 / s1 seam" section — the reservoir is currently
-      constructed fresh per invocation and never saved, so the a2->a4->a8 chain
-      discards snapshots between stages), THEN kick off s0 on the 9600X (horizon
-      curriculum, one invocation per stage, `--init-from` chains them; runs/ is
+      NEXT ACTION — reservoir persistence is DONE (see the s1-section item), so s0 is
+      unblocked. Kick off s0 on the 9600X (horizon
+      curriculum, one invocation per stage, `--init-from` chains the model and
+      `--init-reservoir` chains the reservoir; runs/ is
       gitignored so transfer the h0.5 zip to
       `runs/hand_ppo/hand_ppo_2000000_steps.zip` first). Stage a2 (single line):
       `uv run python scripts/train_shop_ppo.py --win-ante 2 --total-timesteps 2000000
       --n-envs 8 --hand-policy runs/hand_ppo/hand_ppo_2000000_steps.zip
       --log-dir runs/shop_ppo/s0_a2 --seed 0`
       then a4 with `--win-ante 4 --init-from runs/shop_ppo/s0_a2/shop_ppo_final.zip
-      --log-dir runs/shop_ppo/s0_a4`, then a8 likewise. Eval each with
+      --init-reservoir runs/shop_ppo/s0_a2/reservoir.pkl --log-dir runs/shop_ppo/s0_a4`
+      (keep --hand-policy/--total-timesteps/--n-envs), then a8 likewise
+      (--init-from + --init-reservoir from s0_a4). Eval each with
       `eval_shop_policy.py --policy <best_model.zip> --win-ante N --hand-policy <h0.5 zip>`
       (MATCH the partner to what s0 trained against) and the `--policy nextround` floor.
 - [ ] Server-log parser for money/ante/failure calibration statistics (not started; only
