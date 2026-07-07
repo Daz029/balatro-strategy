@@ -92,6 +92,41 @@ class TestReservoir:
         r.add(b"b", ante=2, pack_pending=False)
         assert len(r) == 3  # ante-1 stratum capped at 2, plus ante-2
 
+    def test_save_load_roundtrip(self, tmp_path):
+        # Persistence must survive across invocations (the a2->a4->a8 chain
+        # and the s0->s1 hop) with strata, config, and the sampling stream all
+        # intact — otherwise each stage restarts from an empty reservoir.
+        r = ShopReservoir(fresh_frac=0.4, pack_frac=0.7, capacity_per_stratum=3, seed=11)
+        r.add(b"shop_a1", ante=1, pack_pending=False)
+        r.add(b"pack_a1", ante=1, pack_pending=True)
+        r.add(b"shop_a2", ante=2, pack_pending=False)
+
+        path = tmp_path / "reservoir.pkl"
+        r.save(path)
+        loaded = ShopReservoir.load(path)
+
+        assert len(loaded) == len(r) == 3
+        assert loaded.fresh_frac == 0.4
+        assert loaded.pack_frac == 0.7
+        assert loaded._capacity == 3
+        assert loaded._strata.keys() == r._strata.keys()
+        # Loaded strata are bounded deques honoring the restored capacity.
+        for key, dq in loaded._strata.items():
+            assert dq.maxlen == 3
+            assert list(dq) == list(r._strata[key])
+        # RNG state round-trips: the sampling stream continues identically.
+        assert [loaded.sample() for _ in range(30)] == [r.sample() for _ in range(30)]
+
+    def test_loaded_reservoir_respects_capacity_on_further_adds(self, tmp_path):
+        r = ShopReservoir(fresh_frac=0.5, capacity_per_stratum=2, seed=0)
+        r.add(b"x0", ante=1, pack_pending=False)
+        path = tmp_path / "reservoir.pkl"
+        r.save(path)
+        loaded = ShopReservoir.load(path)
+        for i in range(5):
+            loaded.add(f"y{i}".encode(), ante=1, pack_pending=False)
+        assert len(loaded) == 2  # deque maxlen enforced after reload
+
 
 class TestRewardWrapper:
     def _make(self, reservoir=None, harvest_prob=0.0, seed="SHOPGYM_CONTRACT"):
