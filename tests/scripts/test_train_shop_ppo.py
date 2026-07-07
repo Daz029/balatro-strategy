@@ -20,6 +20,8 @@ import pytest
 pytest.importorskip("torch")
 pytest.importorskip("sb3_contrib")
 
+import torch  # noqa: E402
+
 from eval_shop_policy import NextRoundPolicy, eval_seeds, load_policy, run_suite  # noqa: E402
 from train_shop_ppo import (  # noqa: E402
     CountBonus,
@@ -230,6 +232,28 @@ class TestLearnSmoke:
         if result["n_played"]:
             assert 0.0 <= result["win_rate"] <= 1.0
             assert result["mean_steps"] >= 1.0
+
+
+class TestFiniteGradGuard:
+    def test_nonfinite_gradient_is_sanitized(self):
+        # A single NaN/inf gradient must NOT reach the parameter's .grad, or it
+        # poisons the weights and every later MaskableCategorical fails the
+        # simplex check (the observed a4 crash ~719k steps in).
+        model, _ = build_model(
+            win_ante=1,
+            schedules=TrainingSchedules(),
+            reservoir=ShopReservoir(seed=0),
+            seed=0,
+            n_envs=1,
+            n_steps=8,
+            batch_size=8,
+            device="cpu",
+        )
+        param = next(model.policy.parameters())
+        # +inf loss (the PPO unclipped-surrogate blow-up) -> inf/NaN raw grad.
+        loss = (param * torch.tensor(float("inf"))).sum()
+        loss.backward()
+        assert torch.isfinite(param.grad).all()
 
 
 class TestEvalSuite:
