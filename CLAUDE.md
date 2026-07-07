@@ -234,6 +234,127 @@ the two tracks ended up with different training strategies.
     was specifically chosen so this could be added later without redoing any training —
     bolt it on, no risk of corrupting whatever's already been learned.
 
+## h1 / s1 seam — GRILLED AND LOCKED (2026-07-07)
+
+Decision record from the pre-h1/s1 grilling session. h1 = ONE schema bump + full demo
+regen + fresh BC + PPO (a feature-layout change breaks the encoder input widths, so
+h0.5 weights can't carry over — every layout change batches into this single bump).
+s0 must FINISH before h1 data work starts (the harvested stage, money calibration, and
+$-term all consume s0 artifacts). Sequence: reservoir persistence -> s0 (9600X) ->
+[while it trains: h0.5 fingerprint evals, engine interest-ordering verification, B head
+build — all s0-independent] -> harvest pass -> labels -> regen -> BC -> PPO -> h1 -> s1.
+
+### h1 data
+
+- **Harvested BC stage** (new, ~8k examples): solver-labeled states from a DEDICATED
+  rollout pass with FINAL s0 + h0.5 — not a training-time hook (h1 targets the final
+  policy's induced distribution, not a mixture over training-time checkpoints; a
+  separate pass is also zero risk to the s0 run). Snapshot EVERY hand-turn decision
+  point, subsample ~6-8 kept per run, ante-stratified (within-run correlation control;
+  mid-round states — discards spent, score banked, real boss history — are exactly what
+  single-snapshot generation structurally cannot produce). Harvested states carry hand
+  levels, editions, stickers, and scaling accumulation for free — those generation gaps
+  dissolve for this stage; stages 1-4 stay base-edition / run-start-levels deliberately
+  (coverage breadth; realism lives here).
+- **Labels = raw card-index sets, NO positional max** (removing that cap is what this
+  step exists for). The shard schema stops encoding an action-space assumption: a
+  combo-lookup head consumes them as subset lookups, a pointer head as sorted pick
+  sequences — the head choice never forces relabeling. Obs width becomes the only cap:
+  `MAX_HAND_CARDS_OBS` 12 -> 16, truncate lowest-first (masked-block widening is free
+  per the Serpent item; the FEATURE bump below is what forces regen).
+- **Solver big-hand cost** (`best_immediate_play` is C(n,5) per recursion node: 56 at
+  n=8, ~4.4k at n=16): template-prescreen for n>8 — rank lines via
+  `rank_templates_cheaply`, run the full exact evaluation only on the top-k
+  template-derived subsets. The label becomes "exact among prescreened candidates";
+  acceptable because PPO-against-the-real-game is already the documented label-bias
+  corrector. VALIDATE once before trusting at 11+: ~50 hands of size 9-10, prescreened
+  label vs full brute force, measure the p_clear gap.
+- **Schema bump contents** (the ONE bump): flush/straight hand-potential features (per
+  the obs-limitation item), width 16, index-set labels. Verified 2026-07-07: hand
+  levels (GC [30:90]), editions, and stickers are ALREADY in the obs — nothing else
+  rides.
+- **Stages 1-4 regen config**: money sampled from HARVESTED per-ante dollar marginals
+  (dollars at hand-turn entry, stratified by ante), with a ~20% flat tail so BC still
+  sees off-distribution money states — retires the flat/uniform placeholder AND the
+  server-log calibration dependency.
+
+### h1 architecture — Candidate B COMMITTED (autoregressive pointer head)
+
+- Hand agent ONLY: the shop's flat Discrete(686) head survives s1 untouched
+  (`--init-from` requires it); B subsumes the shop's SelectTarget combo block at the
+  in-blind merge, not before.
+- Why committed without the evidence gate: the gate is CIRCULAR — its counter is
+  conditioned on current policy behavior, so if s0 rarely buys +hand-size jokers
+  BECAUSE h0.5 can't exploit them, the histogram reads low without proving A@12
+  suffices — plus a strong prior that >12-card hands are common in +hand-size builds
+  (one Turtle Bean = 13 immediately, for multiple turns). The shop_gym instrumentation
+  counter is NOT built at all: the hand-size histogram falls out of the harvest corpus
+  for free, and it only tunes B's max decode length, which isn't needed until after s0
+  anyway.
+- Change-compounding mitigation (B lands at the same seam as the bump + new BC pool +
+  new reward term): validate B BC-ONLY first — sequence CE on the same pool
+  (canonicalize set -> sorted picks), compare val metrics against a flat-head control
+  before any PPO. Known costs accepted: custom compound distribution (exits vanilla
+  MaskablePPO), `KLToBCMaskablePPO` rewrite (KL leash becomes a teacher-forced per-step
+  sum), sequence-CE BC, and the flat-head shop-merge plan unwinds (B was already its
+  admitted end-state).
+
+### h1 objective & training
+
+- **Terminal $ term** (fills the marked hook in `HandPlayGymEnv`): on CLEAR only,
+  reward = 1 + `V_curve(ante, dollars_after_cashout)`; a loss pays nothing (run over,
+  money worthless — "clearing dominates" preserved). `V_curve(ante, $)` is extracted
+  OFFLINE once: counterfactual money-sweeps of the s0 critic over harvested shop states
+  (edit dollars in the obs, forward the critic), averaged per (ante, $) cell —
+  per-dollar sweeping captures interest-threshold nonlinearity for free, and the values
+  are already in P(win) units because s0's reward is 1{run won} (no scale
+  hyperparameter). NO decay (deliberate objective change, not shaping — as already
+  documented at the hook). Start-of-episode dollars are a per-episode constant, so the
+  absolute lookup doesn't shift the optimum. TWO RIDERS (user-added): (a) the
+  ante-average ERASES build-specific money valuations (a To the Moon or Bull build
+  values held dollars very differently) — note it in code; the contextual-critic query
+  is the named upgrade path if h1's money play looks wrong. (b) The cashout math must
+  mirror engine interest ordering — in-blind money earnings (Business Card, Rough Gem,
+  gold cards) land BEFORE interest and can cross thresholds; end-of-round payout jokers
+  (Golden Joker, Rocket) pay AFTER interest and must not affect it (same rule class as
+  the verified "Investment pays after interest") — VERIFY the engine orders these
+  correctly before mirroring it.
+- **PPO starts from a mixed sampler**: `start_state_sampler` hook on `HandPlayGymEnv`
+  mirroring the shop env's (`() -> snapshot | None`, None = config-sample); mixture =
+  stage1-4 configs + harvested snapshots, config anchor always nonzero (same
+  anchor/coverage-bias logic as the shop reservoir — reward stays honest, so coverage
+  bias is the only risk). Reuses the existing RNG-exact engine pickle round-trip. Also
+  the path that exercises B's big-hand decoding under real training, not just BC —
+  without it, the KL leash decays and late PPO drifts back toward config-distribution
+  play, evaporating half the induced-distribution fix.
+- **Discard-bias fingerprint GATES the solver fix**: run the documented
+  hands_left x discards_left bucketed eval on h0.5 NOW (cheap, this machine); only if
+  the play-only label bias survived PPO does `estimate_future_hand_distribution` learn
+  to credit banked discards (every solver change risks a discard-cap-class label bug,
+  so don't touch it if PPO already corrects). The flush/straight ARCHETYPE
+  decomposition runs in the same eval pass — it no longer gates the fix (locked into
+  the bump) but calibrates how much recovery to expect from it.
+
+### s1
+
+- **SkipBlind exposed**: ONE action appended at canonical index 686 (append-only
+  contract; fresh cold head row, s0 loads verbatim). Blind-select stops being
+  auto-resolved on non-boss blinds (SelectBlind + SkipBlind both unmask; boss =
+  SelectBlind only, vanilla-consistent). The offered TAG's identity must become
+  observable (shop_context / entity row) — skipping without seeing the tag is
+  uninformed. One decision point per blind, no chain — the exploration-trap argument
+  doesn't apply. The original deferral rationale is fully expired (tags wired and
+  in-game verified; the partner is h1, not noisy h0).
+- **Reservoir persistence** (BUILD BEFORE s0 KICKOFF — the one pre-s0 code change):
+  verified 2026-07-07 that `train_shop_ppo.py` constructs the reservoir fresh per
+  invocation and never serializes it (only the model saves), so the a2->a4->a8 chain
+  discards snapshots between stages and s1 would start empty — the "current AND past
+  checkpoints" diversity rule doesn't survive invocations. Fix: pickle the reservoir
+  at save time + `--init-reservoir` to load (~20 lines + a round-trip test).
+- Phi = s0-critic potential-based shaping replaces the crude `c_ante` blind bonus
+  (state-only potential, decays — pure training-script change), and the nextround
+  floor re-baselines against s1's actual partner (h1). Both as already documented.
+
 ## Open items / not yet implemented
 
 - [x] Speed fix for `hand_solver.py`: `_needs_permutation_search` already skips the search
@@ -618,6 +739,12 @@ the two tracks ended up with different training strategies.
       h0 lands, decompose eval clear-rate vs solver ceiling by board archetype
       (flush-relevant / straight-relevant / pair-family); a large flush-bucket gap
       pulls the fix forward to the stage-4 regeneration seam instead.
+      LOCKED 2026-07-07 (h1/s1 grill): the fix lands in the h1 schema bump (see the
+      "h1 / s1 seam" section). The archetype decomposition still runs — on h0.5, in
+      the same eval pass as the discard-bias fingerprint — but now only calibrates
+      expected recovery; it no longer gates timing. One detail superseded: h1's BC
+      pool is no longer purely domain-randomized (a harvested stage joins it), but
+      stages 1-4 remain, so the stage-2 suit-joker coverage argument stands.
 - [x] Hand-card obs width too small for The Serpent (fixed 2026-07-06; SUPERSEDES the
       earlier "regenerate at the h1 seam" plan — the fix turned out not to need
       regeneration at all): The Serpent draws exactly 3 cards after every play/discard
@@ -676,7 +803,8 @@ the two tracks ended up with different training strategies.
       rows -> s0 slightly undervalues Negative/wide-joker builds) is the same class as the
       flush/straight obs gap and self-corrects at h1 when the block widens to 8.
 - [ ] KNOWN ACTION-SPACE CEILING — 8-position combo enumeration vs big hands (decision
-      record 2026-07-06; decide + build at the h1 seam, NOT now): the canonical
+      record 2026-07-06; DECIDED 2026-07-07: Candidate B COMMITTED, build at the h1
+      seam — see the "h1 / s1 seam" section and the RESOLVED note below): the canonical
       Discrete(436) can only select among hand positions 0-7, but >8-card hands are
       SYSTEMIC, not a Serpent tail — +hand-size builds a competent shop agent should buy
       (Turtle Bean, Troubadour, Juggler, Juggle tag, vouchers) mean 10-13-card hands at
@@ -721,6 +849,14 @@ the two tracks ended up with different training strategies.
         binds identity to position only via the engine's descending sort; both A and B
         would make that binding direct, which is an independent argument for doing ONE
         of them eventually even if the counter reads low.
+      - RESOLVED 2026-07-07: the evidence gate is DEAD as a decider — it's circular
+        (the counter is conditioned on current policy behavior: if s0 rarely buys
+        +hand-size jokers because h0.5 can't exploit them, it reads low without proving
+        A@12 suffices) and the >12 prior is strong (one Turtle Bean = 13-card hands for
+        multiple turns). Candidate B committed at the h1 seam, hand agent only; the
+        shop_gym counter is never built (the hand-size histogram falls out of the
+        harvest corpus and only tunes B's max decode length). Full decision record in
+        the "h1 / s1 seam" section.
 - [x] h0-checkpoint hand-policy wrapper for the shop env's `hand_policy` slot —
       `jackdaw/agents/hand_checkpoint_policy.py::HandCheckpointPolicy`, tested in
       `tests/agents/test_hand_checkpoint_policy.py` (10 tests, both BC .pt and PPO .zip
@@ -808,8 +944,12 @@ the two tracks ended up with different training strategies.
       loads, reservoir harvests, checkpoint round-trips). NOTE: with h0.5 as partner,
       `n_dead_at_reset` drops toward 0 (vs greedy's occasional loss), so re-baseline the
       nextround floor against h0.5 before reading s0's win rate.
-      NEXT ACTION — kick off s0 on the 9600X (horizon curriculum, one invocation per
-      stage, `--init-from` chains them; runs/ is gitignored so transfer the h0.5 zip to
+      NEXT ACTION — FIRST build reservoir persistence (pickle at save +
+      `--init-reservoir`; see the "h1 / s1 seam" section — the reservoir is currently
+      constructed fresh per invocation and never saved, so the a2->a4->a8 chain
+      discards snapshots between stages), THEN kick off s0 on the 9600X (horizon
+      curriculum, one invocation per stage, `--init-from` chains them; runs/ is
+      gitignored so transfer the h0.5 zip to
       `runs/hand_ppo/hand_ppo_2000000_steps.zip` first). Stage a2 (single line):
       `uv run python scripts/train_shop_ppo.py --win-ante 2 --total-timesteps 2000000
       --n-envs 8 --hand-policy runs/hand_ppo/hand_ppo_2000000_steps.zip
@@ -819,16 +959,23 @@ the two tracks ended up with different training strategies.
       `eval_shop_policy.py --policy <best_model.zip> --win-ante N --hand-policy <h0.5 zip>`
       (MATCH the partner to what s0 trained against) and the `--policy nextround` floor.
 - [ ] Server-log parser for money/ante/failure calibration statistics (not started; only
-      manual `grep` exploration done so far on two 1000-2000 line samples).
+      manual `grep` exploration done so far on two 1000-2000 line samples). DEMOTED
+      2026-07-07: money calibration now comes from harvested per-ante marginals (see the
+      "h1 / s1 seam" section — strictly closer to the distribution h1 actually faces, at
+      zero build cost); this item's remaining value is only seeding real blind
+      sequences/decks for training episodes.
 
-## Money/dollar handling (deferred, not solved)
+## Money/dollar handling (DESIGNED 2026-07-07, awaiting s0 critic)
 
 Marginal value of a dollar is context-dependent (interest thresholds, reroll cost scaling,
 whether you've already cleared the current blind's score requirement). Planned approach:
 derive a marginal-value-of-$1 curve from the shop-agent's own trained critic
 (`V(state, money=k) - V(state, money=k-1)`) once it exists, feed that down into the hand-
-agent's score/cash tradeoff. Not implementable until a shop critic exists — currently a
-placeholder in `hand_solver.py`'s design notes.
+agent's score/cash tradeoff. Concrete form is now locked (see "h1 / s1 seam" — "Terminal
+$ term"): offline `V_curve(ante, $)` lookup from counterfactual money-sweeps of the s0
+critic over harvested shop states, added clear-gated to the hand env's terminal reward at
+h1, with the build-specific-valuation caveat and the interest-ordering rider recorded
+there. Still blocked on the s0 critic existing; the `hand_solver.py` placeholder stands.
 
 ## Agent skills
 
