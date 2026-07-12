@@ -429,18 +429,24 @@ def _install_finite_grad_guard(model: MaskablePPO) -> None:
     PPO's ``clip_range`` deliberately leaves unbounded on that side) to +inf,
     so the loss is +inf and its gradient is NaN.
 
-    TWO layers, because the second a4 crash proved the gradient hook alone is
-    not sufficient — a NaN still reached the weights through a path it can't
-    see (e.g. Adam moment state, or an overflow that only manifests after the
-    grad passes the hook):
+    THREE layers, because a4 crashed IDENTICALLY (same step, byte-identical
+    probs) with layers 1-2 already active — which proves the invalid softmax
+    is generated IN THE FORWARD PASS from *finite* weights (a large-but-finite
+    action logit overflowing, or a NaN from a degenerate pooled feature).
+    Layers 1-2 only see non-finite gradients/weights, so they never fire on
+    this failure mode and the run reproduces the crash exactly:
 
-    1. A per-parameter backward hook maps NaN/±inf *gradients* to 0, so the
-       common bad step becomes a near-no-op before it can touch the optimizer.
+    1. A per-parameter backward hook maps NaN/±inf *gradients* to 0, so a bad
+       step becomes a near-no-op before it can touch the optimizer.
     2. An optimizer step-post hook maps any NaN/±inf *weight* to 0 after every
-       update — a source-agnostic backstop that GUARANTEES no forward pass ever
-       sees a non-finite weight, whatever the leak. Zeroing a handful of
-       weights is a negligible perturbation next to crashing a multi-hour run
-       700k steps in; a fully-poisoned layer resets and re-learns.
+       update — a backstop for leaks that route through the optimizer state.
+    3. A forward hook on ``action_net`` sanitizes and clamps the ACTION LOGITS
+       at their source, into a softmax-safe range. This is the layer that
+       actually stops the observed crash: whatever the upstream numerics,
+       ``MaskableCategorical``'s simplex check can no longer fail, because the
+       logits feeding it are always finite and bounded. ±30 saturates softmax
+       (exp(±30) is ~1e±13) so it never clips a *meaningful* policy preference;
+       masked positions are set to a huge negative downstream, unaffected.
     """
     for param in model.policy.parameters():
         param.register_hook(
@@ -455,6 +461,33 @@ def _install_finite_grad_guard(model: MaskablePPO) -> None:
                         torch.nan_to_num_(param, nan=0.0, posinf=0.0, neginf=0.0)
 
     model.policy.optimizer.register_step_post_hook(_sanitize_weights)
+
+    # Running count of forward passes that produced a non-finite action logit.
+    # Stashed on the model so end-of-training can report the total; a one-shot
+    # boolean would collapse "transient blip" and "diverging every step" into
+    # the same single log line, defeating the diagnostic.
+    model._finite_guard_logit_catches = 0
+
+    def _bound_logits(_module, _inputs, output):
+        safe = torch.nan_to_num(output, nan=0.0, posinf=0.0, neginf=0.0).clamp(
+            -30.0, 30.0
+        )
+        if not torch.isfinite(output).all():
+            model._finite_guard_logit_catches += 1
+            n = model._finite_guard_logit_catches
+            # Print the first catch, then on a widening cadence, so a stream of
+            # catches is visible in the log without flooding it.
+            if n == 1 or n % 100 == 0:
+                print(
+                    f"[finite-guard] non-finite ACTION LOGITS caught + clamped "
+                    f"(count={n}; forward-generated from finite weights, layers "
+                    f"1-2 could not see this). Run continues.",
+                    file=sys.stderr,
+                    flush=True,
+                )
+        return safe
+
+    model.policy.action_net.register_forward_hook(_bound_logits)
 
 
 def build_model(
@@ -638,6 +671,10 @@ def main() -> None:
     print(
         f"Model saved to {save_path}; reservoir ({len(reservoir)} snapshots) "
         f"saved to {reservoir_path}"
+    )
+    catches = getattr(model, "_finite_guard_logit_catches", 0)
+    print(
+        f"[finite-guard] total non-finite action-logit catches this run: {catches}"
     )
 
 

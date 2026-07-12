@@ -278,6 +278,61 @@ build — all s0-independent] -> harvest pass -> labels -> regen -> BC -> PPO ->
   sees off-distribution money states — retires the flat/uniform placeholder AND the
   server-log calibration dependency.
 
+### Rollout / harvest pass — LAID OUT (2026-07-12), not yet built
+
+The dedicated pass that produces the harvested BC stage above, plus three free
+byproducts. FINAL s0 for this bootstrap iteration = `s0_a4_v4` (a8 skipped — a4
+plateaued at the early-game/hand-partner bottleneck, not the shop; grinding a8 would
+consolidate the same ~1% win signal). Partner = h0.5
+(`runs/hand_ppo/hand_ppo_2000000_steps.zip`).
+
+**Fan-out — one rollout feeds four consumers:**
+- Harvested BC stage (~8k): hand-turn snapshots -> solver-labeled.
+- Stages 1-4 money regen: per-ante `$` marginals at hand-turn entry (free reduction).
+- Candidate B decode length: hand-size histogram (free reduction).
+- `V_curve(ante,$)`: shop-state snapshots + the s0 critic (money sweeps).
+
+**Structural key — the harvest splits into two phases that gate differently:**
+- **Phase 1 — rollout + capture (NEW, light, schema-INDEPENDENT, runnable now):**
+  `scripts/harvest_s0_rollouts.py`. Drives `ShopGymEnv(win_ante=8, hand_policy=h0.5)`
+  with s0 = deterministic `PPOPolicy(a4_v4)` — `win_ante=8` so runs reach natural
+  death/win, deterministic to match the DEPLOYED (argmax) induced distribution
+  (`--sample-shop` escape hatch if coverage is thin; h0.5 stays deterministic — it's
+  the partner being targeted). Interception point already exists at
+  `shop_run_adapter.py:149` `engine_step(self._gs, self._hand_policy(self._gs))`: wrap
+  the partner in `HarvestingHandPolicy(inner, sink)` that pickles `self._gs`
+  (RNG-exact, self-contained — same mechanism as `snapshot_state`) then delegates.
+  A record = `{engine_blob, ante, blind_type/boss_key, hand_size, dollars, hands_left,
+  discards_left, run_seed, turn_idx}` (metadata cached so stratification/stats need no
+  unpickle). Subsample ~6-8/run ante-stratified: buffer a run's captures, keep <=2-3
+  per ante bucket up to a per-run cap ~8 (within-run decorrelation; the cap only bites
+  on rare deep runs since most die ante 1). ~1200 runs -> ~8k. Also capture SHOP-state
+  snapshots (for V_curve) at shop decision points in the SAME pass (one extra sink,
+  saves a second rollout). Seeds `HARVEST_{i:08d}` — reserved prefix, DISJOINT from
+  `EVAL_` (harvesting eval seeds leaks the held-out suite into training). No solving ->
+  seconds/run -> runs on THIS machine. A `gs` blob is engine state not encoded obs, so
+  phase 1 has ZERO dependency on the schema bump — bank the corpus against a4_v4 NOW,
+  in parallel with the schema-bump / prescreen work (its hand-size histogram also tunes
+  Candidate B's max decode length).
+- **Phase 2 — label (REUSE, heavy, GATED on the schema bump):** extend
+  `generate_hand_demos.py` with a snapshot-fed front-end — restore blob -> `gs` ->
+  the EXISTING `generate_one_example` solver+encode body (everything from ~L341 works
+  off `gs = adapter.raw_state`, so a restored blob flows through identically) ->
+  `write_shard`. What changes is exactly the h1 schema bump, NOT harvest-specific:
+  index-set labels (remove the `MAX_HAND_CARDS` positional cap), width-16 obs +
+  flush/straight features, and the solver big-hand prescreen for n>8 (validate at 11+
+  first). 9600X job (~12s/example; ~8k / 12 workers ~ a couple hours); reuses the
+  existing multiprocessing/shard/resume machinery.
+
+**Free reductions (no extra pass):** per-ante `$` marginals (money regen) and the
+hand-size histogram (Candidate B) are group-bys over phase-1 metadata — emit at end of
+phase 1.
+
+**Ordering:** phase 1 (any time, bank now) -> [schema bump lands + prescreen validated]
+-> phase 2 -> regen -> BC -> PPO. V_curve additionally gates on the s0 critic (a4_v4
+already has it). Deep-ante coverage for h1 stays with the retained domain-randomized
+stages 1-4; the harvest adds REALISM for the early antes s0 actually reaches.
+
 ### h1 architecture — Candidate B COMMITTED (autoregressive pointer head)
 
 - Hand agent ONLY: the shop's flat Discrete(686) head survives s1 untouched
