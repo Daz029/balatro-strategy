@@ -260,8 +260,14 @@ build — all s0-independent] -> harvest pass -> labels -> regen -> BC -> PPO ->
   step exists for). The shard schema stops encoding an action-space assumption: a
   combo-lookup head consumes them as subset lookups, a pointer head as sorted pick
   sequences — the head choice never forces relabeling. Obs width becomes the only cap:
-  `MAX_HAND_CARDS_OBS` 12 -> 40, truncate lowest-first (masked-block widening is free
-  per the Serpent item; the FEATURE bump below is what forces regen).
+  `MAX_HAND_CARDS_OBS` 12 -> 40 (user call: with B committed, width is nearly free —
+  no parameter scales with it, masked padding contributes nothing, shards write actual
+  width and the loader up-pads, and B's decode length is the number of PICKS (<=5) not
+  the width — so max it out past any plausible hand: 16 still truncates in degenerate
+  builds, a 5-slot hand-size build starts ~22 before Serpent compounding). Truncation
+  stays lowest-first as the safety valve regardless — no finite width is provably safe
+  (documented at the Serpent item). Masked-block widening is free; the FEATURE bump
+  below is what forces regen.
 - **Solver big-hand cost** (`best_immediate_play` is C(n,5) per recursion node: 56 at
   n=8, ~4.4k at n=16): template-prescreen for n>8 — rank lines via
   `rank_templates_cheaply`, run the full exact evaluation only on the top-k
