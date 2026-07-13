@@ -505,9 +505,24 @@ forces a second regen.
   path. TWO engine bugs found+fixed en route, both the Throwback class:
   The Idol could never fire (reset_round_targets stored idol_card without the
   "id" the handler compares against), and Blueprint/Brainstorm ignored
-  blueprint_compat (copies could fire the 29 incompatible jokers). Slice 4
-  pending — MIND the h0.5 obs-compat sequencing flag recorded at the slice-4
-  item in the handoff doc.
+  blueprint_compat (copies could fire the 29 incompatible jokers). B2 slice 4
+  done 2026-07-13 (branch `worktree-pre-regen-b2-slice4-schema-v2`):
+  SCHEMA_VERSION=2 writer (trigger_match + id arrays + real consumable
+  block), `build_observation_v2`/`observation_space_v2` as a VERSIONED SEAM
+  (v1 stays byte-identical and the env default per the h0.5 sequencing flag;
+  flips only at h1 BC/PPO), v2-only BC loader with width-generic up-pad.
+  Slice-4 decisions: v2 NOT frozen until B4 (B4 amends the same version —
+  no v2 datasets in the gap); consumable block = 8 PER-INSTANCE rows in
+  engine slot order, tail-truncating (Crystal Ball=3 slots, Perkeo
+  negatives unbounded; stacked type+count rows REJECTED — row index must
+  stay engine slot index for h2 UseConsumable addressing, and stacking
+  would force the re-regen the rider prevents); copy-target fields store
+  the frozen-vocab key id, never the descriptor vector. Two post-regen
+  riders recorded at handoff pitfall 17: the flat-head control DROPS
+  labels touching position >=8 (report the dropped fraction), and B's env
+  interface is the label encoding itself (type + ascending picks vector;
+  masks built policy-side; v1 Discrete(436) path survives for h0.5).
+  Next: A3 (unblocked — v1 obs untouched) and B3.
 
 ### h1 architecture — Candidate B COMMITTED (autoregressive pointer head)
 

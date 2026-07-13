@@ -48,7 +48,7 @@ Hard rules:
 - A3 must be resolved (triggered or cleared) before B6's go/no-go, and B6 —
   if it happens — must finish before C2.
 
-## Status (A1/A2/B1 directly on `main`; B2 on `worktree-pre-regen-b2-hand-potential`)
+## Status (A1/A2/B1 + B2 slices 1–3 on `main`; slice 4 on `worktree-pre-regen-b2-slice4-schema-v2`)
 
 - **A1 — DONE** (`scripts/harvest_s0_rollouts.py` + tests): capture pipeline,
   dual pass, per-run blob shards + blob-free metadata, reductions + readout.
@@ -77,7 +77,33 @@ Hard rules:
   handler compares against), and Blueprint/Brainstorm ignored
   `blueprint_compat` (all 29 incompatible jokers were copyable — e.g. a
   Blueprint beside an Egg doubled its end-of-round growth).
-- **A3, B2 slice 4, B3–B6, C1–C2** — not started.
+- **B2 slice 4 — DONE** (2026-07-13, branch
+  `worktree-pre-regen-b2-slice4-schema-v2`): `SCHEMA_VERSION = 2` in the demo
+  writer (18-wide hand cards, 256 GC, trigger_match, joker/copy id arrays,
+  real consumable block); `build_observation_v2` / `observation_space_v2` as a
+  VERSIONED SEAM in `hand_play_gym.py` (v1 stays byte-identical and the
+  `HandPlayGymEnv` default — `obs_version=2` opt-in — so every h0.5 consumer
+  and A3 keep working); `train_bc.py` loads v2 only (v1 = pre-regen data,
+  rejected loudly) with a width-generic axis-1 up-pad covering the 4-D
+  trigger_match. Decisions made while building:
+  - **v2 IS NOT FROZEN until B4 lands** — B4 amends the same version number
+    (index-set labels, actual-width hand blocks). Do not generate v2 datasets
+    in the gap (documented at the constant).
+  - **Consumable block = 8 PER-INSTANCE rows in engine slot order**
+    (`MAX_CONSUMABLES_V2`), tail-truncating: 2 (the v1 dormant width) is too
+    narrow for harvested states (Crystal Ball = 3 slots; Perkeo negatives
+    exceed any slot count), and width is nearly free. Stacked (type+count)
+    rows REJECTED: row index must stay engine slot index for the h2
+    UseConsumable/SellConsumable addressing (the shop obs invariant), and a
+    stacked shard would force exactly the h2 re-regen the rider prevents —
+    the stacked view is a lossy projection the model can compute internally.
+  - **Copy-target fields store the frozen-vocab key id, not the 24-dim
+    descriptor** (a pure function of the id; storing vectors would be a
+    drift surface — the same id-not-vector pattern as `joker_ids`).
+  - The current `HandPlayBCModel` trains against the v2 space by consuming
+    the widened float blocks and ignoring the new keys; the embedding-gather
+    encoder that consumes them is post-regen scope (recorded in CLAUDE.md).
+- **A3, B3–B6, C1–C2** — not started.
 
 ## Task specifications
 
@@ -403,6 +429,18 @@ explicit in the PR.
     token as a fixed extra logit slot (not positioned at hand size); stop illegal
     at zero picks, forced at five. The mask constraint must be identical at BC,
     PPO, and eval — pin with a parity test when B is built.
+    Two riders (agreed 2026-07-13, slice-4 session):
+    - **Flat-head control on big-hand labels:** the BC-only validation's flat
+      436-head control structurally cannot represent labels touching position
+      ≥8 — it DROPS those examples, and the dropped fraction must be reported
+      alongside the CE comparison so the numbers are read with that caveat.
+    - **B's env interface = the label encoding itself:** step() takes the
+      (type + up-to-5 ascending picks, -1 pad) vector — Discrete(436) cannot
+      carry variable-length picks. Per-step masks are built POLICY-side (the
+      prefix-dependent monotone/stop constraints only exist mid-decode; the
+      base facts — hand_mask, hands/discards-left — are already in the v2
+      obs). The v1 Discrete(436) path survives alongside, same seam pattern
+      as `obs_version` (h0.5 stays the shop partner through s1).
 18. **Coverage criteria that can never pass are not criteria.** Do not gate the
     harvest on things like "every joker seen N times" — an argmax policy will never
     buy all 150 jokers, and vocabulary breadth is stages 1-4's job. The readout
