@@ -22,6 +22,7 @@ from jackdaw.env.trigger_match import (
     _CLASS4_NON_CARD,
     _check_taxonomy,
     joker_center_key_ids,
+    resolve_copy_targets,
     trigger_match_matrix,
 )
 
@@ -281,6 +282,124 @@ class TestClass3And4AllZero:
         jokers = [create_joker("j_jolly"), create_joker("j_golden")]
         m = trigger_match_matrix(_gs(hand, jokers))
         assert not m.any()
+
+
+class TestCopyResolution:
+    def test_blueprint_resolves_right_neighbor(self):
+        bp = create_joker("j_blueprint")
+        photo = create_joker("j_photograph")
+        res = resolve_copy_targets(_gs([], [bp, photo]))
+        assert res[0].active
+        assert res[0].target_index == 1
+        assert res[0].target_key_id == center_key_id("j_photograph")
+        # Non-copy jokers get inactive entries with zeroed fields
+        assert not res[1].active
+        assert res[1].target_index == -1
+        assert res[1].target_key_id == 0
+
+    def test_blueprint_rightmost_inactive(self):
+        res = resolve_copy_targets(
+            _gs([], [create_joker("j_photograph"), create_joker("j_blueprint")])
+        )
+        assert not res[1].active
+
+    def test_brainstorm_resolves_leftmost_skipping_self(self):
+        brain = create_joker("j_brainstorm")
+        photo = create_joker("j_photograph")
+        res = resolve_copy_targets(_gs([], [brain, photo]))
+        assert res[0].active
+        assert res[0].target_index == 1
+
+    def test_chain_resolves_through_copies(self):
+        # [lusty, blueprint, brainstorm]: Blueprint copies Brainstorm,
+        # Brainstorm copies leftmost Lusty — both resolve to index 0.
+        lusty = create_joker("j_lusty_joker")
+        bp = create_joker("j_blueprint")
+        brain = create_joker("j_brainstorm")
+        res = resolve_copy_targets(_gs([], [lusty, bp, brain]))
+        assert res[1].active and res[1].target_index == 0
+        assert res[2].active and res[2].target_index == 0
+
+    def test_copy_loop_inactive(self):
+        # [blueprint, brainstorm]: Blueprint→Brainstorm→Blueprint→... —
+        # the handlers' counter cap turns this into no effect.
+        res = resolve_copy_targets(
+            _gs([], [create_joker("j_blueprint"), create_joker("j_brainstorm")])
+        )
+        assert not res[0].active
+        assert not res[1].active
+
+    def test_debuffed_target_inactive(self):
+        photo = create_joker("j_photograph")
+        photo.debuff = True
+        res = resolve_copy_targets(_gs([], [create_joker("j_blueprint"), photo]))
+        assert not res[0].active
+
+    def test_incompatible_target_inactive(self):
+        # Egg is blueprint_compat=False in centers.json — the engine's own
+        # compat guard must flow through resolution.
+        res = resolve_copy_targets(
+            _gs([], [create_joker("j_blueprint"), create_joker("j_egg")])
+        )
+        assert not res[0].active
+
+    def test_debuffed_copy_joker_inactive(self):
+        bp = create_joker("j_blueprint")
+        bp.debuff = True
+        res = resolve_copy_targets(_gs([], [bp, create_joker("j_photograph")]))
+        assert not res[0].active
+
+
+class TestCopyInheritance:
+    def test_blueprint_inherits_photograph_faces(self):
+        hand = _cards(
+            (Suit.HEARTS, Rank.KING),
+            (Suit.SPADES, Rank.FOUR),
+        )
+        bp = create_joker("j_blueprint")
+        photo = create_joker("j_photograph")
+        m = trigger_match_matrix(_gs(hand, [bp, photo]))
+        # Blueprint's column carries the resolved target's matches
+        assert m[:, 0, SCORED].tolist() == [True, False]
+        assert m[:, 1, SCORED].tolist() == [True, False]
+
+    def test_inactive_blueprint_all_zero(self):
+        hand = _cards((Suit.HEARTS, Rank.KING))
+        # Rightmost Blueprint has nothing to copy
+        m = trigger_match_matrix(
+            _gs(hand, [create_joker("j_photograph"), create_joker("j_blueprint")])
+        )
+        assert m[0, 0, SCORED]
+        assert not m[:, 1].any()
+
+    def test_inheritance_uses_target_ability_state(self):
+        # Brainstorm copying Castle must read the TARGET's castle suit
+        hand = _cards((Suit.CLUBS, Rank.SEVEN), (Suit.SPADES, Rank.TWO))
+        castle = create_joker("j_castle")
+        castle.ability["castle_card_suit"] = "Clubs"
+        brain = create_joker("j_brainstorm")
+        m = trigger_match_matrix(_gs(hand, [castle, brain]))
+        assert m[:, 1, HELD].tolist() == [True, False]
+
+    def test_copy_of_set_level_joker_stays_zero(self):
+        hand = _cards(
+            (Suit.HEARTS, Rank.TWO),
+            (Suit.DIAMONDS, Rank.FIVE),
+            (Suit.CLUBS, Rank.NINE),
+            (Suit.SPADES, Rank.KING),
+        )
+        m = trigger_match_matrix(
+            _gs(hand, [create_joker("j_blueprint"), create_joker("j_flower_pot")])
+        )
+        # Flower Pot has no honest per-card bit; neither does a copy of it
+        assert not m.any()
+
+    def test_ids_array_keeps_own_key(self):
+        # The ids array is the joker's OWN identity; the resolved-target id
+        # is a separate obs field (wired at the schema bump).
+        jokers = [create_joker("j_blueprint"), create_joker("j_photograph")]
+        ids = joker_center_key_ids(_gs([], jokers))
+        assert ids[0] == center_key_id("j_blueprint")
 
 
 class TestEngineExactExclusions:

@@ -57,13 +57,22 @@ rule as every other per-card encoder).
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Callable
 
 import numpy as np
 
 from jackdaw.engine.card import Card
 from jackdaw.engine.hand_eval import get_hand_eval_flags
+from jackdaw.engine.jokers import (
+    JokerContext,
+    _find_leftmost,
+    _find_right_neighbor,
+    blueprint_compatible,
+)
 from jackdaw.env.observation import center_key_id, center_key_vocabulary
+
+_COPY_JOKERS = frozenset({"j_blueprint", "j_brainstorm"})
 
 # Predicate: (card, joker_card, gs, flags) -> (scored, held).
 # `joker_card` is the live joker (Castle stores its suit on the joker's
@@ -369,10 +378,87 @@ _check_taxonomy()
 
 
 # ---------------------------------------------------------------------------
+# Copy resolution (Blueprint / Brainstorm) — B2 slice 3
+# ---------------------------------------------------------------------------
+#
+# Pooling destroys adjacency, so "has a copy effect" alone is structurally
+# uninterpretable in the obs — each copy joker's row must say WHAT it
+# currently copies. Resolution reuses the ENGINE's own path (pitfall 11:
+# a reimplementation of compatibility/termination rules WILL drift):
+# `_find_right_neighbor` / `_find_leftmost` are the handlers' target
+# selectors, `blueprint_compatible` is their compat guard, and the walk
+# mirrors the handlers' delegation loop including the
+# `blueprint > len(jokers) + 1` counter cap.
+
+
+@dataclass(frozen=True)
+class CopyResolution:
+    """Resolved copy target for one joker slot.
+
+    ``active`` is False for non-copy jokers AND for copies pointing at
+    nothing / a debuffed target / an incompatible target / a loop — in
+    which case both target fields are zeroed (the spec's "inactive →
+    zeroed target fields").
+    """
+
+    active: bool
+    target_index: int  # index into gs["jokers"]; -1 when inactive
+    target_key_id: int  # frozen-vocab center-key id; 0 when inactive
+
+    @classmethod
+    def inactive(cls) -> CopyResolution:
+        return cls(active=False, target_index=-1, target_key_id=0)
+
+
+def resolve_copy_targets(gs: dict[str, Any]) -> list[CopyResolution]:
+    """Per-joker resolved copy targets, one entry per gs["jokers"] slot.
+
+    Walks Blueprint→right-neighbor / Brainstorm→leftmost chains exactly
+    like the handlers' recursive delegation: each hop applies the debuff
+    and blueprint_compat guards, and the hop counter cap
+    (``> len(jokers) + 1``) turns loops into inactive resolutions. A chain
+    is active only if it terminates on a NON-copy joker that passed every
+    guard. A debuffed copy joker is itself inactive (the scoring loops
+    never call it).
+    """
+    jokers: list[Card] = gs.get("jokers", [])
+    ctx = JokerContext(jokers=jokers)
+    index_by_id = {id(j): i for i, j in enumerate(jokers)}
+
+    out: list[CopyResolution] = []
+    for joker in jokers:
+        if joker.center_key not in _COPY_JOKERS or joker.debuff:
+            out.append(CopyResolution.inactive())
+            continue
+
+        current = joker
+        hops = 0
+        resolution = CopyResolution.inactive()
+        while current.center_key in _COPY_JOKERS:
+            hops += 1
+            if hops > len(jokers) + 1:  # the handlers' loop cap
+                break
+            target = (
+                _find_right_neighbor(current, ctx)
+                if current.center_key == "j_blueprint"
+                else _find_leftmost(current, ctx)
+            )
+            if target is None or target.debuff or not blueprint_compatible(target):
+                break
+            current = target
+        else:
+            resolution = CopyResolution(
+                active=True,
+                target_index=index_by_id[id(current)],
+                target_key_id=center_key_id(current.center_key),
+            )
+        out.append(resolution)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Matrix builder
 # ---------------------------------------------------------------------------
-
-_EMPTY_MATCH = np.zeros((0, 0, 2), dtype=bool)
 
 
 def trigger_match_matrix(gs: dict[str, Any]) -> np.ndarray:
@@ -382,6 +468,13 @@ def trigger_match_matrix(gs: dict[str, Any]) -> np.ndarray:
     as are rows for DEBUFFED cards and columns for DEBUFFED jokers — the
     engine's scoring loops skip both before any handler runs, so those
     zeros are engine-exact, not a candidacy judgment.
+
+    A Blueprint/Brainstorm column INHERITS the resolved copy target's
+    match row: the target's predicate is evaluated with the TARGET joker
+    card (Castle's suit lives on the target's ability). An inactive copy
+    stays all-zero. Known simplification: mutation-guarded scaling
+    triggers (``not ctx.blueprint`` in the handlers) inherit candidacy
+    anyway — the bit is class membership, not will-fire.
     """
     hand: list[Card] = gs.get("hand", [])
     jokers: list[Card] = gs.get("jokers", [])
@@ -391,13 +484,24 @@ def trigger_match_matrix(gs: dict[str, Any]) -> np.ndarray:
     flags = get_hand_eval_flags(jokers)
     out = np.zeros((len(hand), len(jokers), 2), dtype=bool)
 
+    resolutions: list[CopyResolution] | None = None
+    if any(j.center_key in _COPY_JOKERS for j in jokers):
+        resolutions = resolve_copy_targets(gs)
+
     active: list[tuple[int, Card, Predicate]] = []
     for j, joker in enumerate(jokers):
         if joker.debuff:
             continue
-        pred = _PREDICATES.get(joker.center_key)
+        pred_owner = joker
+        if joker.center_key in _COPY_JOKERS:
+            assert resolutions is not None
+            res = resolutions[j]
+            if not res.active:
+                continue
+            pred_owner = jokers[res.target_index]
+        pred = _PREDICATES.get(pred_owner.center_key)
         if pred is not None:
-            active.append((j, joker, pred))
+            active.append((j, pred_owner, pred))
     if not active:
         return out
 
