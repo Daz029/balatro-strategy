@@ -59,6 +59,17 @@ def center_key_id(key: str) -> int:
     return _CENTER_KEY_TO_ID.get(key, 0)
 
 
+def center_key_vocabulary() -> tuple[str, ...]:
+    """Every center key in the frozen vocabulary (sorted centers.json order).
+
+    The same mapping the embedding ids come from — consumers that must
+    cover the whole vocabulary (e.g. the trigger-match taxonomy's
+    build-time coverage check) enumerate it from here rather than
+    re-reading centers.json.
+    """
+    return tuple(_CENTER_KEY_TO_ID)
+
+
 # ---------------------------------------------------------------------------
 # Categorical index tables
 # ---------------------------------------------------------------------------
