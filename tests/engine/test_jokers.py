@@ -1476,6 +1476,49 @@ class TestBrainstorm:
         assert calculate_joker(brain, ctx) is None
 
 
+class TestBlueprintCompat:
+    """Vanilla checks config.center.blueprint_compat before delegating —
+    the "Compatible/Incompatible" badge. 29 jokers (economy/passive) are
+    marked incompatible in centers.json; copying them must do nothing.
+    Regression: the handlers originally skipped this check, so a Blueprint
+    right of an Egg would double its end-of-round growth."""
+
+    def test_blueprint_incompatible_target_no_effect(self):
+        bp = _joker_card("j_blueprint")
+        egg = _joker_card("j_egg", extra=3)
+        jokers = [bp, egg]
+        ctx = JokerContext(end_of_round=True, jokers=jokers)
+        # Egg itself fires at end_of_round; the copy must not
+        assert calculate_joker(egg, ctx) is not None
+        assert calculate_joker(bp, ctx) is None
+
+    def test_brainstorm_incompatible_target_no_effect(self):
+        golden = _joker_card("j_golden", extra=4)
+        brain = _joker_card("j_brainstorm")
+        jokers = [golden, brain]
+        ctx = JokerContext(end_of_round=True, jokers=jokers)
+        assert calculate_joker(brain, ctx) is None
+
+    def test_chain_ending_on_incompatible_no_effect(self):
+        """[j_egg, j_blueprint, j_brainstorm]: Blueprint copies Brainstorm
+        (compatible), Brainstorm copies leftmost Egg (incompatible) → None."""
+        egg = _joker_card("j_egg", extra=3)
+        bp = _joker_card("j_blueprint")
+        brain = _joker_card("j_brainstorm")
+        jokers = [egg, bp, brain]
+        ctx = JokerContext(end_of_round=True, jokers=jokers)
+        assert calculate_joker(bp, ctx) is None
+
+    def test_compatible_target_still_copied(self):
+        bp = _joker_card("j_blueprint")
+        joker = _joker_card("j_joker", mult=4)
+        jokers = [bp, joker]
+        ctx = JokerContext(joker_main=True, jokers=jokers)
+        result = calculate_joker(bp, ctx)
+        assert result is not None
+        assert result.mult_mod == 4
+
+
 class TestBlueprintBrainstormChain:
     """Blueprint copying Brainstorm which copies the leftmost."""
 
