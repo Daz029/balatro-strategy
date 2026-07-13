@@ -146,9 +146,24 @@ the real engine would never produce. Fix:
 
 ### B2 — observation feature bump (`jackdaw/env/observation.py`, demo writer)
 
+**Schema is HAND-AGENT-ONLY — shop obs stays frozen (DEFERRED ISSUE for the merge).**
+s0 is frozen at `D_PLAYING_CARD=15` / `D_GLOBAL=235`, and the shop obs uses both
+(`encode_global_context` verbatim + `D_PLAYING_CARD` for pack-targeting rows), so
+`s1 --init-from s0` breaks if the shared constants move. B2's new features
+therefore land on HAND-SPECIFIC paths only: a hand card width of 18 and a
+hand-only `encode_hand_potential` appended to the hand global — `encode_global_context`
+and `D_PLAYING_CARD` are NOT touched. This is also semantically correct (the shop
+has an empty hand and picks pack cards, not poker hands — flush/straight potential
+is dead input for it). CONSEQUENCE / OPEN ISSUE: the hand (18-wide cards, +21 GC)
+and shop (15-wide, 235 GC) obs schemas now DIVERGE; reconciling them into one card/
+global encoder is deferred to the in-blind MERGE (h2, out of scope here) — the
+already-documented place a shop-side schema bump happens. Flag it there when the
+merge is built.
+
 **Build slices** (staged into separate tested commits, each stacking on the last):
-1. **Flush/straight potential features** — per-card +3 + GC +21 (below). Pure
-   O(n) obs additions, known-hand fixtures. Self-contained, lowest risk — first.
+1. **Flush/straight potential features** — per-card +3 + GC +21 (below), on the
+   hand paths only per the note above. Pure O(n) obs additions, known-hand
+   fixtures. Self-contained, lowest risk — first.
 2. **Trigger-match matrix** — `trigger_match[card, joker, {scored,held}]` +
    `joker_center_key_id`, 4-class taxonomy with a build-time coverage check that
    classifies EVERY vocab joker (unclassified = hard error). Class-2 reads live
