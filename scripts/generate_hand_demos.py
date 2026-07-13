@@ -64,15 +64,23 @@ from jackdaw.env.hand_play_adapter import (  # noqa: E402
     HandPlayConfig,
     JokerCountBand,
 )
+from jackdaw.env.hand_play_gym import (  # noqa: E402
+    MAX_CONSUMABLES_V2,
+    encode_hand_state_v2,
+)
 from jackdaw.env.observation import (  # noqa: E402
+    D_CONSUMABLE,
+    D_HAND_CARD,
     D_JOKER,
-    D_PLAYING_CARD,
-    encode_global_context,
-    encode_jokers_batch,
-    encode_playing_cards_batch,
 )
 
-SCHEMA_VERSION = 1
+# v2 = the h1 bump (B2 slice 4): 18-wide hand cards (+3 hand-potential),
+# 256-wide global context (+21), trigger-match matrix, joker center-key
+# ids, Blueprint/Brainstorm copy-resolution fields, and a REAL consumable
+# block. NOT FROZEN until B4 lands: B4 amends this same version in place
+# (index-set labels replace card_target_mask; actual-width hand blocks) --
+# do NOT generate v2 datasets before B4 is merged.
+SCHEMA_VERSION = 2
 # Demo write width for the hand block. Stays 8 even though the gym env's
 # observation is wider (hand_play_gym.MAX_HAND_CARDS_OBS=12, for The
 # Serpent's over-draw): generation is single-snapshot -- it labels reset
@@ -222,10 +230,23 @@ class Example:
     hand_mask: np.ndarray
     jokers: np.ndarray
     joker_mask: np.ndarray
+    joker_ids: np.ndarray
+    copy_active: np.ndarray
+    copy_target_ids: np.ndarray
+    trigger_match: np.ndarray
+    consumables: np.ndarray
+    consumable_mask: np.ndarray
     action_type: int
     card_target_mask: np.ndarray
     p_clear: float
     seed: str
+
+
+def _pad_1d(arr: np.ndarray, max_n: int, dtype: type) -> np.ndarray:
+    out = np.zeros(max_n, dtype=dtype)
+    n = min(len(arr), max_n)
+    out[:n] = arr[:n]
+    return out
 
 
 def _pad_entities(arr: np.ndarray, max_n: int, dim: int) -> tuple[np.ndarray, np.ndarray]:
@@ -381,23 +402,39 @@ def generate_one_example(seed: str, config: HandPlayConfig) -> Example:
 
     action_type = ActionType.PlayHand if choice.action == "play" else ActionType.Discard
 
-    global_ctx = encode_global_context(gs)
-    hand_arr = encode_playing_cards_batch(hand, gs)
-    joker_arr = encode_jokers_batch(jokers, gs)
+    ent = encode_hand_state_v2(gs)
 
-    hand_padded, hand_mask = _pad_entities(hand_arr, MAX_HAND_CARDS, D_PLAYING_CARD)
-    joker_padded, joker_mask = _pad_entities(joker_arr, MAX_JOKERS, D_JOKER)
+    # Hand/joker overflow still RAISES here (single-snapshot reset states
+    # never exceed the write widths; a violation is a sampling bug). The
+    # consumable block TRUNCATES its tail instead: stages 1-4 inject no
+    # consumables, but harvested full-run states (C2) can exceed any fixed
+    # width via negative-edition copies (Perkeo) -- same policy as
+    # build_observation_v2.
+    hand_padded, hand_mask = _pad_entities(ent["hand_cards"], MAX_HAND_CARDS, D_HAND_CARD)
+    joker_padded, joker_mask = _pad_entities(ent["jokers"], MAX_JOKERS, D_JOKER)
+    cons_padded, cons_mask = _pad_entities(
+        ent["consumables"][:MAX_CONSUMABLES_V2], MAX_CONSUMABLES_V2, D_CONSUMABLE
+    )
+    trigger = np.zeros((MAX_HAND_CARDS, MAX_JOKERS, 2), dtype=bool)
+    trigger_src = ent["trigger_match"][:MAX_HAND_CARDS, :MAX_JOKERS]
+    trigger[: trigger_src.shape[0], : trigger_src.shape[1]] = trigger_src
 
     # Must come AFTER encoding: tier 2 executes the action on the real
     # state, mutating it (the state is discarded after this function).
     validate_label_executability(adapter, action_type, selected_indices)
 
     return Example(
-        global_context=global_ctx,
+        global_context=ent["global_context"],
         hand_cards=hand_padded,
         hand_mask=hand_mask,
         jokers=joker_padded,
         joker_mask=joker_mask,
+        joker_ids=_pad_1d(ent["joker_ids"], MAX_JOKERS, np.int64),
+        copy_active=_pad_1d(ent["copy_active"], MAX_JOKERS, np.float32),
+        copy_target_ids=_pad_1d(ent["copy_target_ids"], MAX_JOKERS, np.int64),
+        trigger_match=trigger,
+        consumables=cons_padded,
+        consumable_mask=cons_mask,
         action_type=int(action_type),
         card_target_mask=card_target_mask,
         p_clear=float(choice.p_clear),
@@ -407,7 +444,17 @@ def generate_one_example(seed: str, config: HandPlayConfig) -> Example:
 
 def write_shard(path: Path, examples: list[Example]) -> None:
     """Write one `.npz` shard. `schema_version` lets a future consumer
-    detect stale data if `observation.py`'s encoding shape ever changes."""
+    detect stale data if `observation.py`'s encoding shape ever changes.
+
+    The consumable block stores the REAL owned consumables (empty for
+    stages 1-4, genuinely populated for harvested C2 states) while the
+    LABELS stay consumable-blind: the solver ignores consumables entirely,
+    so `p_clear`/action labels are computed as if the block were empty. BC
+    just learns an input that is inert for hand-play -- deliberately, so
+    h2's BC pool doesn't show zeros where live play shows real consumables
+    (in-blind consumable SELECTION itself stays at h2; see
+    docs/pre-regen-handoff.md, B2 slice 4 rider).
+    """
     np.savez_compressed(
         path,
         schema_version=np.array([SCHEMA_VERSION]),
@@ -416,6 +463,12 @@ def write_shard(path: Path, examples: list[Example]) -> None:
         hand_mask=np.stack([e.hand_mask for e in examples]),
         jokers=np.stack([e.jokers for e in examples]),
         joker_mask=np.stack([e.joker_mask for e in examples]),
+        joker_ids=np.stack([e.joker_ids for e in examples]),
+        copy_active=np.stack([e.copy_active for e in examples]),
+        copy_target_ids=np.stack([e.copy_target_ids for e in examples]),
+        trigger_match=np.stack([e.trigger_match for e in examples]),
+        consumables=np.stack([e.consumables for e in examples]),
+        consumable_mask=np.stack([e.consumable_mask for e in examples]),
         action_type=np.array([e.action_type for e in examples], dtype=np.int64),
         card_target_mask=np.stack([e.card_target_mask for e in examples]),
         p_clear=np.array([e.p_clear for e in examples], dtype=np.float32),

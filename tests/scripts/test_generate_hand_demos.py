@@ -37,12 +37,28 @@ from jackdaw.engine.card_factory import create_playing_card
 from jackdaw.engine.data.enums import Rank, Suit
 from jackdaw.env.action_space import ActionType
 from jackdaw.env.hand_play_adapter import HandPlayConfig
+from jackdaw.env.hand_play_gym import MAX_CONSUMABLES_V2
+from jackdaw.env.observation import D_CONSUMABLE, D_HAND_CARD, D_HAND_GLOBAL
 
 
 def _cards(n: int) -> list:
     ranks = list(Rank)
     suits = list(Suit)
     return [create_playing_card(suits[i % 4], ranks[i % len(ranks)]) for i in range(n)]
+
+
+def _example_extras() -> dict:
+    """The v2 arrays every Example carries. Synthetic-Example tests keep
+    using tiny shapes for the float blocks they assert on; these just need
+    to exist and round-trip."""
+    return dict(
+        joker_ids=np.zeros(MAX_JOKERS, dtype=np.int64),
+        copy_active=np.zeros(MAX_JOKERS, dtype=np.float32),
+        copy_target_ids=np.zeros(MAX_JOKERS, dtype=np.int64),
+        trigger_match=np.zeros((MAX_HAND_CARDS, MAX_JOKERS, 2), dtype=bool),
+        consumables=np.zeros((MAX_CONSUMABLES_V2, D_CONSUMABLE), dtype=np.float32),
+        consumable_mask=np.zeros(MAX_CONSUMABLES_V2, dtype=bool),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -121,10 +137,18 @@ def test_generate_one_example_shapes_and_valid_action() -> None:
     example = generate_one_example("PIPELINE_SMOKE_TEST", config)
 
     assert isinstance(example, Example)
-    assert example.hand_cards.shape[0] == MAX_HAND_CARDS
+    assert example.global_context.shape == (D_HAND_GLOBAL,)
+    assert example.hand_cards.shape == (MAX_HAND_CARDS, D_HAND_CARD)
     assert example.hand_mask.shape == (MAX_HAND_CARDS,)
     assert example.jokers.shape[0] == MAX_JOKERS
     assert example.joker_mask.shape == (MAX_JOKERS,)
+    assert example.joker_ids.shape == (MAX_JOKERS,)
+    assert example.copy_active.shape == (MAX_JOKERS,)
+    assert example.copy_target_ids.shape == (MAX_JOKERS,)
+    assert example.trigger_match.shape == (MAX_HAND_CARDS, MAX_JOKERS, 2)
+    assert example.consumables.shape == (MAX_CONSUMABLES_V2, D_CONSUMABLE)
+    # Stages 1-4 inject no consumables; the block is real but empty here.
+    assert example.consumable_mask.sum() == 0
     assert example.card_target_mask.shape == (MAX_HAND_CARDS,)
     assert example.action_type in (int(ActionType.PlayHand), int(ActionType.Discard))
     # No discards possible -> the solver must recommend playing.
@@ -151,6 +175,7 @@ def test_write_shard_round_trip(tmp_path) -> None:
             card_target_mask=np.zeros(MAX_HAND_CARDS, dtype=bool),
             p_clear=0.5 + i,
             seed=f"SEED_{i}",
+            **_example_extras(),
         )
         for i in range(3)
     ]
@@ -161,7 +186,10 @@ def test_write_shard_round_trip(tmp_path) -> None:
     assert loaded["global_context"].shape == (3, 5)
     assert loaded["p_clear"].tolist() == pytest.approx([0.5, 1.5, 2.5])
     assert list(loaded["seed"]) == ["SEED_0", "SEED_1", "SEED_2"]
-    assert loaded["schema_version"][0] == 1
+    assert loaded["schema_version"][0] == 2
+    assert loaded["trigger_match"].shape == (3, MAX_HAND_CARDS, MAX_JOKERS, 2)
+    assert loaded["joker_ids"].dtype == np.int64
+    assert loaded["consumables"].shape == (3, MAX_CONSUMABLES_V2, D_CONSUMABLE)
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +245,7 @@ def test_worker_run_writes_shards_and_logs_failures(tmp_path, monkeypatch) -> No
             card_target_mask=np.zeros(MAX_HAND_CARDS, dtype=bool),
             p_clear=1.0,
             seed=seed,
+            **_example_extras(),
         )
 
     monkeypatch.setattr(gen_mod, "generate_one_example", fake_generate)
@@ -329,6 +358,7 @@ def _fake_example(seed: str) -> Example:
         card_target_mask=np.zeros(MAX_HAND_CARDS, dtype=bool),
         p_clear=1.0,
         seed=seed,
+        **_example_extras(),
     )
 
 

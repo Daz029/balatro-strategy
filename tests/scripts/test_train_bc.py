@@ -28,8 +28,17 @@ from jackdaw.agents.hand_action_space import (  # noqa: E402
     action_to_combo,
 )
 from jackdaw.agents.hand_policy import HandPlayBCModel  # noqa: E402
-from jackdaw.env.hand_play_gym import MAX_HAND_CARDS_OBS, observation_space  # noqa: E402
-from jackdaw.env.observation import D_GLOBAL, D_JOKER, D_PLAYING_CARD  # noqa: E402
+from jackdaw.env.hand_play_gym import (  # noqa: E402
+    MAX_CONSUMABLES_V2,
+    MAX_HAND_CARDS_OBS,
+    observation_space_v2,
+)
+from jackdaw.env.observation import (  # noqa: E402
+    D_CONSUMABLE,
+    D_HAND_CARD,
+    D_HAND_GLOBAL,
+    D_JOKER,
+)
 
 # Shards write 8-wide hand blocks (the action space's position count); the
 # loader up-pads them to MAX_HAND_CARDS_OBS.
@@ -46,10 +55,10 @@ def _write_synthetic_shard(
     discards_left: int = 1,
     seed_prefix: str = "synth",
     start_idx: int = 0,
-    schema_version: int = 1,
+    schema_version: int = 2,
 ) -> None:
     """Emit a shard matching generate_hand_demos.write_shard's schema."""
-    global_context = np.zeros((n, D_GLOBAL), dtype=np.float32)
+    global_context = np.zeros((n, D_HAND_GLOBAL), dtype=np.float32)
     global_context[:, 13] = hands_left / 10.0
     global_context[:, 14] = discards_left / 10.0
     global_context[:, :] += rng.normal(0, 0.01, size=global_context.shape).astype(np.float32)
@@ -69,10 +78,16 @@ def _write_synthetic_shard(
         path,
         schema_version=np.array([schema_version]),
         global_context=global_context,
-        hand_cards=rng.normal(size=(n, MAX_HAND_CARDS, D_PLAYING_CARD)).astype(np.float32),
+        hand_cards=rng.normal(size=(n, MAX_HAND_CARDS, D_HAND_CARD)).astype(np.float32),
         hand_mask=hand_mask,
         jokers=rng.normal(size=(n, MAX_JOKERS, D_JOKER)).astype(np.float32),
         joker_mask=np.ones((n, MAX_JOKERS), dtype=bool),
+        joker_ids=rng.integers(0, 300, size=(n, MAX_JOKERS)).astype(np.int64),
+        copy_active=np.zeros((n, MAX_JOKERS), dtype=np.float32),
+        copy_target_ids=np.zeros((n, MAX_JOKERS), dtype=np.int64),
+        trigger_match=rng.integers(0, 2, size=(n, MAX_HAND_CARDS, MAX_JOKERS, 2)).astype(bool),
+        consumables=rng.normal(size=(n, MAX_CONSUMABLES_V2, D_CONSUMABLE)).astype(np.float32),
+        consumable_mask=np.zeros((n, MAX_CONSUMABLES_V2), dtype=bool),
         action_type=action_type,
         card_target_mask=card_target_mask,
         p_clear=rng.uniform(0, 1, size=n).astype(np.float32),
@@ -94,12 +109,18 @@ class TestLoadDataset:
     def test_shapes_and_label_mapping(self, stage_dir):
         ds = load_dataset([stage_dir], {})
         assert len(ds) == 80
-        assert ds.obs["global_context"].shape == (80, D_GLOBAL)
-        # 8-wide shard hand blocks are up-padded to the observation width.
-        assert ds.obs["hand_cards"].shape == (80, MAX_HAND_CARDS_OBS, D_PLAYING_CARD)
+        assert ds.obs["global_context"].shape == (80, D_HAND_GLOBAL)
+        # 8-wide shard hand blocks are up-padded to the observation width --
+        # including trigger_match's hand axis.
+        assert ds.obs["hand_cards"].shape == (80, MAX_HAND_CARDS_OBS, D_HAND_CARD)
         assert ds.obs["hand_mask"].shape == (80, MAX_HAND_CARDS_OBS)
         assert torch.all(ds.obs["hand_mask"][:, MAX_HAND_CARDS:] == 0)
-        assert ds.obs["consumables"].shape[0] == 80  # synthesized dormant block
+        assert ds.obs["trigger_match"].shape == (80, MAX_HAND_CARDS_OBS, MAX_JOKERS, 2)
+        assert torch.all(ds.obs["trigger_match"][:, MAX_HAND_CARDS:] == 0)
+        # Real consumable block loaded from the shard, not synthesized.
+        assert ds.obs["consumables"].shape == (80, MAX_CONSUMABLES_V2, D_CONSUMABLE)
+        assert ds.obs["joker_ids"].dtype == torch.int64
+        assert ds.obs["copy_target_ids"].dtype == torch.int64
         assert ds.legal_masks.shape == (80, NUM_HAND_ACTIONS)
         # Every label decodes to a 1-5 card combo and is legal.
         for i in range(0, 80, 7):
@@ -115,6 +136,20 @@ class TestLoadDataset:
             4,
             rng=np.random.default_rng(1),
             schema_version=99,
+        )
+        with pytest.raises(ValueError, match="schema_version"):
+            load_dataset([d], {})
+
+    def test_rejects_v1_shards(self, tmp_path):
+        # Pre-regen (v1) datasets have a different feature layout; loading
+        # them must fail loudly, not train on misaligned features.
+        d = tmp_path / "v1_data"
+        d.mkdir()
+        _write_synthetic_shard(
+            d / "worker_000_shard_00000.npz",
+            4,
+            rng=np.random.default_rng(4),
+            schema_version=1,
         )
         with pytest.raises(ValueError, match="schema_version"):
             load_dataset([d], {})
@@ -149,13 +184,13 @@ class TestLoadDataset:
         data = dict(np.load(path))
         extra = MAX_HAND_CARDS_OBS - MAX_HAND_CARDS + 1
         data["hand_cards"] = np.concatenate(
-            [data["hand_cards"], np.zeros((4, extra, D_PLAYING_CARD), np.float32)], axis=1
+            [data["hand_cards"], np.zeros((4, extra, D_HAND_CARD), np.float32)], axis=1
         )
         data["hand_mask"] = np.concatenate(
             [data["hand_mask"], np.zeros((4, extra), bool)], axis=1
         )
         np.savez_compressed(path, **data)
-        with pytest.raises(ValueError, match="MAX_HAND_CARDS_OBS"):
+        with pytest.raises(ValueError, match="exceeds obs width"):
             load_dataset([d], {})
 
     def test_stage_weights_applied(self, stage_dir):
@@ -220,7 +255,7 @@ class TestTrainSmoke:
         assert meta["num_actions"] == NUM_HAND_ACTIONS
         assert len(meta["history"]) >= 1
         assert "entropy" in meta["history"][0]  # over-sharpening diagnosable later
-        model = HandPlayBCModel(observation_space())
+        model = HandPlayBCModel(observation_space_v2())
         model.load_state_dict(ckpt["model_state_dict"])  # loads cleanly
         assert (out / "bc_metrics.json").exists()
 
@@ -231,7 +266,7 @@ class TestTrainSmoke:
         ckpt_path = train(
             ds, tmp_path / "bc2", max_epochs=2, batch_size=32, device_str="cpu", seed=1
         )
-        model = HandPlayBCModel(observation_space())
+        model = HandPlayBCModel(observation_space_v2())
         model.load_state_dict(torch.load(ckpt_path, weights_only=False)["model_state_dict"])
         model.eval()
         with torch.no_grad():

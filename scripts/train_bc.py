@@ -57,13 +57,16 @@ from jackdaw.agents.hand_action_space import (  # noqa: E402
 )
 from jackdaw.agents.hand_policy import HandPlayBCModel  # noqa: E402
 from jackdaw.env.hand_play_gym import (  # noqa: E402
-    MAX_CONSUMABLES,
+    MAX_CONSUMABLES_V2,
     MAX_HAND_CARDS_OBS,
-    observation_space,
+    observation_space_v2,
 )
-from jackdaw.env.observation import D_CONSUMABLE  # noqa: E402
 
-EXPECTED_SCHEMA_VERSION = 1
+# v2 = the h1 schema bump (B2 slice 4; see scripts/generate_hand_demos.py
+# SCHEMA_VERSION). v1 shards are pre-regen data and are REJECTED: their
+# feature layout (15-wide hand cards, 235-wide GC, no trigger-match /
+# copy-resolution / consumable arrays) no longer matches the model inputs.
+EXPECTED_SCHEMA_VERSION = 2
 
 # Indices of hands_left / discards_left in the global context vector
 # (scalars block, see observation.py encode_global_context: v[13], v[14],
@@ -97,24 +100,26 @@ class DemoDataset:
         )
 
 
-def _pad_hand_width(arr: np.ndarray, shard_path) -> np.ndarray:
-    """Zero-pad a shard's hand-axis (axis 1) up to ``MAX_HAND_CARDS_OBS``.
+def _pad_entity_width(arr: np.ndarray, target: int, shard_path, what: str) -> np.ndarray:
+    """Zero-pad a shard's entity axis (axis 1) up to the observation width.
 
-    Shards store 8-wide hand blocks (reset hands never exceed the action
-    space's 8 positions); the observation space is wider for The Serpent's
-    over-draw. Zero rows beyond the ``hand_mask`` are exactly what a live
-    ``build_observation`` would produce, so up-padding is semantically
-    exact -- old shards need no regeneration.
+    Shards store write-width blocks (e.g. 8-wide hand blocks -- reset hands
+    never exceed the action space's 8 positions); the observation space is
+    wider (The Serpent's over-draw, +hand-size builds). Zero rows beyond
+    the entity mask are exactly what a live ``build_observation_v2`` would
+    produce, so up-padding is semantically exact -- widening an obs block
+    never requires shard regeneration. Applies to every array whose axis 1
+    is an entity axis, including the 4-D ``trigger_match``
+    (example, hand, joker, 2).
     """
     width = arr.shape[1]
-    if width > MAX_HAND_CARDS_OBS:
+    if width > target:
         raise ValueError(
-            f"{shard_path}: hand width {width} exceeds MAX_HAND_CARDS_OBS="
-            f"{MAX_HAND_CARDS_OBS} -- dataset/code drift"
+            f"{shard_path}: {what} width {width} exceeds obs width {target} -- dataset/code drift"
         )
-    if width == MAX_HAND_CARDS_OBS:
+    if width == target:
         return arr
-    pad = [(0, 0), (0, MAX_HAND_CARDS_OBS - width)] + [(0, 0)] * (arr.ndim - 2)
+    pad = [(0, 0), (0, target - width)] + [(0, 0)] * (arr.ndim - 2)
     return np.pad(arr, pad)
 
 
@@ -140,7 +145,17 @@ def load_dataset(data_dirs: list[Path], stage_weights: dict[str, float]) -> Demo
         "hand_mask": [],
         "jokers": [],
         "joker_mask": [],
+        "joker_ids": [],
+        "copy_active": [],
+        "copy_target_ids": [],
+        "trigger_match": [],
+        "consumables": [],
+        "consumable_mask": [],
     }
+    # Keys whose axis 1 is the hand axis (up-padded to the obs width);
+    # trigger_match is (example, hand, joker, 2) so its axis 1 rides too.
+    hand_axis_keys = ("hand_cards", "hand_mask", "trigger_match")
+    consumable_axis_keys = ("consumables", "consumable_mask")
     actions: list[np.ndarray] = []
     legal_masks: list[np.ndarray] = []
     p_clear: list[np.ndarray] = []
@@ -162,8 +177,10 @@ def load_dataset(data_dirs: list[Path], stage_weights: dict[str, float]) -> Demo
             n = shard["action_type"].shape[0]
             for key in obs_parts:
                 arr = shard[key]
-                if key in ("hand_cards", "hand_mask"):
-                    arr = _pad_hand_width(arr, shard_path)
+                if key in hand_axis_keys:
+                    arr = _pad_entity_width(arr, MAX_HAND_CARDS_OBS, shard_path, key)
+                elif key in consumable_axis_keys:
+                    arr = _pad_entity_width(arr, MAX_CONSUMABLES_V2, shard_path, key)
                 obs_parts[key].append(arr)
             shard_actions = np.array(
                 [
@@ -191,25 +208,16 @@ def load_dataset(data_dirs: list[Path], stage_weights: dict[str, float]) -> Demo
             weights.append(np.full(n, stage_weight, dtype=np.float32))
             seeds.extend(str(s) for s in shard["seed"])
 
-    n_total = len(seeds)
+    # Integer id arrays stay int64 (embedding-lookup inputs); everything
+    # else (including the bool trigger_match, consumed as fixed attention
+    # weights) loads as float32.
+    long_keys = ("joker_ids", "copy_target_ids")
     obs = {
-        "global_context": torch.as_tensor(
-            np.concatenate(obs_parts["global_context"]), dtype=torch.float32
-        ),
-        "hand_cards": torch.as_tensor(
-            np.concatenate(obs_parts["hand_cards"]), dtype=torch.float32
-        ),
-        "hand_mask": torch.as_tensor(
-            np.concatenate(obs_parts["hand_mask"]), dtype=torch.float32
-        ),
-        "jokers": torch.as_tensor(np.concatenate(obs_parts["jokers"]), dtype=torch.float32),
-        "joker_mask": torch.as_tensor(
-            np.concatenate(obs_parts["joker_mask"]), dtype=torch.float32
-        ),
-        # Dormant consumable block (see hand_play_gym.py): shards don't
-        # carry it, synthesize the always-empty arrays.
-        "consumables": torch.zeros(n_total, MAX_CONSUMABLES, D_CONSUMABLE),
-        "consumable_mask": torch.zeros(n_total, MAX_CONSUMABLES),
+        key: torch.as_tensor(
+            np.concatenate(parts),
+            dtype=torch.int64 if key in long_keys else torch.float32,
+        )
+        for key, parts in obs_parts.items()
     }
     return DemoDataset(
         obs=obs,
@@ -225,9 +233,7 @@ def split_train_val(dataset: DemoDataset, val_fraction: float) -> tuple[DemoData
     """Deterministic split by CRC32 of the seed string."""
     buckets = 1000
     threshold = int(val_fraction * buckets)
-    is_val = torch.tensor(
-        [zlib.crc32(s.encode()) % buckets < threshold for s in dataset.seeds]
-    )
+    is_val = torch.tensor([zlib.crc32(s.encode()) % buckets < threshold for s in dataset.seeds])
     return dataset.slice(torch.nonzero(~is_val).squeeze(-1)), dataset.slice(
         torch.nonzero(is_val).squeeze(-1)
     )
@@ -317,7 +323,10 @@ def train(
     train_set, val_set = split_train_val(dataset, val_fraction)
     print(f"train={len(train_set)} val={len(val_set)} device={device}")
 
-    model = HandPlayBCModel(observation_space()).to(device)
+    # v2 space: the current model consumes the widened float blocks and
+    # ignores the extra keys (trigger_match, ids); the embedding-gather
+    # encoder that consumes them is post-regen scope (see CLAUDE.md).
+    model = HandPlayBCModel(observation_space_v2()).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
 
     best_val_ce = float("inf")
