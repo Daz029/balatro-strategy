@@ -192,6 +192,16 @@ merge is built.
    available and remains what the h0.5 checkpoint paths build, and the
    default flips only at h1 BC/PPO (whose nets are fresh anyway). Do NOT
    let slice 4 make A3 unrunnable; alternatively run A3 first.
+   **RIDER (2026-07-13, locked):** shards STORE the real consumable block
+   (encode owned consumables via `encode_consumable`; harvested states
+   carry real ones, stages 1-4 write it empty) instead of the BC loader
+   synthesizing zeros. Labels stay consumable-blind — the solver ignores
+   consumables; say so in the writer docstring. This removes the one
+   plausible pressure to re-regenerate shards at the h2 in-blind merge.
+   In-blind consumable SELECTION stays at h2: P(clear-this-blind) is a
+   dishonest objective for consumables (cross-blind value — the
+   shop-visit-episode myopia argument), and it's PPO-side anyway, so
+   nothing about it belongs to the label-semantics scope.
 
 - Per-card +3: suit-count-of-my-suit /5; rank-count-of-my-rank /4; best
   straight-window occupancy among 5-rank windows containing my rank (occupancy =
