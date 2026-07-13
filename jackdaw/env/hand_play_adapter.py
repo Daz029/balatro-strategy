@@ -123,6 +123,21 @@ class HandPlayConfig:
     randomize_boss_history: bool = True
     boss_history_hands_played_range: tuple[int, int] = (0, 3)
     boss_history_best_hand_weight: float = 0.05
+    # Flat hand-size tail (off by default): with probability
+    # ``hand_size_tail_prob``, add ``randint(*hand_size_delta_range)`` to the
+    # dealt hand size on top of whatever the injected jokers produce. Mirrors
+    # the flat money-tail pattern. Its ONLY job is decode-length coverage —
+    # ensuring Candidate B / the width-40 obs have seen a hand a little wider
+    # than the joker sampler happens to stack. It is NOT for distribution
+    # matching: genuine wide hands (multi-joker stacks, Turtle Bean, Serpent
+    # over-draws) arrive correctly-correlated from the HARVESTED stage's real
+    # mid-run snapshots, so keep this range MODEST (a few cards, low prob) and
+    # set it from the harvest hand-size histogram — never a wide flat tail,
+    # which would over-represent sizes that in reality need specific rare
+    # builds. Stream-neutral when off: no sampler draw unless the prob is > 0,
+    # so existing datasets/seeds are byte-identical.
+    hand_size_delta_range: tuple[int, int] = (0, 0)
+    hand_size_tail_prob: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -413,9 +428,11 @@ class HandPlayAdapter:
                 if cfg.joker_pool and hi > 0
                 else 0
             )
+        injected_jokers: list[Any] = []
         if count > 0:
             keys = sampler.sample(list(cfg.joker_pool), count)
-            gs["jokers"] = [create_joker(key) for key in keys]
+            injected_jokers = [create_joker(key) for key in keys]
+            gs["jokers"] = injected_jokers
 
         if cfg.randomize_joker_state:
             # Run-stat priors read by formula-based jokers. Drawn
@@ -431,10 +448,28 @@ class HandPlayAdapter:
             # solver labels states *before* any step has run.
             gs["consumable_usage_tarot"] = tarots_used
 
-            for joker in gs.get("jokers", []):
+            for joker in injected_jokers:
                 spec = _SCALING_SPECS.get(joker.center_key)
                 if spec is not None:
                     _apply_scaling_state(joker, spec, ante, sampler)
+
+        # Acquisition passives (add_to_deck): the engine only runs these on the
+        # buy path (shop.py), never at blind start, so injected jokers otherwise
+        # carry a hand size / discard count the real engine would never deal —
+        # Juggler +1 hand, Troubadour +2 hand & -1 play, Stuntman -2 hand,
+        # Drunkard +1 discard, negative editions +1 joker slot. Applied exactly
+        # once per injected joker, AFTER _apply_scaling_state (so a decayed
+        # Turtle Bean applies its decayed h_size, not the fresh +5) and BEFORE
+        # SelectBlind (so the deal + round-reset counters see the passives).
+        # Full passive, no cherry-picking of h_size.
+        for joker in injected_jokers:
+            joker.add_to_deck(gs)
+
+        # Flat hand-size tail: coverage of large hands beyond what the sampled
+        # +hand-size builds produce. Off by default; the draw is skipped
+        # entirely when the prob is 0 so existing seed streams are unchanged.
+        if cfg.hand_size_tail_prob > 0.0 and sampler.random() < cfg.hand_size_tail_prob:
+            gs["hand_size"] = gs.get("hand_size", 0) + sampler.randint(*cfg.hand_size_delta_range)
 
         self._gs = gs
         engine_step(self._gs, SelectBlind())

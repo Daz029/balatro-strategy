@@ -464,3 +464,151 @@ def test_the_ox_unaffected_by_boss_history(monkeypatch) -> None:
     assert blind.name == "The Ox"
     assert blind.hands_used == {}
     assert blind.only_hand is None
+
+
+# ---------------------------------------------------------------------------
+# B1 -- acquisition passives (add_to_deck) at injection.
+#
+# The engine only runs a joker's add_to_deck on the buy path, never at blind
+# start, so a joker placed directly into gs["jokers"] never got its passive:
+# an injected +hand-size build dealt a base-size hand the real engine would
+# never produce. reset() now applies the full passive once per injected joker.
+# ---------------------------------------------------------------------------
+
+
+def _deal_with_jokers(
+    pool: tuple[str, ...], *, ante: int = 2, seed: str = "PASSIVE", hands: int = 4
+) -> dict:
+    """reset() with a fixed joker set, scaling randomization OFF (so the passive
+    reads freshly-created abilities), and return the live game state. ``hands``
+    is pinned so per-round play/discard deltas aren't masked by the engine's
+    floor at 1 hand."""
+    cfg = HandPlayConfig(
+        ante_range=(ante, ante),
+        blind_stages=("Small",),
+        joker_pool=pool,
+        joker_count_range=(len(pool), len(pool)),
+        randomize_joker_state=False,
+        hands_range=(hands, hands),
+    )
+    adapter = HandPlayAdapter(cfg)
+    adapter.reset(BACK, STAKE, seed)
+    return adapter.raw_state
+
+
+def test_no_jokers_deals_base_hand_size() -> None:
+    gs = _deal_with_jokers(())
+    assert gs["hand_size"] == 8
+    assert len(gs["hand"]) == 8
+
+
+def test_juggler_deals_nine_cards() -> None:
+    gs = _deal_with_jokers(("j_juggler",))
+    assert gs["hand_size"] == 9
+    assert len(gs["hand"]) == 9
+
+
+def test_troubadour_adds_hand_size_and_drops_a_play() -> None:
+    base = _deal_with_jokers(())
+    gs = _deal_with_jokers(("j_troubadour",))
+    assert gs["hand_size"] == 10  # +2 hand size (from extra.h_size, not top-level)
+    assert len(gs["hand"]) == 10
+    # -1 hand per round, stacked on the sampled hands count.
+    assert gs["current_round"]["hands_left"] == base["current_round"]["hands_left"] - 1
+
+
+def test_stuntman_shrinks_hand_to_six() -> None:
+    gs = _deal_with_jokers(("j_stuntman",))
+    assert gs["hand_size"] == 6
+    assert len(gs["hand"]) == 6
+
+
+def test_merry_andy_shrinks_hand_and_adds_discards() -> None:
+    base = _deal_with_jokers(())
+    gs = _deal_with_jokers(("j_merry_andy",))
+    assert gs["hand_size"] == 7  # -1 hand size
+    assert gs["current_round"]["discards_left"] == base["current_round"]["discards_left"] + 3
+
+
+def test_drunkard_bumps_discards_on_top_of_sampled() -> None:
+    base = _deal_with_jokers(())
+    gs = _deal_with_jokers(("j_drunkard",))
+    assert gs["hand_size"] == 8  # no hand-size change
+    assert gs["current_round"]["discards_left"] == base["current_round"]["discards_left"] + 1
+
+
+def test_turtle_bean_fresh_adds_full_five() -> None:
+    gs = _deal_with_jokers(("j_turtle_bean",))
+    assert gs["hand_size"] == 13  # +5 from extra.h_size at full charge
+
+
+def test_decayed_turtle_bean_applies_decayed_h_size_not_five() -> None:
+    """The passive reads the card's CURRENT state, so a decayed Turtle Bean
+    (extra.h_size reduced from 5) adds the decayed amount, never a hardcoded
+    +5 -- the guard against a cherry-picked h_size implementation."""
+    from jackdaw.engine.card_factory import create_joker
+
+    turtle = create_joker("j_turtle_bean")
+    turtle.ability["extra"]["h_size"] = 2  # simulate two rounds of decay
+    gs = {"hand_size": 8, "round_resets": {"hands": 4, "discards": 3}}
+    turtle.add_to_deck(gs)
+    assert gs["hand_size"] == 10  # base 8 + decayed 2, NOT 8 + 5
+
+
+def test_passive_applied_exactly_once() -> None:
+    """A second reset rebuilds from scratch -- passives never accumulate across
+    resets, and a single reset applies exactly +1 (not +2) for Juggler."""
+    cfg = HandPlayConfig(
+        ante_range=(2, 2),
+        blind_stages=("Small",),
+        joker_pool=("j_juggler",),
+        joker_count_range=(1, 1),
+        randomize_joker_state=False,
+    )
+    adapter = HandPlayAdapter(cfg)
+    adapter.reset(BACK, STAKE, "ONCE")
+    first = adapter.raw_state["hand_size"]
+    adapter.reset(BACK, STAKE, "ONCE")
+    second = adapter.raw_state["hand_size"]
+    assert first == second == 9  # exactly +1, and stable across resets
+
+
+def test_passives_deterministic_per_seed() -> None:
+    a = _deal_with_jokers(("j_troubadour", "j_drunkard"), seed="DET")
+    b = _deal_with_jokers(("j_troubadour", "j_drunkard"), seed="DET")
+    assert a["hand_size"] == b["hand_size"]
+    assert a["current_round"]["hands_left"] == b["current_round"]["hands_left"]
+    assert a["current_round"]["discards_left"] == b["current_round"]["discards_left"]
+
+
+def test_hand_size_tail_off_by_default_is_stream_neutral() -> None:
+    """With the tail off (default), a nonzero delta_range draws nothing and the
+    dealt state is byte-identical to a config without the fields set."""
+    plain = _deal_with_jokers(())
+    cfg = HandPlayConfig(
+        ante_range=(2, 2),
+        blind_stages=("Small",),
+        randomize_joker_state=False,
+        hand_size_delta_range=(2, 3),
+        hand_size_tail_prob=0.0,  # off: no draw, no perturbation
+    )
+    adapter = HandPlayAdapter(cfg)
+    adapter.reset(BACK, STAKE, "PASSIVE")
+    gs = adapter.raw_state
+    assert gs["hand_size"] == plain["hand_size"]
+    assert [c.center_key for c in gs["hand"]] == [c.center_key for c in plain["hand"]]
+
+
+def test_hand_size_tail_adds_delta_when_triggered() -> None:
+    cfg = HandPlayConfig(
+        ante_range=(2, 2),
+        blind_stages=("Small",),
+        randomize_joker_state=False,
+        hand_size_delta_range=(2, 2),
+        hand_size_tail_prob=1.0,  # always fires
+    )
+    adapter = HandPlayAdapter(cfg)
+    adapter.reset(BACK, STAKE, "TAIL")
+    gs = adapter.raw_state
+    assert gs["hand_size"] == 10  # base 8 + modest 2-card flat tail
+    assert len(gs["hand"]) == 10
