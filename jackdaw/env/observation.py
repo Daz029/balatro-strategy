@@ -926,6 +926,182 @@ def encode_global_context(gs: dict[str, Any]) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
+# Hand-agent-only potential features (h1 schema bump, B2 slice 1)
+# ---------------------------------------------------------------------------
+#
+# Flush/straight structure is invisible to the shared "best hand" features:
+# `get_best_hand` ports Lua's played-selection semantics, so flush/straight
+# predicates never fire on a full 8+ card hand, and pooling destroys suit/rank
+# counts (see CLAUDE.md "KNOWN OBS LIMITATION"). These encoders close that gap
+# with O(n) "hand potential" features.
+#
+# They are HAND-AGENT-ONLY: the shop observation is frozen against s0
+# checkpoints (`encode_global_context` verbatim at D_GLOBAL=235,
+# D_PLAYING_CARD=15 for pack rows), so the new features extend the hand-agent
+# paths and never touch the shared encoders. Semantically the shop also has no
+# use for them (empty hand; pack picks are not poker hands). Reconciling the
+# diverged hand/shop schemas is deferred to the in-blind merge (h2) — see
+# docs/pre-regen-handoff.md § B2.
+#
+# Wiring into `build_observation` / the demo writer lands with the
+# schema_version bump (B2 slice 4); this section only defines the encoders.
+
+D_HAND_CARD_POTENTIAL: int = 3
+D_HAND_CARD: int = D_PLAYING_CARD + D_HAND_CARD_POTENTIAL  # 18 — hand-agent card width
+D_HAND_POTENTIAL: int = NUM_SUITS + NUM_RANKS + 4  # 21
+D_HAND_GLOBAL: int = D_GLOBAL + D_HAND_POTENTIAL  # 256 — hand-agent global width
+
+# Cache: only 4 flag combinations exist, each a fixed window table.
+_STRAIGHT_WINDOW_CACHE: dict[tuple[bool, bool], tuple[tuple[int, ...], ...]] = {}
+
+
+def _straight_windows(four_fingers: bool, shortcut: bool) -> tuple[tuple[int, ...], ...]:
+    """Every rank window a straight can occupy, mirroring ``get_straight``.
+
+    A window is an ascending tuple of the L ranks a straight needs
+    (L = 4 under Four Fingers, else 5). Consecutive steps are 1 — or 1..2
+    under Shortcut, which lets the engine skip one missing rank between any
+    two present ranks. Rank 1 is the low ace (wheel window included); the
+    same physical ace also occupies rank 14. No wrap-around (Q-K-A-2-3 is
+    not a window), matching the engine.
+    """
+    key = (four_fingers, shortcut)
+    cached = _STRAIGHT_WINDOW_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    length = 4 if four_fingers else 5
+    steps = (1, 2) if shortcut else (1,)
+    windows: list[tuple[int, ...]] = []
+
+    def _extend(seq: tuple[int, ...]) -> None:
+        if len(seq) == length:
+            windows.append(seq)
+            return
+        for step in steps:
+            nxt = seq[-1] + step
+            if nxt <= 14:
+                _extend(seq + (nxt,))
+
+    for start in range(1, 15):
+        _extend((start,))
+
+    result = tuple(windows)
+    _STRAIGHT_WINDOW_CACHE[key] = result
+    return result
+
+
+def hand_potential_features(
+    hand: list[Card],
+    *,
+    four_fingers: bool = False,
+    shortcut: bool = False,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Flush/straight potential features over the FULL hand (any size).
+
+    Cards excluded from the counts mirror the engine's detection rules:
+    Stone cards can join neither flushes (``is_suit(flush_calc=True)``) nor
+    straights (``get_id() == -1``), and face-down / base-less cards are
+    hidden information (their per-card rows are zero, like
+    ``encode_playing_card``). Wild/Smeared suit substitution is deliberately
+    NOT folded into the counts (per the locked B2 spec) — those signals stay
+    on the per-card enhancement feature and the GC modifier bits.
+
+    Returns ``(per_card, gc_ext)``:
+
+    ``per_card`` shape ``(len(hand), D_HAND_CARD_POTENTIAL)``:
+        0: count of my suit in hand / flush threshold (5, or 4 under
+           Four Fingers — the engine applies it to flushes too)
+        1: count of my rank in hand / 4
+        2: best straight-window occupancy among windows containing my rank
+           (occupancy = distinct present ranks ÷ ranks needed; an ace
+           checks both its high and wheel-low windows)
+
+    ``gc_ext`` shape ``(D_HAND_POTENTIAL,)``:
+        [0:4]   per-suit counts / len(hand)  (_SUIT_IDX order)
+        [4:17]  per-rank counts / 4          (_RANK_IDX order, 2..Ace)
+        [17]    max suit count / flush threshold
+        [18]    best straight-window occupancy over all windows
+        [19]    Four Fingers active (0/1)
+        [20]    Shortcut active (0/1)
+    """
+    n = len(hand)
+    per_card = np.zeros((n, D_HAND_CARD_POTENTIAL), dtype=np.float32)
+    gc_ext = np.zeros(D_HAND_POTENTIAL, dtype=np.float32)
+    flush_need = 4.0 if four_fingers else 5.0
+    gc_ext[19] = float(four_fingers)
+    gc_ext[20] = float(shortcut)
+
+    suit_counts = [0, 0, 0, 0]
+    rank_counts = [0] * 15  # indexed by rank id 2..14
+    infos: list[tuple[int, int] | None] = []
+    for card in hand:
+        if (
+            card.base is None
+            or card.facing == "back"
+            or card.ability.get("effect") == "Stone Card"
+        ):
+            infos.append(None)
+            continue
+        si = _SUIT_IDX.get(card.base.suit.value, 0)
+        rid = card.base.id
+        infos.append((si, rid))
+        suit_counts[si] += 1
+        rank_counts[rid] += 1
+
+    present = {rid for rid in range(2, 15) if rank_counts[rid]}
+    if 14 in present:
+        present.add(1)  # low ace occupies wheel windows
+
+    length = 4 if four_fingers else 5
+    best_overall = 0.0
+    best_by_rank = [0.0] * 15
+    for window in _straight_windows(four_fingers, shortcut):
+        occ = sum(1 for r in window if r in present) / length
+        if occ > best_overall:
+            best_overall = occ
+        for r in window:
+            if occ > best_by_rank[r]:
+                best_by_rank[r] = occ
+
+    for i, info in enumerate(infos):
+        if info is None:
+            continue
+        si, rid = info
+        per_card[i, 0] = suit_counts[si] / flush_need
+        per_card[i, 1] = rank_counts[rid] / 4.0
+        occ = best_by_rank[rid]
+        if rid == 14 and best_by_rank[1] > occ:
+            occ = best_by_rank[1]
+        per_card[i, 2] = occ
+
+    if n > 0:
+        for si in range(NUM_SUITS):
+            gc_ext[si] = suit_counts[si] / n
+    for j in range(NUM_RANKS):
+        gc_ext[NUM_SUITS + j] = rank_counts[j + 2] / 4.0
+    gc_ext[17] = max(suit_counts) / flush_need
+    gc_ext[18] = best_overall
+
+    return per_card, gc_ext
+
+
+def encode_hand_potential(gs: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
+    """Hand-agent potential features from a live game state.
+
+    Four Fingers/Shortcut come from the live joker list via
+    ``get_hand_eval_flags`` (a debuffed modifier joker does not count,
+    matching the engine's ``find_joker`` semantics).
+    """
+    flags = get_hand_eval_flags(gs.get("jokers", []))
+    return hand_potential_features(
+        gs.get("hand", []),
+        four_fingers=flags["four_fingers"],
+        shortcut=flags["shortcut"],
+    )
+
+
+# ---------------------------------------------------------------------------
 # Batch encoding functions (hot path optimization)
 # ---------------------------------------------------------------------------
 
