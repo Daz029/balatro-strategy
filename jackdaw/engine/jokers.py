@@ -16,6 +16,8 @@ from collections.abc import Callable
 from dataclasses import InitVar, dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
+from jackdaw.engine.data.prototypes import JOKERS
+
 if TYPE_CHECKING:
     from jackdaw.engine.blind import Blind
     from jackdaw.engine.card import Card
@@ -1385,6 +1387,20 @@ def _find_leftmost(card: Card, ctx: JokerContext) -> Card | None:
     return None
 
 
+def blueprint_compatible(target: Card) -> bool:
+    """Whether *target* can be copied by Blueprint/Brainstorm.
+
+    Vanilla checks ``config.center.blueprint_compat`` before delegating
+    (card.lua:2304/2321 — the "Compatible/Incompatible" badge next to
+    Blueprint). 29 jokers are marked incompatible in centers.json
+    (economy/passive ones like Egg, Rocket, the detection modifiers);
+    without this guard a Blueprint to the right of an Egg would double
+    its end-of-round growth, which vanilla forbids.
+    """
+    proto = JOKERS.get(target.center_key)
+    return proto.blueprint_compat if proto is not None else True
+
+
 @register("j_blueprint")
 def _blueprint(card: Card, ctx: JokerContext) -> JokerResult | None:
     """Blueprint: copy the joker to the right. Source: card.lua:2304.
@@ -1396,7 +1412,7 @@ def _blueprint(card: Card, ctx: JokerContext) -> JokerResult | None:
     if bp > joker_count + 1:
         return None
     target = _find_right_neighbor(card, ctx)
-    if target is None or target.debuff:
+    if target is None or target.debuff or not blueprint_compatible(target):
         return None
     new_ctx = replace(
         ctx,
@@ -1417,7 +1433,7 @@ def _brainstorm(card: Card, ctx: JokerContext) -> JokerResult | None:
     if bp > joker_count + 1:
         return None
     target = _find_leftmost(card, ctx)
-    if target is None or target.debuff:
+    if target is None or target.debuff or not blueprint_compatible(target):
         return None
     new_ctx = replace(
         ctx,

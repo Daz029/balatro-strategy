@@ -48,7 +48,7 @@ Hard rules:
 - A3 must be resolved (triggered or cleared) before B6's go/no-go, and B6 —
   if it happens — must finish before C2.
 
-## Status (committed directly to `main`)
+## Status (A1/A2/B1 directly on `main`; B2 on `worktree-pre-regen-b2-hand-potential`)
 
 - **A1 — DONE** (`scripts/harvest_s0_rollouts.py` + tests): capture pipeline,
   dual pass, per-run blob shards + blob-free metadata, reductions + readout.
@@ -64,7 +64,20 @@ Hard rules:
 - **B1 — DONE** (`hand_play_adapter.py` + tests): `add_to_deck` passives applied
   once per injected joker; flat hand-size tail knob (off by default, modest range
   set from game knowledge per the A2 finding above).
-- **A3, B2–B6, C1–C2** — not started.
+- **B2 slices 1–3 — DONE** (2026-07-13): slice 1 `hand_potential_features` /
+  `encode_hand_potential` in observation.py (D_HAND_CARD=18, D_HAND_GLOBAL=256;
+  shared shop constants untouched; engine-mirror test pins the window model
+  against `get_straight`/`get_flush`); slice 2 `jackdaw/env/trigger_match.py`
+  (match matrix + 4-class taxonomy over all 150 vocab jokers, import-time
+  coverage hard-fail — it caught `j_cloud_9` immediately); slice 3
+  `resolve_copy_targets` + copy-column inheritance via the engine's own
+  resolution helpers. TWO engine bugs found + fixed on the branch, both the
+  Throwback class (handler unit-tested, integration broken): The Idol could
+  never fire (`reset_round_targets` stored idol_card without the "id" the
+  handler compares against), and Blueprint/Brainstorm ignored
+  `blueprint_compat` (all 29 incompatible jokers were copyable — e.g. a
+  Blueprint beside an Egg doubled its end-of-round growth).
+- **A3, B2 slice 4, B3–B6, C1–C2** — not started.
 
 ## Task specifications
 
@@ -146,9 +159,24 @@ the real engine would never produce. Fix:
 
 ### B2 — observation feature bump (`jackdaw/env/observation.py`, demo writer)
 
+**Schema is HAND-AGENT-ONLY — shop obs stays frozen (DEFERRED ISSUE for the merge).**
+s0 is frozen at `D_PLAYING_CARD=15` / `D_GLOBAL=235`, and the shop obs uses both
+(`encode_global_context` verbatim + `D_PLAYING_CARD` for pack-targeting rows), so
+`s1 --init-from s0` breaks if the shared constants move. B2's new features
+therefore land on HAND-SPECIFIC paths only: a hand card width of 18 and a
+hand-only `encode_hand_potential` appended to the hand global — `encode_global_context`
+and `D_PLAYING_CARD` are NOT touched. This is also semantically correct (the shop
+has an empty hand and picks pack cards, not poker hands — flush/straight potential
+is dead input for it). CONSEQUENCE / OPEN ISSUE: the hand (18-wide cards, +21 GC)
+and shop (15-wide, 235 GC) obs schemas now DIVERGE; reconciling them into one card/
+global encoder is deferred to the in-blind MERGE (h2, out of scope here) — the
+already-documented place a shop-side schema bump happens. Flag it there when the
+merge is built.
+
 **Build slices** (staged into separate tested commits, each stacking on the last):
-1. **Flush/straight potential features** — per-card +3 + GC +21 (below). Pure
-   O(n) obs additions, known-hand fixtures. Self-contained, lowest risk — first.
+1. **Flush/straight potential features** — per-card +3 + GC +21 (below), on the
+   hand paths only per the note above. Pure O(n) obs additions, known-hand
+   fixtures. Self-contained, lowest risk — first.
 2. **Trigger-match matrix** — `trigger_match[card, joker, {scored,held}]` +
    `joker_center_key_id`, 4-class taxonomy with a build-time coverage check that
    classifies EVERY vocab joker (unclassified = hard error). Class-2 reads live
@@ -156,6 +184,24 @@ the real engine would never produce. Fix:
 3. **Copy resolution** (Blueprint/Brainstorm) — resolved-target ids + active-copy
    bit via the ENGINE's own resolution path (pitfall #11), match rows inherited.
 4. **`schema_version` bump + loader up-pad** — hard-fail on unknown schema.
+   **SEQUENCING FLAG (2026-07-13, found while building slices 1-3):**
+   `build_observation` is consumed by `HandCheckpointPolicy` (the h0.5
+   partner in the shop env) and `eval_hand_policy` — switching it to the
+   v2 schema IN PLACE breaks h0.5's checkpoint obs width, and A3 (an h0.5
+   eval) hasn't run yet. Land v2 as a versioned seam: the v1 path stays
+   available and remains what the h0.5 checkpoint paths build, and the
+   default flips only at h1 BC/PPO (whose nets are fresh anyway). Do NOT
+   let slice 4 make A3 unrunnable; alternatively run A3 first.
+   **RIDER (2026-07-13, locked):** shards STORE the real consumable block
+   (encode owned consumables via `encode_consumable`; harvested states
+   carry real ones, stages 1-4 write it empty) instead of the BC loader
+   synthesizing zeros. Labels stay consumable-blind — the solver ignores
+   consumables; say so in the writer docstring. This removes the one
+   plausible pressure to re-regenerate shards at the h2 in-blind merge.
+   In-blind consumable SELECTION stays at h2: P(clear-this-blind) is a
+   dishonest objective for consumables (cross-blind value — the
+   shop-visit-episode myopia argument), and it's PPO-side anyway, so
+   nothing about it belongs to the label-semantics scope.
 
 - Per-card +3: suit-count-of-my-suit /5; rank-count-of-my-rank /4; best
   straight-window occupancy among 5-rank windows containing my rank (occupancy =

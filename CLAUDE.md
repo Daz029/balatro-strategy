@@ -280,7 +280,16 @@ build — all s0-independent] -> harvest pass -> labels -> regen -> BC -> PPO ->
   40, index-set labels. Verified 2026-07-07: hand levels (GC [30:90]), editions, and
   stickers are ALREADY in the obs — nothing else rides. EXPANDED 2026-07-12: the bump
   also carries the trigger-match matrix, copy-resolution fields, and joker
-  center_key_ids (see pre-regen section).
+  center_key_ids (see pre-regen section). EXPANDED 2026-07-13: shards also STORE the
+  real consumable block (harvested states carry genuinely owned consumables; stages
+  1-4 write it empty) instead of the loader synthesizing zeros. Labels stay
+  consumable-blind (the solver ignores consumables — document at the writer); BC just
+  learns an input that is inert for hand-play. What it buys: h2's BC pool won't show
+  zeros where live play shows real consumables, removing the one plausible pressure
+  to re-regenerate shards at the in-blind merge. In-blind consumable SELECTION itself
+  stays at h2 — P(clear-this-blind) is a dishonest objective for consumables
+  (Planet/banking value is cross-blind; the shop-visit-episode myopia argument), so
+  teaching it in the isolated env would train greedy consumable burning.
 - **Stages 1-4 regen config**: money sampled from HARVESTED per-ante dollar marginals
   (dollars at hand-turn entry, stratified by ante), with a ~20% flat tail so BC still
   sees off-distribution money states — retires the flat/uniform placeholder AND the
@@ -488,6 +497,17 @@ forces a second regen.
   recorded not built: B's monotone-mask parity test, the embedding-gather card
   encoder, `HandPlayGymEnv` consumable-tolerance test for restored full-run
   snapshots.
+  STATUS 2026-07-13: A1/A2/B1 done (main); B2 slices 1-3 done (branch
+  `worktree-pre-regen-b2-hand-potential`): hand-potential encoders
+  (D_HAND_CARD=18 / D_HAND_GLOBAL=256, shared shop constants untouched),
+  `jackdaw/env/trigger_match.py` (match matrix + full-vocab 4-class taxonomy
+  with import-time coverage hard-fail), copy resolution via the engine's own
+  path. TWO engine bugs found+fixed en route, both the Throwback class:
+  The Idol could never fire (reset_round_targets stored idol_card without the
+  "id" the handler compares against), and Blueprint/Brainstorm ignored
+  blueprint_compat (copies could fire the 29 incompatible jokers). Slice 4
+  pending — MIND the h0.5 obs-compat sequencing flag recorded at the slice-4
+  item in the handoff doc.
 
 ### h1 architecture — Candidate B COMMITTED (autoregressive pointer head)
 

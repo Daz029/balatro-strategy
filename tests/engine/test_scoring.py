@@ -492,3 +492,59 @@ class TestThrowbackIntegration:
             game_state={"skips": 0},
         )
         assert r.total == base.total
+
+
+# ============================================================================
+# The Idol — idol_card["id"] must flow from reset_round_targets to the handler
+# ============================================================================
+
+
+class TestIdolIntegration:
+    """Same bug class as Throwback: the j_idol handler compares
+    ``other_card.get_id() == idol_card.get("id")``, but ``reset_round_targets``
+    stored only rank/suit — no "id" — so The Idol could never fire through the
+    real pipeline while its hand-built-ctx unit tests passed. This drives the
+    reset-produced dict through score_hand end to end."""
+
+    def _idol_card_from_reset(self) -> dict:
+        from jackdaw.engine.round_lifecycle import reset_round_targets
+        from jackdaw.engine.run_init import initialize_run
+
+        gs = initialize_run("b_red", 1, "IDOL_INTEG")
+        reset_round_targets(PseudoRandom("IDOL_INTEG"), 1, gs)
+        return gs["current_round"]["idol_card"]
+
+    def test_idol_fires_through_score_hand_with_reset_dict(self):
+        idol_card = self._idol_card_from_reset()
+        assert idol_card.get("id") is not None  # the missing field
+        played = [_card(idol_card["suit"], idol_card["rank"])]
+        idol = _joker("j_idol", extra=2)
+        base = score_hand(played, [], [], HandLevels(), _small_blind(), PseudoRandom("T"))
+        r = score_hand(
+            played,
+            [],
+            [idol],
+            HandLevels(),
+            _small_blind(),
+            PseudoRandom("T"),
+            game_state={"idol_card": idol_card},
+        )
+        assert r.total == base.total * 2
+
+    def test_idol_inert_on_non_matching_card(self):
+        idol_card = self._idol_card_from_reset()
+        # Same suit, different rank — must not fire
+        wrong_rank = "Ace" if idol_card["rank"] != "Ace" else "King"
+        played = [_card(idol_card["suit"], wrong_rank)]
+        idol = _joker("j_idol", extra=2)
+        base = score_hand(played, [], [], HandLevels(), _small_blind(), PseudoRandom("T"))
+        r = score_hand(
+            played,
+            [],
+            [idol],
+            HandLevels(),
+            _small_blind(),
+            PseudoRandom("T"),
+            game_state={"idol_card": idol_card},
+        )
+        assert r.total == base.total
