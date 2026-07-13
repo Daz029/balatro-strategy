@@ -276,9 +276,11 @@ build — all s0-independent] -> harvest pass -> labels -> regen -> BC -> PPO ->
   corrector. VALIDATE once before trusting at 11+: ~50 hands of size 9-10, prescreened
   label vs full brute force, measure the p_clear gap.
 - **Schema bump contents** (the ONE bump): flush/straight hand-potential features (per
-  the obs-limitation item), width 16, index-set labels. Verified 2026-07-07: hand
-  levels (GC [30:90]), editions, and stickers are ALREADY in the obs — nothing else
-  rides.
+  the obs-limitation item; full spec v4.1 in the pre-regen build plan section), width
+  40, index-set labels. Verified 2026-07-07: hand levels (GC [30:90]), editions, and
+  stickers are ALREADY in the obs — nothing else rides. EXPANDED 2026-07-12: the bump
+  also carries the trigger-match matrix, copy-resolution fields, and joker
+  center_key_ids (see pre-regen section).
 - **Stages 1-4 regen config**: money sampled from HARVESTED per-ante dollar marginals
   (dollars at hand-turn entry, stratified by ante), with a ~20% flat tail so BC still
   sees off-distribution money states — retires the flat/uniform placeholder AND the
@@ -310,9 +312,9 @@ consolidate the same ~1% win signal). Partner = h0.5
   (RNG-exact, self-contained — same mechanism as `snapshot_state`) then delegates.
   A record = `{engine_blob, ante, blind_type/boss_key, hand_size, dollars, hands_left,
   discards_left, run_seed, turn_idx}` (metadata cached so stratification/stats need no
-  unpickle). Subsample ~6-8/run ante-stratified: buffer a run's captures, keep <=2-3
-  per ante bucket up to a per-run cap ~8 (within-run decorrelation; the cap only bites
-  on rare deep runs since most die ante 1). ~1200 runs -> ~8k. Also capture SHOP-state
+  unpickle). Subsampling: SUPERSEDED 2026-07-12 — capture EVERYTHING; the ~8k
+  ante-stratified / <=8-per-run cut is a separate seeded selection script emitting a
+  manifest (see the pre-regen build plan section below). Also capture SHOP-state
   snapshots (for V_curve) at shop decision points in the SAME pass (one extra sink,
   saves a second rollout). Seeds `HARVEST_{i:08d}` — reserved prefix, DISJOINT from
   `EVAL_` (harvesting eval seeds leaks the held-out suite into training). No solving ->
@@ -325,10 +327,10 @@ consolidate the same ~1% win signal). Partner = h0.5
   the EXISTING `generate_one_example` solver+encode body (everything from ~L341 works
   off `gs = adapter.raw_state`, so a restored blob flows through identically) ->
   `write_shard`. What changes is exactly the h1 schema bump, NOT harvest-specific:
-  index-set labels (remove the `MAX_HAND_CARDS` positional cap), width-16 obs +
+  index-set labels (remove the `MAX_HAND_CARDS` positional cap), width-40 obs +
   flush/straight features, and the solver big-hand prescreen for n>8 (validate at 11+
   first). 9600X job (~12s/example; ~8k / 12 workers ~ a couple hours); reuses the
-  existing multiprocessing/shard/resume machinery.
+  existing multiprocessing/shard/resume machinery, partitioned over the manifest.
 
 **Free reductions (no extra pass):** per-ante `$` marginals (money regen) and the
 hand-size histogram (Candidate B) are group-bys over phase-1 metadata — emit at end of
@@ -338,6 +340,154 @@ phase 1.
 -> phase 2 -> regen -> BC -> PPO. V_curve additionally gates on the s0 critic (a4_v4
 already has it). Deep-ante coverage for h1 stays with the retained domain-randomized
 stages 1-4; the harvest adds REALISM for the early antes s0 actually reaches.
+
+### Pre-regeneration build plan — GRILLED AND LOCKED (2026-07-12)
+
+Decision record from the pre-regen grilling session. Execution handoff (task specs,
+sequence, pitfalls, written for any implementing agent) lives in
+`docs/pre-regen-handoff.md` — keep the two in sync. Scope = everything that must land
+BEFORE the h1 label regeneration; anything touching label semantics lands here or
+forces a second regen.
+
+- **Harvest capture policy: capture EVERYTHING, thin later** (supersedes the
+  subsample-at-capture sketch above): every hand-turn blob + metadata row hits disk
+  (~10-30k records, 1-3GB); the ~8k selection (ante-stratified, <=8/run) is a SEPARATE
+  seeded script over metadata emitting a MANIFEST (ordered record IDs, versioned
+  artifact). Phase 2 consumes the manifest only, never the raw corpus. Rationale:
+  subsampling parameters become re-runnable queries instead of irreversible
+  capture-time commitments; free reductions run over the full induced distribution.
+- **Dual harvest pass, banked up front**: ~1200 deterministic runs (`HARVEST_{i:08d}`)
+  + ~500 sampled (`--sample-shop`, `HARVEST_S_{i:08d}`); every record carries a source
+  tag + git SHA stamp (engine-version-skew check, loud at phase 2). Coverage "check"
+  is a READOUT tuning the manifest's det:sampled ratio (default 75:25 det-heavy —
+  deployed-distribution anchor logic), not a pass/fail gate ("every joker >=10x"-class
+  criteria can never pass, and vocabulary breadth is stages 1-4's job, not the
+  harvest's). Free reductions ($ marginals, hand-size histogram) compute over the
+  DETERMINISTIC corpus only (sampled runs would smear a worse policy's money behavior
+  into the money prior).
+- **Record identity** = `{run_seed}_{turn_idx}`: keys `mc_seed` (label
+  reproducibility) and phase-2 resume/partitioning (manifest-ordered; explicit
+  `--num-workers` per the 2026-07-05 operational lesson).
+- **Label encoding**: `(5,)` int array, canonical ASCENDING index order, -1 pad
+  (replaces `card_target_mask`). Shape decoupled from obs width permanently;
+  structurally caps at the engine's 5-card limit; B consumes it directly as the
+  teacher-forced pick sequence. schema_version bump; loader hard-fails on
+  unsorted/duplicate/out-of-bounds-vs-hand_mask/empty.
+- **Candidate B pick order: canonical-order-as-mask-constraint.** B's per-step decode
+  mask additionally requires each pick index > the last (monotone). Every set has
+  exactly one reachable sequence; off-canonical prefixes are unreachable (no OOD
+  prefixes), there is no order entropy for the KL leash to defend, and sequence CE
+  stays comparable to the flat-head control. REJECTED: random-order training (order
+  entropy is null-direction exploration — all orderings execute identically),
+  marginal-contribution ordering (degenerate on joint-value hands — every flush card
+  has identical LOO delta — and undefined for discards). Chain rule over the sorted
+  encoding is fully general, so no set distribution is lost. Parity test required:
+  the mask constraint must be byte-identical at BC, PPO, and eval. Nothing
+  order-related rides the regen.
+- **Feature spec v4.1** (the flush/straight bump, fully specced; motivating rubric:
+  pooling destroys counts and joint structure, so cross-card / cross-entity facts
+  must be injected per-card or into the pooling-immune GC vector):
+  - Per-card +3 static: suit-count-of-my-suit /5; rank-count-of-my-rank /4; best
+    straight-window occupancy among windows containing my rank (wheel window
+    included; window length 4 under Four Fingers; gap-tolerant under Shortcut —
+    flags via `get_hand_eval_flags`).
+  - GC +21: per-suit counts /hand_size (4), per-rank counts /4 (13), max suit count
+    (1), best window occupancy over all windows (1), Four Fingers + Shortcut bits (2).
+  - **Trigger-match matrix** `trigger_match[card, joker_slot, {scored, held}]`
+    (bools, stored in shards) + `joker_center_key_id` array. Consumed at BC-time as
+    fixed-weight cross-attention: card encoder input = own features ⊕ sum over
+    matched jokers of (learned embedding over the FROZEN center-key vocab ⊕ 24-dim
+    descriptor), scored and held summed separately. REJECTED: scalar trigger counts
+    (collapse joker identity), 150-dim per-joker one-hot (sparse, cold weights, no
+    geometry), descriptor-sum alone (collapses within-class identity — the
+    Hack-vs-descriptor-twin objection).
+  - **Trigger taxonomy** (build-time coverage check must classify EVERY vocab
+    joker): class 1 per-card static (match = trigger-CLASS membership, "candidate"
+    semantics — Photograph marks all faces, not just the first); class 2 per-card
+    state-dependent (Ancient/Idol/Castle/Mail — predicate signature
+    `(card, joker, gs) -> bool` reading LIVE state; a static config table silently
+    mismarks Ancient every round); class 3 set-level (Flower Pot/Seeing Double/
+    Blackboard/hand-type-conditional jokers — all-zero rows DELIBERATELY, no honest
+    per-card bit exists; the GC set-structure features are their signal); class 4
+    non-card (economy etc. — all-zero).
+  - **Copy resolution (Blueprint/Brainstorm)**: joker rows gain resolved-target
+    center_key_id + target descriptor + active-copy bit; match rows inherit through
+    the resolved chain; resolution MUST reuse the engine's own copy-resolution path
+    (no reimplementation). Rationale: pooling destroys adjacency, so "has a copy
+    effect" alone is structurally uninterpretable. Known-deferred: joker
+    scoring-order sequencing (+mult/xmult interleave) stays invisible in obs —
+    consistent, engine-scored in labels, second-order.
+  - Attention DEFERRED to h2, evidence-gated on the post-bump archetype eval: the
+    match matrix absorbs its main motivation, and stacking a second architecture
+    change into the B-validation seam makes regressions unattributable.
+- **Joker auto-ordering — engine-side `best_joker_order` in `play_ordering.py`**
+  (the `best_play_order` precedent; vanilla joker reorder is a free unrestricted
+  action, so auto-ordering is vanilla-faithful; agent-visible reorder actions stay
+  rejected): closed-form additive-mult-BEFORE-x-mult sort (provably optimal for the
+  independent-joker mult chain: (m0+m)*x >= m0*x+m for x>=1) + copy-target argmax
+  (<=4 candidates, only when Blueprint/Brainstorm owned). Env: computed once per
+  COMMITTED play, persistent vanilla-legal mutation. Solver: sort once per hand-turn
+  (subset-independent); per-candidate copy-target on the exact current-hand path
+  ONLY; fixed target on the MC future-hand path (matches that path's existing
+  approximation tier). ONE shared implementation — solver/env divergence here is the
+  discard-cap bug class. `fast_clone` discipline extends to the joker list. Validate
+  the sort against brute-force 120-perm ground truth on constructed boards (the
+  closed form covers the independent phase; per-card-phase trigger interleaving
+  needs the empirical check).
+- **`add_to_deck` injection fix**: `HandPlayAdapter.reset` injects with bare
+  `create_joker` and NEVER applies acquisition passives (`card.py::add_to_deck`) —
+  every stage-3/4 demo that sampled Juggler/Troubadour/Turtle Bean/Stuntman carries
+  a FALSE hand size the engine would never deal with that build. Fix: apply the FULL
+  passive (no cherry-picking h_size — cherry-picking is a new drift surface, and
+  Drunkard's +1 discard on top of sampled ranges is true-conditional-on-build;
+  document the small discard-marginal tilt), applied AFTER `_apply_scaling_state`
+  (a decayed Turtle Bean must apply its decayed h_size, not the fresh +5). Plus a
+  small flat hand-size tail knob in `HandPlayConfig` (same pattern/rationale as the
+  20% flat money tail). Voucher-odds-by-ante weighting REJECTED (it models shop
+  behavior — the same circularity that killed the evidence gate); big-hand realism
+  comes from the mechanism, coverage from the flat tail.
+- **Prescreen** (supersedes "~50 hands of size 9-10" above): family-DIVERSE top-k —
+  best-per-template-family first, then fill by rank (naive top-k can be k variants
+  of one flush line, starving discard-toward-straight candidates). k chosen
+  empirically: ONE brute-force validation pass scores all k-cuts simultaneously
+  (top-3/5/8...), pick the smallest passing k. Validation set: ~50 hands FLAT over
+  sizes 9-12 (11-12 included — that is where extrapolation was being trusted), dealt
+  via the new hand-size knob. Metric = REGRET: p_clear(brute-force best) -
+  p_clear(prescreen's choice), both valued by brute force (disagreement-rate
+  over-counts harmless near-ties). Accept within ~1.33x the n=8 noise floor,
+  measured by MC-reseeding the same states. Heavy compute (n=12 is ~800 subsets/
+  hand): 9600X if slow locally.
+- **Discard-bias fingerprint — two-signal CONJUNCTION gates the solver fix**
+  (fix-first rejected: the banked-discard fix multiplies MC-boundary label cost
+  across all ~42k labels and is the exact solver-change class that produced the
+  discard-cap / shared-blind / id() bugs, against a near-free eval): signal 1
+  LOCATES — per-bucket ceiling recovery (h0.5 deterministic clear rate / shard
+  label-mean p_clear, bucketed by starting (hands_left, discards_left)); deficit in
+  discards>=2 buckets is necessary but NOT sufficient (also consistent with plain
+  learning weakness). Signal 2 ATTRIBUTES via the bias's known sign (play-only
+  future valuation can only push toward discarding TOO EAGERLY): h0.5 discard rate
+  at-or-above the teacher's inflated rate in those buckets = bias survived;
+  directionless error or UNDER-discarding = solver not indicated (remedy is
+  training, not labels). Greedy control on stage 1 only (greedy discards chaff on
+  weak hands and is joker-blind — not a clean no-discard floor). The flush/straight
+  archetype decomposition rides the same eval pass. If triggered, the fix (B6) goes
+  through the prescreen's regret harness before any label is trusted.
+- **Tier-1 executability rework**: the current tier 1 maps labels through
+  `combo_to_action` into the Discrete(436) mask — any >8-position label raises ->
+  GenerationError -> silently skipped to failures.jsonl, i.e. phase 2 would QUIETLY
+  DROP exactly the big-hand examples the bump exists to capture. Rewrite
+  schema-native: indices unique/sorted/within actual hand bounds, 1-5 cards,
+  play/discard legality vs hands_left/discards_left. Tier 2 (real engine execution)
+  survives unchanged — the engine takes raw indices at any position.
+- **Build order**: A1 `harvest_s0_rollouts.py` -> A2 run both passes + reductions/
+  coverage readout -> A3 fingerprint eval || B1 add_to_deck fix -> B2 feature bump
+  -> B3 best_joker_order -> B4 labels/width-40/tier-1 -> B5 prescreen + validation
+  -> B6 (conditional on A3) -> C1 selection/manifest -> C2 snapshot-fed front-end
+  -> regen (9600X, out of scope). A1 is schema-independent (bank the corpus NOW);
+  ALL label-semantics items (B1-B6) must land before C2 runs. Post-regen scope,
+  recorded not built: B's monotone-mask parity test, the embedding-gather card
+  encoder, `HandPlayGymEnv` consumable-tolerance test for restored full-run
+  snapshots.
 
 ### h1 architecture — Candidate B COMMITTED (autoregressive pointer head)
 
