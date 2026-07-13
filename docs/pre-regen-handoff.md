@@ -48,6 +48,24 @@ Hard rules:
 - A3 must be resolved (triggered or cleared) before B6's go/no-go, and B6 —
   if it happens — must finish before C2.
 
+## Status (committed directly to `main`)
+
+- **A1 — DONE** (`scripts/harvest_s0_rollouts.py` + tests): capture pipeline,
+  dual pass, per-run blob shards + blob-free metadata, reductions + readout.
+- **A2 — DONE** (run on the 9600X, corpus transferred to `data/harvest_s0/`):
+  26,978 det hand records (+18k shop), ante coverage to 7, 141 distinct jokers.
+  **KEY READOUT: `max_hand_size = 8`, zero hands > 8** — the circular gate,
+  confirmed: s0/h0.5 never reach +hand-size builds. So (a) it vindicates
+  committing Candidate B without the evidence gate, and (b) the harvested BC
+  stage is BLIND to wide hands — wide-hand coverage for BC comes from stages
+  1-4 (the B1 `add_to_deck` mechanism + the flat tail set from GAME KNOWLEDGE,
+  not the harvest histogram, which is a circular zero here). Money marginals are
+  valid (money isn't circular).
+- **B1 — DONE** (`hand_play_adapter.py` + tests): `add_to_deck` passives applied
+  once per injected joker; flat hand-size tail knob (off by default, modest range
+  set from game knowledge per the A2 finding above).
+- **A3, B2–B6, C1–C2** — not started.
+
 ## Task specifications
 
 ### A1 — `scripts/harvest_s0_rollouts.py` (new)
@@ -127,6 +145,17 @@ the real engine would never produce. Fix:
   value; deterministic per seed.
 
 ### B2 — observation feature bump (`jackdaw/env/observation.py`, demo writer)
+
+**Build slices** (staged into separate tested commits, each stacking on the last):
+1. **Flush/straight potential features** — per-card +3 + GC +21 (below). Pure
+   O(n) obs additions, known-hand fixtures. Self-contained, lowest risk — first.
+2. **Trigger-match matrix** — `trigger_match[card, joker, {scored,held}]` +
+   `joker_center_key_id`, 4-class taxonomy with a build-time coverage check that
+   classifies EVERY vocab joker (unclassified = hard error). Class-2 reads live
+   state (pitfall #8); class-3 all-zero by design (pitfall #9).
+3. **Copy resolution** (Blueprint/Brainstorm) — resolved-target ids + active-copy
+   bit via the ENGINE's own resolution path (pitfall #11), match rows inherited.
+4. **`schema_version` bump + loader up-pad** — hard-fail on unknown schema.
 
 - Per-card +3: suit-count-of-my-suit /5; rank-count-of-my-rank /4; best
   straight-window occupancy among 5-rank windows containing my rank (occupancy =

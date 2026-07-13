@@ -129,12 +129,14 @@ class HandPlayConfig:
     # the flat money-tail pattern. Its ONLY job is decode-length coverage —
     # ensuring Candidate B / the width-40 obs have seen a hand a little wider
     # than the joker sampler happens to stack. It is NOT for distribution
-    # matching: genuine wide hands (multi-joker stacks, Turtle Bean, Serpent
-    # over-draws) arrive correctly-correlated from the HARVESTED stage's real
-    # mid-run snapshots, so keep this range MODEST (a few cards, low prob) and
-    # set it from the harvest hand-size histogram — never a wide flat tail,
-    # which would over-represent sizes that in reality need specific rare
-    # builds. Stream-neutral when off: no sampler draw unless the prob is > 0,
+    # matching. NOTE (from the A2 harvest readout): the harvested stage is
+    # BLIND to wide hands (s0/h0.5 never reach +hand-size builds -- max hand
+    # size 8, the circular gate), so wide-hand coverage for BC comes from HERE
+    # (this tail + the add_to_deck joker mechanism), NOT the harvest. Set the
+    # range from GAME KNOWLEDGE -- modest (a few cards, low prob), never a wide
+    # flat tail that over-represents sizes real play needs specific builds for.
+    # The harvest hand-size histogram is a circular zero here; do not size the
+    # tail from it. Stream-neutral when off: no sampler draw unless prob > 0,
     # so existing datasets/seeds are byte-identical.
     hand_size_delta_range: tuple[int, int] = (0, 0)
     hand_size_tail_prob: float = 0.0
