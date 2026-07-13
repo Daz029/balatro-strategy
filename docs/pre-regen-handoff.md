@@ -48,7 +48,7 @@ Hard rules:
 - A3 must be resolved (triggered or cleared) before B6's go/no-go, and B6 —
   if it happens — must finish before C2.
 
-## Status (committed directly to `main`)
+## Status (A1/A2/B1 directly on `main`; B2 on `worktree-pre-regen-b2-hand-potential`)
 
 - **A1 — DONE** (`scripts/harvest_s0_rollouts.py` + tests): capture pipeline,
   dual pass, per-run blob shards + blob-free metadata, reductions + readout.
@@ -64,7 +64,20 @@ Hard rules:
 - **B1 — DONE** (`hand_play_adapter.py` + tests): `add_to_deck` passives applied
   once per injected joker; flat hand-size tail knob (off by default, modest range
   set from game knowledge per the A2 finding above).
-- **A3, B2–B6, C1–C2** — not started.
+- **B2 slices 1–3 — DONE** (2026-07-13): slice 1 `hand_potential_features` /
+  `encode_hand_potential` in observation.py (D_HAND_CARD=18, D_HAND_GLOBAL=256;
+  shared shop constants untouched; engine-mirror test pins the window model
+  against `get_straight`/`get_flush`); slice 2 `jackdaw/env/trigger_match.py`
+  (match matrix + 4-class taxonomy over all 150 vocab jokers, import-time
+  coverage hard-fail — it caught `j_cloud_9` immediately); slice 3
+  `resolve_copy_targets` + copy-column inheritance via the engine's own
+  resolution helpers. TWO engine bugs found + fixed on the branch, both the
+  Throwback class (handler unit-tested, integration broken): The Idol could
+  never fire (`reset_round_targets` stored idol_card without the "id" the
+  handler compares against), and Blueprint/Brainstorm ignored
+  `blueprint_compat` (all 29 incompatible jokers were copyable — e.g. a
+  Blueprint beside an Egg doubled its end-of-round growth).
+- **A3, B2 slice 4, B3–B6, C1–C2** — not started.
 
 ## Task specifications
 
@@ -171,6 +184,14 @@ merge is built.
 3. **Copy resolution** (Blueprint/Brainstorm) — resolved-target ids + active-copy
    bit via the ENGINE's own resolution path (pitfall #11), match rows inherited.
 4. **`schema_version` bump + loader up-pad** — hard-fail on unknown schema.
+   **SEQUENCING FLAG (2026-07-13, found while building slices 1-3):**
+   `build_observation` is consumed by `HandCheckpointPolicy` (the h0.5
+   partner in the shop env) and `eval_hand_policy` — switching it to the
+   v2 schema IN PLACE breaks h0.5's checkpoint obs width, and A3 (an h0.5
+   eval) hasn't run yet. Land v2 as a versioned seam: the v1 path stays
+   available and remains what the h0.5 checkpoint paths build, and the
+   default flips only at h1 BC/PPO (whose nets are fresh anyway). Do NOT
+   let slice 4 make A3 unrunnable; alternatively run A3 first.
 
 - Per-card +3: suit-count-of-my-suit /5; rank-count-of-my-rank /4; best
   straight-window occupancy among 5-rank windows containing my rank (occupancy =

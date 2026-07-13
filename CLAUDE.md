@@ -488,6 +488,17 @@ forces a second regen.
   recorded not built: B's monotone-mask parity test, the embedding-gather card
   encoder, `HandPlayGymEnv` consumable-tolerance test for restored full-run
   snapshots.
+  STATUS 2026-07-13: A1/A2/B1 done (main); B2 slices 1-3 done (branch
+  `worktree-pre-regen-b2-hand-potential`): hand-potential encoders
+  (D_HAND_CARD=18 / D_HAND_GLOBAL=256, shared shop constants untouched),
+  `jackdaw/env/trigger_match.py` (match matrix + full-vocab 4-class taxonomy
+  with import-time coverage hard-fail), copy resolution via the engine's own
+  path. TWO engine bugs found+fixed en route, both the Throwback class:
+  The Idol could never fire (reset_round_targets stored idol_card without the
+  "id" the handler compares against), and Blueprint/Brainstorm ignored
+  blueprint_compat (copies could fire the 29 incompatible jokers). Slice 4
+  pending — MIND the h0.5 obs-compat sequencing flag recorded at the slice-4
+  item in the handoff doc.
 
 ### h1 architecture — Candidate B COMMITTED (autoregressive pointer head)
 
