@@ -232,7 +232,10 @@ class TestResetRoundTargets:
     def test_idol_card_ante1(self):
         gs = _make_target_gs()
         idol = gs["current_round"]["idol_card"]
-        assert idol == {"suit": "Clubs", "rank": "6"}
+        # "id" must ride along with rank/suit: the j_idol handler compares
+        # get_id() against idol_card["id"], so a dict without it can never
+        # match (the bug that made The Idol unable to fire in real games).
+        assert idol == {"suit": "Clubs", "rank": "6", "id": 6}
 
 
 # ============================================================================
