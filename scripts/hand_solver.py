@@ -506,6 +506,42 @@ _RANK_LINE_TYPES = frozenset(
 )
 
 
+def _ranking_score(
+    cards: list[Card],
+    held: list[Card],
+    jokers: list[Card],
+    hand_levels: HandLevels,
+    blind,
+    rng: PseudoRandom,
+    game_state: dict | None,
+    blind_chips: int,
+) -> tuple[ScoreResult, dict[int, Card]]:
+    """Shared RANKING-tier scorer for candidate selection (the play
+    prescreen and the discard-template ranking): one `score_hand` call,
+    fixed order, no permutation search, joker- and held-aware, fast-clones
+    throughout (score_hand mutates card/joker/hand_levels/rng/blind state
+    in place on every hypothetical call -- The Eye/The Mouth history,
+    scaling-joker accumulation). Returns the result plus a clone-id ->
+    original-card map so callers can key on original card identity
+    (score_hand reports scoring_cards as the clones it was given)."""
+    played_clones = [_fast_clone_card(c) for c in cards]
+    held_clones = [_fast_clone_card(c) for c in held]
+    result = score_hand(
+        played_clones,
+        held_clones,
+        [_fast_clone_card(j) for j in jokers],
+        _fast_clone_hand_levels(hand_levels),
+        _fast_clone_blind(blind),
+        _fast_clone_rng(rng),
+        game_state=game_state,
+        blind_chips=blind_chips,
+    )
+    clone_to_orig = {
+        id(clone): orig for clone, orig in zip(played_clones + held_clones, cards + held)
+    }
+    return result, clone_to_orig
+
+
 def prescreen_play_candidates(
     hand: list[Card],
     jokers: list[Card],
@@ -607,22 +643,9 @@ def prescreen_play_candidates(
             continue
         seen_sets.add(key)
         held = [c for c in hand if id(c) not in key]
-        played_clones = [_fast_clone_card(c) for c in cards]
-        held_clones = [_fast_clone_card(c) for c in held]
-        cheap = score_hand(
-            played_clones,
-            held_clones,
-            [_fast_clone_card(j) for j in jokers],
-            _fast_clone_hand_levels(hand_levels),
-            _fast_clone_blind(blind),
-            _fast_clone_rng(rng),
-            game_state=game_state,
-            blind_chips=blind_chips,
+        cheap, clone_to_orig = _ranking_score(
+            cards, held, jokers, hand_levels, blind, rng, game_state, blind_chips
         )
-        clone_to_orig = {
-            id(clone): orig
-            for clone, orig in zip(played_clones + held_clones, cards + held)
-        }
         family = (
             cheap.hand_type,
             frozenset(
@@ -996,12 +1019,31 @@ def rank_templates_cheaply(
     four_fingers: bool = False,
     shortcut: bool = False,
     top_k: int = 4,
+    jokers: list[Card] | None = None,
+    game_state: dict | None = None,
+    blind_chips: int = 0,
+    joker_aware: bool = True,
 ) -> list[tuple[Template, list[Card], list[Card], list[Card], float, float, int]]:
     """Returns up to `top_k` (template, hold, kept, discard, p_reach,
-    cheap_value, still_needed) tuples, ranked by p_reach * cheap_value
-    using the jokerless `score_hand_base` (no engine joker loop, no
-    permutation search -- safe because base scoring is order-invariant
-    without jokers).
+    cheap_value, still_needed) tuples, ranked by p_reach * cheap_value.
+
+    RANKING FIDELITY (B7, user-locked 2026-07-14): when `jokers` is given
+    (and `joker_aware` is left on), cheap_value comes from one fixed-order
+    `score_hand` with the branch's honest held cards -- the same ranking
+    tier as the play prescreen. The historical jokerless/held-empty
+    `score_hand_base` path had the failure shape the prescreen fixed: a
+    joker- or held-favored line (Greedy's suit, Baron's held Kings) could
+    rank below its true value and never reach the exact hit/miss
+    recursion. Per-branch held = `kept` plus any (hold+completion)
+    overflow beyond the played 5; unknown replacement draws contribute
+    nothing (same representative-completion approximation tier). Only the
+    RANKING scorer changes -- reachability math and the exact recursion
+    valuation are untouched, so labels shift only where a different
+    template set gets explored.
+
+    `jokers=None` or `joker_aware=False` selects the old jokerless scorer
+    (kept as the comparison arm for `scripts/validate_discard_ranking.py`
+    and for legacy callers).
 
     `hold` contains only template-MATCHING cards (still_needed/eval math
     depends on that); `kept` is excess non-matches retained in hand because
@@ -1045,16 +1087,24 @@ def rank_templates_cheaply(
             eval_cards = (hold + _best_completion_cards(deck, template, still_needed))[:5]
 
         # blind clone: see the note in evaluate_value -- this loop tries
-        # many candidate templates per decision, and score_hand_base
-        # mutates history-dependent boss state (The Eye/The Mouth) on every
+        # many candidate templates per decision, and the scorer mutates
+        # history-dependent boss state (The Eye/The Mouth) on every
         # hypothetical call, not just the eventually-chosen one.
-        cheap_result = score_hand_base(
-            eval_cards,
-            [],
-            _fast_clone_hand_levels(hand_levels),
-            _fast_clone_blind(blind),
-            _fast_clone_rng(rng),
-        )
+        if joker_aware and jokers is not None:
+            eval_ids = {id(c) for c in eval_cards}
+            branch_held = [c for c in list(hold) + kept if id(c) not in eval_ids]
+            cheap_result, _ = _ranking_score(
+                eval_cards, branch_held, jokers, hand_levels, blind, rng,
+                game_state, blind_chips,
+            )
+        else:
+            cheap_result = score_hand_base(
+                eval_cards,
+                [],
+                _fast_clone_hand_levels(hand_levels),
+                _fast_clone_blind(blind),
+                _fast_clone_rng(rng),
+            )
         scored.append((template, hold, kept, discard, p_reach, cheap_result.total, still_needed))
 
     scored.sort(key=lambda t: t[4] * t[5], reverse=True)
@@ -1256,6 +1306,7 @@ def solve_hand_turn(
     candidates = rank_templates_cheaply(
         hand, deck, hand_levels, blind, rng,
         four_fingers=four_fingers, shortcut=shortcut, top_k=top_k,
+        jokers=jokers, game_state=game_state, blind_chips=blind_chips,
     )
 
     for template, hold, kept, discard, p_reach, _cheap_val, still_needed in candidates:

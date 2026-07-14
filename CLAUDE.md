@@ -546,9 +546,14 @@ forces a second regen.
   calibration for the B2 features: pair recovery beats flush/straight in
   every stage (stage3 0.675 vs 0.467/0.410). NEW pre-regen item B7
   (user-locked 2026-07-14): `rank_templates_cheaply`'s discard-branch
-  ranking must become joker/held-aware too (B5's ranking precedent;
-  label-semantics change at every hand size => gates the regen; spec in
-  the handoff doc). Next: B3, B4, B7.
+  ranking joker/held-aware too (B5's ranking precedent; label-semantics
+  change at every hand size => gates the regen). B7 code + tests BUILT
+  same session (`_ranking_score` shared with the prescreen; per-branch
+  held = kept + hold/completion overflow; `joker_aware=False` escape
+  hatch); its old-vs-new validation run
+  (`scripts/validate_discard_ranking.py`) must ACCEPT before any label
+  generation — record the result at the B7 spec in the handoff doc.
+  Next: B3, B4, B7 validation run.
 
 ### h1 architecture — Candidate B COMMITTED (autoregressive pointer head)
 

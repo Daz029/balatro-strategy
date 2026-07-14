@@ -400,24 +400,37 @@ suit, Baron's held Kings) can rank below its true value and never reach the
 exact hit/miss recursion. This is a LABEL-SEMANTICS change for every hand
 size (the discard path runs at n<=8 too), so it must land before C2/regen.
 
-- Mechanics: mirror the B5 prescreen ranking — one fixed-order `score_hand`
-  per template's eval_cards with the true held cards (hold + kept for a
-  discard branch is what stays in hand alongside... define held per branch
-  honestly: the hypothetical post-draw hand minus the played 5), jokers
-  passed, `fast_clone_*` everything (pitfall #4). No permutation search
-  (ranking tier, same as B5).
+- Mechanics (BUILT 2026-07-14, same session as B5): `_ranking_score` — the
+  shared ranking-tier scorer (one fixed-order `score_hand`, fast-clones
+  everything, returns a clone→original identity map) — now backs BOTH the
+  B5 play prescreen and `rank_templates_cheaply`. Per-branch held =
+  `kept` + any (hold+completion) overflow beyond the played 5; unknown
+  replacement draws contribute nothing (same representative-completion
+  tier). Only the RANKING scorer changed — reachability math and the
+  exact recursion valuation are untouched, so labels shift only where a
+  different template set gets explored. `jokers=None` / `joker_aware=False`
+  keep the old jokerless scorer (legacy callers + the harness's
+  comparison arm). Tests:
+  `tests/scripts/test_hand_solver_discard_ranking.py` (Greedy flips the
+  ranking toward its suit's flush; Baron raises a branch whose discard
+  cap keeps a King in hand; escape-hatch equivalence; Eye mutation
+  safety).
 - The completion-card hypothetical (`_best_completion_cards`) stays — only
   the SCORER upgrades, not the reachability math.
-- Validation: this changes which branches the recursion explores at n<=8,
-  i.e. existing-label churn. Run a regret check in the same spirit as B5's
-  harness before trusting labels: sample discard-rich states (discards>=2),
-  full solve with old vs new ranking, value both chosen actions under the
-  same future-samples valuation; accept if new >= old within the MC noise
-  floor (it should be — strictly better information — but verify, don't
-  assume; the discard-cap class of bug lives exactly here).
-- Cost check: rank_templates_cheaply runs per recursion node; score_hand
-  with jokers is a few x score_hand_base. Measure per-label time before/
-  after on stage3-style states; budget is the ~12s/example regen envelope.
+- Validation (`scripts/validate_discard_ranking.py`, BUILT 2026-07-14,
+  run pending — results to be recorded here): samples discard-rich states
+  (discards>=2, jokers present), solves each with new vs old ranking
+  under the SAME mc_seed (identical future samples), compares the claimed
+  p_clear of the chosen action (an honest max over the explored branch
+  set under identical valuation); floor = same-arm MC-reseed spread.
+  Accept mean delta >= -1.33 x floor (better information should give
+  delta >= 0; materially negative = the new ranking steers into worse
+  branches — do not ship, investigate; the discard-cap bug class lives
+  exactly here).
+- Cost check rides the same harness (per-arm mean solve seconds; budget
+  is the ~12s/example regen envelope). NOTE the runtime tail is dominated
+  by pre-existing exact-path costs (order-sensitive jokers ->
+  permutation search), equal in both arms.
 
 ### C1 — selection script → manifest (new, small)
 
