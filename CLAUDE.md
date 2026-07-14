@@ -491,9 +491,10 @@ forces a second regen.
 - **Build order**: A1 `harvest_s0_rollouts.py` -> A2 run both passes + reductions/
   coverage readout -> A3 fingerprint eval || B1 add_to_deck fix -> B2 feature bump
   -> B3 best_joker_order -> B4 labels/width-40/tier-1 -> B5 prescreen + validation
-  -> B6 (conditional on A3) -> C1 selection/manifest -> C2 snapshot-fed front-end
+  -> B6 (conditional on A3) -> B7 discard-ranking fidelity (added 2026-07-14)
+  -> C1 selection/manifest -> C2 snapshot-fed front-end
   -> regen (9600X, out of scope). A1 is schema-independent (bank the corpus NOW);
-  ALL label-semantics items (B1-B6) must land before C2 runs. Post-regen scope,
+  ALL label-semantics items (B1-B7) must land before C2 runs. Post-regen scope,
   recorded not built: B's monotone-mask parity test, the embedding-gather card
   encoder, `HandPlayGymEnv` consumable-tolerance test for restored full-run
   snapshots.
@@ -522,7 +523,32 @@ forces a second regen.
   labels touching position >=8 (report the dropped fraction), and B's env
   interface is the label encoding itself (type + ascending picks vector;
   masks built policy-side; v1 Discrete(436) path survives for h0.5).
-  Next: A3 (unblocked — v1 obs untouched) and B3.
+  STATUS 2026-07-14 (same branch): B5 DONE — `prescreen_play_candidates` +
+  prescreen path in `best_immediate_play` (n>8): family = the candidate's
+  REALIZED scoring line (template-keyed families are gameable — kicker
+  padding lets every weak template piggyback the dominant line); ranking
+  is JOKER- and HELD-AWARE (user call: jokerless ranking filters
+  joker-favored lines before the exact pass can see them); pair pin at
+  index 1 of every k>=2 cut (user call: a pair's cheap rank is weak but
+  its value is consistent — no draw, no luck). Validation
+  (`scripts/validate_prescreen.py`, 48 hands sizes 9-12): sampled regret
+  0.0 at k=3/5/8 vs noise floor 0.022 with IDENTICAL best-in-cut rate
+  0.646 across k => misses are candidate-GENERATOR-side, raising k buys
+  nothing (that's also the lever if the boundary-stress exposure — mean
+  0.12 p_clear at a blind placed exactly at the best play's total — ever
+  needs shrinking); minimal passing k=3, PRESCREEN_TOP_K=4 (user margin
+  call). Big-hand labels now 0.7-10s at hand sizes 12-17 (in budget).
+  A3 DONE, verdict CLEARED — B6 SKIPPED: discards>=2 recovery deficits
+  are large (stage2/3/4 +30/+79/+105 pts, CIs exclude 0) BUT h0.5
+  UNDER-discards vs the teacher in exactly those buckets (-0.11/-0.08/
+  -0.07, CIs below zero) — conjunction fails on attribution; training
+  problem, not labels. Report: `data/fingerprint_a3.json`. Archetype
+  calibration for the B2 features: pair recovery beats flush/straight in
+  every stage (stage3 0.675 vs 0.467/0.410). NEW pre-regen item B7
+  (user-locked 2026-07-14): `rank_templates_cheaply`'s discard-branch
+  ranking must become joker/held-aware too (B5's ranking precedent;
+  label-semantics change at every hand size => gates the regen; spec in
+  the handoff doc). Next: B3, B4, B7.
 
 ### h1 architecture — Candidate B COMMITTED (autoregressive pointer head)
 
