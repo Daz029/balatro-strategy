@@ -1095,7 +1095,45 @@ forces a second regen.
       path verified on a live 6-joker SELECTING_HAND state (returns a legal PlayHand, no
       crash). Second-order distortion (h0.5 plays 6+-joker states blind to the truncated
       rows -> s0 slightly undervalues Negative/wide-joker builds) is the same class as the
-      flush/straight obs gap and self-corrects at h1 when the block widens to 8.
+      flush/straight obs gap and self-corrects at h1 when the v2 block widens (to 15, see
+      the next item — SUPERSEDES the earlier "widens to 8 at the h1 seam" plan on this and
+      the line above: the hand v2 block is `MAX_JOKERS_V2=15`, not 8; 8 is the SHOP row count).
+- [ ] KNOWN OBS/ACTION LIMITATION — shop joker cap `MAX_JOKER_ROWS=8` (decision record
+      2026-07-15; the hand-side counterpart was FIXED — v1 `MAX_JOKERS=5` frozen, v2
+      `MAX_JOKERS_V2=15`, expand-not-truncate + dual counter, branch
+      `worktree-joker-cap-15`): the shop obs joker block clips physical jokers past 8
+      (`shop_obs.py:177` `gs["jokers"][:MAX_JOKER_ROWS]`), so s0 is blind to jokers 9+ on
+      a wide/negative build. Structurally DIFFERENT from the hand fix, three ways, so it is
+      NOT a mechanical apply:
+      1. **Jokers are positionally addressed** — `MAX_JOKER_ROWS=8` is defined in BOTH
+         `shop_obs.py:52` and `shop_action_space.py:51` and MUST stay equal, because
+         SellJoker slot k targets obs joker row k (header invariant: "the mask for 'sell
+         joker 5' must have an obs row 5 to look at"). The hand could widen obs alone
+         precisely because jokers there are NOT positionally addressed; the shop cannot.
+      2. **8 is already negative-aware headroom, and it only CLIPS (no bug)** — SellJoker=8
+         was sized "5 base + Antimatter + negative-edition headroom" (`shop_action_space.py:12`),
+         and `build_shop_observation` clips rather than raises, so there is NO silent-drop /
+         harvest-labeling bug forcing the issue (unlike the generation raise that forced the
+         hand fix). Pure informativeness gap for the rare >8-joker state.
+      3. **A live/in-progress s0 checkpoint bakes both spaces** — single obs schema (no
+         v1/v2 seam) + `Discrete(686)` head. SellJoker sits at `[446,454)` mid-canonical, so
+         widening it IN PLACE shifts PickPackCard/SkipPack/SelectTarget and every pinned
+         offset — a direct append-only-contract violation; the only append-safe add is
+         non-contiguous SellJoker rows at 686+.
+      THREE CHOICES:
+      - **A. Leave at 8** (recommended): 8 already = 5 base + Antimatter + 2 negative
+        headroom; obs clips safely; >8 jokers is rare; widening breaks a mid-training s0 run
+        and the append-only contract for a marginal gain. No forcing function (unlike the
+        hand's generation drop-bug).
+      - **B. Widen obs only -> 15, keep SellJoker=8**: agent SEES all jokers for
+        scoring/synergy but jokers 9-15 stay unsellable. Breaks s0's obs space (retrain), NOT
+        the action head. Coherent middle, only worth it if s0 is being retrained anyway.
+      - **C. Widen obs + SellJoker -> 15**: full parity, but breaks s0 obs AND action head,
+        plus the append-only contract (in-place shift) or a non-contiguous SellJoker append;
+        full s0 retrain. Most invasive.
+      Gating fact: whether s0 is already frozen for this bootstrap iteration (break =
+      expensive) or being retrained regardless (B/C become cheap). Decide at the shop-merge /
+      s1 seam, not before.
 - [ ] KNOWN ACTION-SPACE CEILING — 8-position combo enumeration vs big hands (decision
       record 2026-07-06; DECIDED 2026-07-07: Candidate B COMMITTED, build at the h1
       seam — see the "h1 / s1 seam" section and the RESOLVED note below): the canonical

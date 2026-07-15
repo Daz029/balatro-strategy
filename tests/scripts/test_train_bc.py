@@ -32,6 +32,7 @@ from jackdaw.agents.hand_policy import HandPlayBCModel  # noqa: E402
 from jackdaw.env.hand_play_gym import (  # noqa: E402
     MAX_CONSUMABLES_V2,
     MAX_HAND_CARDS_OBS,
+    MAX_JOKERS_V2,
     observation_space_v2,
 )
 from jackdaw.env.observation import (  # noqa: E402
@@ -44,7 +45,10 @@ from jackdaw.env.observation import (  # noqa: E402
 # Shards write 8-wide hand blocks (the action space's position count); the
 # loader up-pads them to MAX_HAND_CARDS_OBS.
 MAX_HAND_CARDS = 8
-MAX_JOKERS = 5
+# The demo writer emits joker blocks at the fixed v2 width; the loader does
+# NOT up-pad the joker axis (nor trigger_match's joker axis), so synthetic
+# shards must match the obs width exactly, as real shards do.
+MAX_JOKERS = MAX_JOKERS_V2
 
 
 def _write_synthetic_shard(

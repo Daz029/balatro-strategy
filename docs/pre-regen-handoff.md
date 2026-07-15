@@ -105,6 +105,27 @@ Hard rules:
   - The current `HandPlayBCModel` trains against the v2 space by consuming
     the widened float blocks and ignoring the new keys; the embedding-gather
     encoder that consumes them is post-regen scope (recorded in CLAUDE.md).
+  - **GOAL — v2 joker cap raised 5 -> 15, dual-counter expand-not-truncate**
+    (2026-07-15, branch `worktree-joker-cap-15`): the v2 joker block inherited
+    the v1 width-5 cap, which TRUNCATES negative-edition jokers (Negative shop
+    buys, the Negative tag) — exactly the wide/negative builds a shop agent should
+    value. Worse, the demo writer's joker `_pad_entities` was a BLANKET raise
+    (not the negative-aware overfill check), so phase-2 harvest labeling would
+    QUIETLY DROP every harvested >5-joker state to `failures.jsonl` (the
+    Tier-1-executability drop class, but for jokers). Fix: a SEPARATE
+    `MAX_JOKERS_V2 = 15` constant (v1 `MAX_JOKERS = 5` stays FROZEN — it is
+    h0.5's exact obs and must not move, mirroring the
+    `MAX_CONSUMABLES`/`MAX_CONSUMABLES_V2` split), applied to
+    `build_observation_v2` / `observation_space_v2` AND the demo writer as a
+    single imported source of truth (the BC loader does NOT up-pad the joker
+    axis, so writer width must equal obs width; `trigger_match`'s joker axis
+    rides this too). Dual counter: the game-view capacity check
+    (`_check_joker_overfill`: `nonneg_count > joker_slots` -> loud engine-bug
+    raise) is unchanged; the model-view array now holds up to 15 REAL jokers
+    (negatives included), truncating lowest-slot-first only past 15 as a pure
+    safety valve (same discipline as the width-40 hand tail). 15 = generous
+    past any realistic negative stack. Shop obs (`MAX_JOKER_ROWS = 8`, coupled
+    to SellJoker x8) is a SEPARATE follow-up, deliberately NOT bundled.
 - **A3 — DONE, verdict CLEARED (2026-07-14): B6 is NOT built.**
   `scripts/fingerprint_discard_bias.py`, report `data/fingerprint_a3.json`
   (main checkout). h0.5 deterministic, 800 EVAL_ episodes/stage; teacher

@@ -31,6 +31,7 @@ from jackdaw.env.hand_play_gym import (
     MAX_CONSUMABLES_V2,
     MAX_HAND_CARDS_OBS,
     MAX_JOKERS,
+    MAX_JOKERS_V2,
     HandPlayGymEnv,
     build_observation,
     build_observation_v2,
@@ -239,7 +240,7 @@ class TestJokerOverflow:
         env, gs = self._joker_state(n=6, joker_slots=5, negatives=2)
         obs = build_observation(gs)
         assert env.observation_space.contains(obs)
-        assert int(obs["joker_mask"].sum()) == 5  # truncated to MAX_JOKERS
+        assert int(obs["joker_mask"].sum()) == MAX_JOKERS  # v1 truncates to 5 (frozen)
 
     def test_expanded_slots_truncates(self):
         # joker_slots raised to 7 by a voucher -> 6 non-negative jokers legal.
@@ -254,6 +255,64 @@ class TestJokerOverflow:
         _env, gs = self._joker_state(n=6, joker_slots=5)
         with pytest.raises(ValueError, match="overfill"):
             build_observation(gs)
+
+
+class TestJokerOverflowV2:
+    """v2 (h1 schema) raises the joker cap to MAX_JOKERS_V2=15 and EXPANDS
+    rather than truncates: a legal wide/negative build is encoded in full, so
+    the h1 model (and the harvest labeler that shares this discipline) sees
+    every real joker instead of dropping negatives. The genuine-overfill raise
+    (dual counter: non-negative jokers > joker_slots) is unchanged."""
+
+    def _joker_state(self, n: int, joker_slots: int, negatives: int = 0) -> tuple:
+        env = HandPlayGymEnv(
+            config=HandPlayConfig(joker_pool=("j_jolly",), joker_count_range=(1, 1)),
+            seed_prefix="TESTENV",
+            obs_version=2,
+        )
+        env.reset(seed=0)
+        gs = env._adapter.raw_state
+        base = gs["jokers"][0]
+        gs["jokers"] = [copy.deepcopy(base) for _ in range(n)]
+        gs["joker_slots"] = joker_slots
+        for j in range(negatives):
+            gs["jokers"][n - 1 - j].edition = {"negative": True}
+        return env, gs
+
+    def test_negative_excess_expands_not_truncates(self):
+        # 6 physical jokers in 5 slots, 2 Negative -> legal, and v2 keeps ALL 6
+        # (v1 would truncate to 5). This is the whole point of the wider cap.
+        env, gs = self._joker_state(n=6, joker_slots=5, negatives=2)
+        obs = build_observation_v2(gs)
+        assert env.observation_space.contains(obs)
+        assert int(obs["joker_mask"].sum()) == 6
+        # Parallel id / copy / trigger blocks stay index-aligned at full width.
+        assert obs["jokers"].shape[0] == MAX_JOKERS_V2
+        assert obs["joker_ids"].shape == (MAX_JOKERS_V2,)
+        assert obs["trigger_match"].shape[1] == MAX_JOKERS_V2
+        assert int((obs["joker_ids"] != 0).sum()) == 6
+
+    def test_expanded_slots_expands(self):
+        # joker_slots raised to 7 by a voucher -> 6 non-negative jokers legal,
+        # all encoded.
+        env, gs = self._joker_state(n=6, joker_slots=7)
+        obs = build_observation_v2(gs)
+        assert env.observation_space.contains(obs)
+        assert int(obs["joker_mask"].sum()) == 6
+
+    def test_beyond_cap_truncates_tail(self):
+        # 17 physical jokers (12 Negative in 5 slots) exceeds the 15 cap ->
+        # truncates lowest-slot-first as the pure safety valve, never raises.
+        env, gs = self._joker_state(n=17, joker_slots=5, negatives=12)
+        obs = build_observation_v2(gs)
+        assert env.observation_space.contains(obs)
+        assert int(obs["joker_mask"].sum()) == MAX_JOKERS_V2
+
+    def test_nonnegative_overfill_still_raises(self):
+        # 6 base-edition jokers in 5 slots, no negatives -> genuine engine bug.
+        _env, gs = self._joker_state(n=6, joker_slots=5)
+        with pytest.raises(ValueError, match="overfill"):
+            build_observation_v2(gs)
 
 
 class TestEnvSideOrdering:
@@ -320,7 +379,7 @@ class TestObservationV2:
         assert env.observation_space.contains(obs)
         assert obs["global_context"].shape == (D_HAND_GLOBAL,)
         assert obs["hand_cards"].shape == (MAX_HAND_CARDS_OBS, D_HAND_CARD)
-        assert obs["trigger_match"].shape == (MAX_HAND_CARDS_OBS, MAX_JOKERS, 2)
+        assert obs["trigger_match"].shape == (MAX_HAND_CARDS_OBS, MAX_JOKERS_V2, 2)
         assert obs["consumables"].shape[0] == MAX_CONSUMABLES_V2
         # HandPlayAdapter injects no consumables at this stage.
         assert not obs["consumable_mask"].any()
