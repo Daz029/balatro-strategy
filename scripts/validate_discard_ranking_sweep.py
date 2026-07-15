@@ -105,19 +105,24 @@ def _score_state_sweep(state, *, top_ks: list[int], n_samples: int) -> dict[str,
         blind_chips=state.blind_chips,
     )
 
-    # Per-k box membership (cheap: sort only, no MC). Union across all k and
-    # both arms == the boxes at the largest k (prefix-stable ranking), so
-    # accumulate as we go.
+    # Per-k box membership (cheap: sort only, no MC). We only ever read cached
+    # totals for a k where the boxes DISAGREE (agree-k -> identical label, no
+    # comparison), so value only those k's box members. Boxes are nested in k
+    # (prefix-stable ranking), so this caps the valued union at the LARGEST
+    # disagreeing k -- which collapses toward k=4's size as widening kills
+    # disagreements, instead of paying for every template at union width.
     per_k_keys: dict[int, tuple[set, set]] = {}
     union_keys: set = set()
     for k in top_ks:
         old_k, new_k = _boxes_at(state, deck, common, top_k=k)
         per_k_keys[k] = (old_k, new_k)
-        union_keys |= old_k | new_k
+        if old_k != new_k:
+            union_keys |= old_k | new_k
 
     row: dict[str, Any] = {
         "seed": state.seed,
         "n_jokers": len(jokers),
+        "n_valued": len(union_keys),
         "per_k": {},
     }
 
@@ -246,7 +251,7 @@ def main() -> None:
         tag = base["category"] if base["disagree"] else "agree"
         print(
             f"[{len(rows)}/{args.n_states}] seed={state.seed} k{top_ks[0]}={tag} "
-            f"t={row['seconds']:.2f}s",
+            f"valued={row['n_valued']} t={row['seconds']:.2f}s",
             flush=True,
         )
 
