@@ -62,6 +62,8 @@ from jackdaw.env.hand_play_adapter import (  # noqa: E402
 )
 from jackdaw.env.hand_play_gym import (  # noqa: E402
     MAX_CONSUMABLES_V2,
+    MAX_JOKERS_V2,
+    _check_joker_overfill,
     encode_hand_state_v2,
 )
 from jackdaw.env.observation import (  # noqa: E402
@@ -75,7 +77,10 @@ from jackdaw.env.observation import (  # noqa: E402
 # block. B4's index-set labels make this schema incompatible with v2, so
 # it is versioned separately; do NOT mix pre-B4 v2 shards with these.
 SCHEMA_VERSION = 3
-MAX_JOKERS = 5
+# Joker width is v2's MAX_JOKERS_V2 (15), imported from hand_play_gym so the
+# shard width EXACTLY matches the obs width -- the BC loader does not up-pad
+# the joker axis (nor trigger_match's joker axis), so a mismatch here would be
+# a silent concat/shape failure at load. See the MAX_JOKERS_V2 rationale.
 MAX_LABEL_CARDS = 5
 BACK_KEY = "b_red"
 STAKE = 1
@@ -386,21 +391,31 @@ def generate_one_example(seed: str, config: HandPlayConfig) -> Example:
 
     action_type = ActionType.PlayHand if choice.action == "play" else ActionType.Discard
 
+    # Dual counter, matching build_observation_v2: a GENUINE overfill
+    # (non-negative jokers exceeding joker_slots) is a Riff-raff-class engine
+    # bug and stays loud; a legal wide/negative build (negatives don't consume
+    # a slot) is ENCODED, not dropped. Without this the harvest labeler would
+    # raise GenerationError on every >5-joker state and silently skip it to
+    # failures.jsonl -- exactly the negative/wide builds the h1 model should
+    # value.
+    _check_joker_overfill(gs, jokers)
     ent = encode_hand_state_v2(gs)
 
     # Hand rows deliberately stay actual-width. write_shard pads each shard
     # only to its widest example, then the loader up-pads to the obs width.
-    # Joker overflow still raises; the consumable block truncates its tail:
-    # stages 1-4 inject no
-    # consumables, but harvested full-run states (C2) can exceed any fixed
-    # width via negative-edition copies (Perkeo) -- same policy as
+    # Jokers/consumables truncate their tail past the fixed v2 width (harvested
+    # full-run states can exceed it via negative editions -- Negative jokers
+    # for the joker block, Perkeo copies for the consumable block); truncation
+    # is lowest-slot-first as a pure safety valve, same policy as
     # build_observation_v2.
-    joker_padded, joker_mask = _pad_entities(ent["jokers"], MAX_JOKERS, D_JOKER)
+    joker_padded, joker_mask = _pad_entities(
+        ent["jokers"][:MAX_JOKERS_V2], MAX_JOKERS_V2, D_JOKER
+    )
     cons_padded, cons_mask = _pad_entities(
         ent["consumables"][:MAX_CONSUMABLES_V2], MAX_CONSUMABLES_V2, D_CONSUMABLE
     )
-    trigger = np.zeros((len(hand), MAX_JOKERS, 2), dtype=bool)
-    trigger_src = ent["trigger_match"][:, :MAX_JOKERS]
+    trigger = np.zeros((len(hand), MAX_JOKERS_V2, 2), dtype=bool)
+    trigger_src = ent["trigger_match"][:, :MAX_JOKERS_V2]
     trigger[: trigger_src.shape[0], : trigger_src.shape[1]] = trigger_src
 
     # Must come AFTER encoding: tier 2 executes the action on the real
@@ -413,9 +428,9 @@ def generate_one_example(seed: str, config: HandPlayConfig) -> Example:
         hand_mask=np.ones(len(hand), dtype=bool),
         jokers=joker_padded,
         joker_mask=joker_mask,
-        joker_ids=_pad_1d(ent["joker_ids"], MAX_JOKERS, np.int64),
-        copy_active=_pad_1d(ent["copy_active"], MAX_JOKERS, np.float32),
-        copy_target_ids=_pad_1d(ent["copy_target_ids"], MAX_JOKERS, np.int64),
+        joker_ids=_pad_1d(ent["joker_ids"], MAX_JOKERS_V2, np.int64),
+        copy_active=_pad_1d(ent["copy_active"], MAX_JOKERS_V2, np.float32),
+        copy_target_ids=_pad_1d(ent["copy_target_ids"], MAX_JOKERS_V2, np.int64),
         trigger_match=trigger,
         consumables=cons_padded,
         consumable_mask=cons_mask,

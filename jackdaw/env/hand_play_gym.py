@@ -100,7 +100,7 @@ from jackdaw.env.trigger_match import (
 # zero-pads them here, which is semantically exact under masked pooling.
 MAX_HAND_CARDS_OBS = 40
 
-MAX_JOKERS = 5
+MAX_JOKERS = 5  # v1 (FROZEN -- h0.5's exact obs width; do NOT change)
 MAX_CONSUMABLES = 2  # dormant this stage; reserved seam for the shop merge (v1)
 # v2 consumable width: the v1 dormant block's 2 rows are too narrow for
 # harvested full-run states -- Crystal Ball raises consumable_slots to 3,
@@ -118,6 +118,25 @@ MAX_CONSUMABLES = 2  # dormant this stage; reserved seam for the shop merge (v1)
 # so shards store the engine-truthful per-instance state. Widening later
 # is a loader up-pad, not a regen (masked-block widening is free).
 MAX_CONSUMABLES_V2 = 8
+
+# v2 joker width: the v1 cap of 5 is the game's default joker_slots, but a
+# full-run state legitimately holds MORE physical jokers -- negative-edition
+# jokers (Negative shop buys, the Negative tag) don't consume a slot, and
+# Antimatter raises joker_slots. Truncating those away would blind the h1 model (and the
+# harvest labeler) to exactly the negative/wide builds worth the most. So v2
+# expands rather than truncates: encode every real joker up to a generous 15,
+# well past any plausible negative stack, with lowest-slot-first truncation
+# only as a pure safety valve (same "width is nearly free" call as the
+# width-40 hand tail and MAX_CONSUMABLES_V2). The dual counter is unchanged:
+# `_check_joker_overfill` still raises on a GENUINE overfill (non-negative
+# jokers exceeding joker_slots -- a Riff-raff-class engine bug), while the
+# model-view array simply holds the true physical count. Separate from v1's
+# MAX_JOKERS by the same discipline as the consumable split: widening a live
+# checkpoint's obs would break it, and v1 IS h0.5's frozen obs. INVARIANT:
+# this must equal the demo writer's cap -- the BC loader does NOT up-pad the
+# joker axis (nor trigger_match's joker axis), so generate_hand_demos.py
+# imports THIS constant rather than defining its own.
+MAX_JOKERS_V2 = 15
 
 BACK_KEY = "b_red"
 STAKE = 1
@@ -293,12 +312,12 @@ def _pad_1d(arr: np.ndarray, max_n: int, dtype: type) -> np.ndarray:
 def build_observation_v2(gs: dict[str, Any]) -> dict[str, np.ndarray]:
     """Encode a hand-play game state into the v2 (h1) obs schema.
 
-    Same truncation discipline as v1: hand rows beyond
-    ``MAX_HAND_CARDS_OBS`` and joker rows beyond ``MAX_JOKERS`` truncate
-    (with the genuine-overfill check staying loud), and consumable rows
-    beyond ``MAX_CONSUMABLES_V2`` truncate the tail. The trigger-match
-    matrix truncates both entity axes consistently with its row/column
-    blocks.
+    Truncation discipline: hand rows beyond ``MAX_HAND_CARDS_OBS`` and joker
+    rows beyond ``MAX_JOKERS_V2`` (15, not v1's 5 -- v2 EXPANDS to keep
+    negative-edition jokers) truncate, with the genuine-overfill check
+    staying loud; consumable rows beyond ``MAX_CONSUMABLES_V2`` truncate the
+    tail. The trigger-match matrix truncates both entity axes consistently
+    with its row/column blocks.
     """
     jokers = gs.get("jokers", [])
     _check_joker_overfill(gs, jokers)
@@ -307,12 +326,12 @@ def build_observation_v2(gs: dict[str, Any]) -> dict[str, np.ndarray]:
     hand_padded, hand_mask = _pad(
         ent["hand_cards"][:MAX_HAND_CARDS_OBS], MAX_HAND_CARDS_OBS, D_HAND_CARD
     )
-    joker_padded, joker_mask = _pad(ent["jokers"][:MAX_JOKERS], MAX_JOKERS, D_JOKER)
+    joker_padded, joker_mask = _pad(ent["jokers"][:MAX_JOKERS_V2], MAX_JOKERS_V2, D_JOKER)
     cons_padded, cons_mask = _pad(
         ent["consumables"][:MAX_CONSUMABLES_V2], MAX_CONSUMABLES_V2, D_CONSUMABLE
     )
-    trigger = np.zeros((MAX_HAND_CARDS_OBS, MAX_JOKERS, 2), dtype=np.float32)
-    src = ent["trigger_match"][:MAX_HAND_CARDS_OBS, :MAX_JOKERS]
+    trigger = np.zeros((MAX_HAND_CARDS_OBS, MAX_JOKERS_V2, 2), dtype=np.float32)
+    src = ent["trigger_match"][:MAX_HAND_CARDS_OBS, :MAX_JOKERS_V2]
     trigger[: src.shape[0], : src.shape[1]] = src
 
     return {
@@ -321,9 +340,9 @@ def build_observation_v2(gs: dict[str, Any]) -> dict[str, np.ndarray]:
         "hand_mask": hand_mask,
         "jokers": joker_padded,
         "joker_mask": joker_mask,
-        "joker_ids": _pad_1d(ent["joker_ids"], MAX_JOKERS, np.int64),
-        "copy_active": _pad_1d(ent["copy_active"], MAX_JOKERS, np.float32),
-        "copy_target_ids": _pad_1d(ent["copy_target_ids"], MAX_JOKERS, np.int64),
+        "joker_ids": _pad_1d(ent["joker_ids"], MAX_JOKERS_V2, np.int64),
+        "copy_active": _pad_1d(ent["copy_active"], MAX_JOKERS_V2, np.float32),
+        "copy_target_ids": _pad_1d(ent["copy_target_ids"], MAX_JOKERS_V2, np.int64),
         "trigger_match": trigger,
         "consumables": cons_padded,
         "consumable_mask": cons_mask,
@@ -345,12 +364,12 @@ def observation_space_v2() -> spaces.Dict:
             "global_context": box(D_HAND_GLOBAL),
             "hand_cards": box(MAX_HAND_CARDS_OBS, D_HAND_CARD),
             "hand_mask": mask(MAX_HAND_CARDS_OBS),
-            "jokers": box(MAX_JOKERS, D_JOKER),
-            "joker_mask": mask(MAX_JOKERS),
-            "joker_ids": ids(MAX_JOKERS),
-            "copy_active": mask(MAX_JOKERS),
-            "copy_target_ids": ids(MAX_JOKERS),
-            "trigger_match": mask(MAX_HAND_CARDS_OBS, MAX_JOKERS, 2),
+            "jokers": box(MAX_JOKERS_V2, D_JOKER),
+            "joker_mask": mask(MAX_JOKERS_V2),
+            "joker_ids": ids(MAX_JOKERS_V2),
+            "copy_active": mask(MAX_JOKERS_V2),
+            "copy_target_ids": ids(MAX_JOKERS_V2),
+            "trigger_match": mask(MAX_HAND_CARDS_OBS, MAX_JOKERS_V2, 2),
             "consumables": box(MAX_CONSUMABLES_V2, D_CONSUMABLE),
             "consumable_mask": mask(MAX_CONSUMABLES_V2),
         }

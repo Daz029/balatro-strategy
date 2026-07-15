@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 from generate_hand_demos import (
     DEFAULT_COUNT_BANDS,
-    MAX_JOKERS,
+    MAX_JOKERS_V2,
     STAGE2_JOKER_POOL,
     Example,
     GenerationError,
@@ -53,10 +53,10 @@ def _example_extras(hand_width: int = HAND_WIDTH) -> dict:
     using tiny shapes for the float blocks they assert on; these just need
     to exist and round-trip."""
     return dict(
-        joker_ids=np.zeros(MAX_JOKERS, dtype=np.int64),
-        copy_active=np.zeros(MAX_JOKERS, dtype=np.float32),
-        copy_target_ids=np.zeros(MAX_JOKERS, dtype=np.int64),
-        trigger_match=np.zeros((hand_width, MAX_JOKERS, 2), dtype=bool),
+        joker_ids=np.zeros(MAX_JOKERS_V2, dtype=np.int64),
+        copy_active=np.zeros(MAX_JOKERS_V2, dtype=np.float32),
+        copy_target_ids=np.zeros(MAX_JOKERS_V2, dtype=np.int64),
+        trigger_match=np.zeros((hand_width, MAX_JOKERS_V2, 2), dtype=bool),
         consumables=np.zeros((MAX_CONSUMABLES_V2, D_CONSUMABLE), dtype=np.float32),
         consumable_mask=np.zeros(MAX_CONSUMABLES_V2, dtype=bool),
     )
@@ -153,12 +153,12 @@ def test_generate_one_example_shapes_and_valid_action() -> None:
     assert example.global_context.shape == (D_HAND_GLOBAL,)
     assert example.hand_cards.shape == (len(example.hand_mask), D_HAND_CARD)
     assert example.hand_mask.shape == (len(example.hand_cards),)
-    assert example.jokers.shape[0] == MAX_JOKERS
-    assert example.joker_mask.shape == (MAX_JOKERS,)
-    assert example.joker_ids.shape == (MAX_JOKERS,)
-    assert example.copy_active.shape == (MAX_JOKERS,)
-    assert example.copy_target_ids.shape == (MAX_JOKERS,)
-    assert example.trigger_match.shape == (len(example.hand_cards), MAX_JOKERS, 2)
+    assert example.jokers.shape[0] == MAX_JOKERS_V2
+    assert example.joker_mask.shape == (MAX_JOKERS_V2,)
+    assert example.joker_ids.shape == (MAX_JOKERS_V2,)
+    assert example.copy_active.shape == (MAX_JOKERS_V2,)
+    assert example.copy_target_ids.shape == (MAX_JOKERS_V2,)
+    assert example.trigger_match.shape == (len(example.hand_cards), MAX_JOKERS_V2, 2)
     assert example.consumables.shape == (MAX_CONSUMABLES_V2, D_CONSUMABLE)
     # Stages 1-4 inject no consumables; the block is real but empty here.
     assert example.consumable_mask.sum() == 0
@@ -185,8 +185,8 @@ def test_write_shard_round_trip(tmp_path) -> None:
             global_context=np.full(5, float(i), dtype=np.float32),
             hand_cards=np.zeros((HAND_WIDTH, 3), dtype=np.float32),
             hand_mask=np.zeros(HAND_WIDTH, dtype=bool),
-            jokers=np.zeros((MAX_JOKERS, 2), dtype=np.float32),
-            joker_mask=np.zeros(MAX_JOKERS, dtype=bool),
+            jokers=np.zeros((MAX_JOKERS_V2, 2), dtype=np.float32),
+            joker_mask=np.zeros(MAX_JOKERS_V2, dtype=bool),
             action_type=int(ActionType.PlayHand),
             card_indices=np.array([0, -1, -1, -1, -1], dtype=np.int64),
             p_clear=0.5 + i,
@@ -203,7 +203,7 @@ def test_write_shard_round_trip(tmp_path) -> None:
     assert loaded["p_clear"].tolist() == pytest.approx([0.5, 1.5, 2.5])
     assert list(loaded["seed"]) == ["SEED_0", "SEED_1", "SEED_2"]
     assert loaded["schema_version"][0] == 3
-    assert loaded["trigger_match"].shape == (3, HAND_WIDTH, MAX_JOKERS, 2)
+    assert loaded["trigger_match"].shape == (3, HAND_WIDTH, MAX_JOKERS_V2, 2)
     assert loaded["card_indices"].shape == (3, 5)
     assert "card_target_mask" not in loaded.files
     assert loaded["joker_ids"].dtype == np.int64
@@ -216,8 +216,8 @@ def test_write_shard_uses_its_widest_actual_hand(tmp_path) -> None:
             global_context=np.zeros(1, dtype=np.float32),
             hand_cards=np.zeros((width, D_HAND_CARD), dtype=np.float32),
             hand_mask=np.ones(width, dtype=bool),
-            jokers=np.zeros((MAX_JOKERS, 1), dtype=np.float32),
-            joker_mask=np.zeros(MAX_JOKERS, dtype=bool),
+            jokers=np.zeros((MAX_JOKERS_V2, 1), dtype=np.float32),
+            joker_mask=np.zeros(MAX_JOKERS_V2, dtype=bool),
             action_type=int(ActionType.PlayHand),
             card_indices=np.array([8, -1, -1, -1, -1], dtype=np.int64),
             p_clear=1.0,
@@ -230,7 +230,7 @@ def test_write_shard_uses_its_widest_actual_hand(tmp_path) -> None:
     loaded = np.load(path, allow_pickle=False)
     assert loaded["hand_cards"].shape == (2, 11, D_HAND_CARD)
     assert loaded["hand_mask"].sum(axis=1).tolist() == [9, 11]
-    assert loaded["trigger_match"].shape == (2, 11, MAX_JOKERS, 2)
+    assert loaded["trigger_match"].shape == (2, 11, MAX_JOKERS_V2, 2)
 
 
 # ---------------------------------------------------------------------------
@@ -280,8 +280,8 @@ def test_worker_run_writes_shards_and_logs_failures(tmp_path, monkeypatch) -> No
             global_context=np.zeros(1, dtype=np.float32),
             hand_cards=np.zeros((HAND_WIDTH, 1), dtype=np.float32),
             hand_mask=np.zeros(HAND_WIDTH, dtype=bool),
-            jokers=np.zeros((MAX_JOKERS, 1), dtype=np.float32),
-            joker_mask=np.zeros(MAX_JOKERS, dtype=bool),
+            jokers=np.zeros((MAX_JOKERS_V2, 1), dtype=np.float32),
+            joker_mask=np.zeros(MAX_JOKERS_V2, dtype=bool),
             action_type=int(ActionType.PlayHand),
             card_indices=np.array([0, -1, -1, -1, -1], dtype=np.int64),
             p_clear=1.0,
@@ -393,8 +393,8 @@ def _fake_example(seed: str) -> Example:
         global_context=np.zeros(1, dtype=np.float32),
         hand_cards=np.zeros((HAND_WIDTH, 1), dtype=np.float32),
         hand_mask=np.zeros(HAND_WIDTH, dtype=bool),
-        jokers=np.zeros((MAX_JOKERS, 1), dtype=np.float32),
-        joker_mask=np.zeros(MAX_JOKERS, dtype=bool),
+        jokers=np.zeros((MAX_JOKERS_V2, 1), dtype=np.float32),
+        joker_mask=np.zeros(MAX_JOKERS_V2, dtype=bool),
         action_type=int(ActionType.PlayHand),
         card_indices=np.array([0, -1, -1, -1, -1], dtype=np.int64),
         p_clear=1.0,
