@@ -352,6 +352,44 @@ merge is built.
   the per-card-phase interleaving is verified empirically here. Also: solver/env
   consistency test (the committed action's label value equals env execution value
   under the same subset).
+- **BUILT 2026-07-15** (same slice-4 branch). Decisions grilled with the user
+  in-session, on top of the locked spec:
+  - Classification: `MAIN_PHASE_XMULT_JOKER_KEYS` (28 keys, jokers whose main
+    handler can return Xmult_mod) is hand-written for import cheapness but
+    PINNED to the handler SOURCE by a regenerating scan in
+    `tests/engine/test_play_ordering.py` — a handler drift breaks CI, not the
+    sort. Polychrome edition on any joker classifies it x-mult (9d applies at
+    its position). Misclassification only costs order-optimality, never label
+    honesty (the engine scores whatever order is submitted).
+  - Copy-joker placement: argmax over ALL insertion slots (board size does not
+    cap it — 6+ jokers just means more slots); with MULTIPLE copy jokers, FULL
+    cross-product of ordered placements up to 10 total jokers (user call;
+    2 copies among 8 = 90 candidates), sequential-greedy beyond. Candidate
+    exclusion is id()-based (two Blueprints via negatives — the Erratic-deck
+    equality bug class).
+  - `objective` hook (user call, decided over my initial doc-note-only
+    recommendation): `best_joker_order(..., objective=)` re-targets the
+    placement argmax; default None = raw score. Channel that justified it:
+    copy-joker placement DECIDES what gets duplicated, and a score-argmax
+    never copies economy effects. The copyable money flows THROUGH scoring
+    (Business Card per-card $, lucky-money via copied retriggers) so it lands
+    in ScoreResult.dollars_earned; end-of-round payers (Golden/Rocket/Egg) are
+    blueprint-INCOMPATIBLE and never copyable. The double-agent env passes a
+    money-aware objective at the h1 seam via `action_to_engine_action`'s
+    `ordering_objective` param; solver labels stay score-only — loose
+    label/env convergence accepted (PPO-against-real-game corrects). Pinned:
+    a dollars-first objective flips Blueprint's neighbor to Business Card.
+  - Env: mutation lives in `action_to_engine_action` (the single shared decode
+    path — HandPlayGymEnv AND checkpoint partners), plays only, gated by
+    `joker_order_matters` (copy joker owned, or x-mult coexisting with any
+    other joker). Solver: context-free sort once at `solve_hand_for_ante_clear`
+    entry; `evaluate_value` re-runs the full best_joker_order per candidate on
+    the exact path only (MC tier keeps the entry order — its approximation
+    tier). Solver/env consistency + mutation-safety pinned in
+    `tests/scripts/test_hand_solver_joker_order.py`.
+  - Known-deferred: Baseball Card contributes x-mult at OTHER uncommon jokers'
+    positions (9c) — the binary sort ignores the rider (second-order, labels
+    stay engine-honest).
 
 ### B4 — index-set labels, width 40, tier-1 rework (`scripts/generate_hand_demos.py`)
 

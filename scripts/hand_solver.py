@@ -59,6 +59,8 @@ from jackdaw.engine.hand_eval import get_hand_eval_flags
 from jackdaw.engine.hand_levels import HandLevels
 from jackdaw.engine.play_ordering import (
     MAX_PERMUTATIONS,  # noqa: F401 -- re-export for existing importers
+    COPY_JOKER_KEYS,
+    best_joker_order,
     candidate_orderings,
 )
 from jackdaw.engine.play_ordering import (
@@ -419,8 +421,29 @@ def evaluate_value(
     hand MC sampler): paying a 6-20x permutation search to find the exact
     best ordering of a *hypothetical* hand is precision the estimate can't
     use. Exact consumers (labels, current-turn decisions) must leave it on.
+
+    B3 joker auto-ordering: on the exact path, the joker LIST is also
+    re-ordered per candidate play via ``best_joker_order`` -- the closed-
+    form additive-before-x-mult sort always (idempotent when the caller
+    pre-sorted at hand-turn entry), plus the copy-target placement argmax
+    when Blueprint/Brainstorm is owned. The MC future-hand path
+    (``search_orderings=False``) keeps the caller's fixed hand-turn-entry
+    order -- same approximation tier as its fixed card order. Labels
+    valued this way assume the env commits plays under the same ordering,
+    which ``action_to_engine_action`` does (consistency pinned in
+    tests/engine/test_play_ordering.py).
     """
     if search_orderings:
+        jokers = best_joker_order(
+            jokers,
+            played_cards,
+            held_cards,
+            hand_levels,
+            blind,
+            rng,
+            game_state=game_state,
+            blind_chips=blind_chips,
+        )
         orderings = candidate_orderings(played_cards, jokers)
     else:
         orderings = [tuple(played_cards)]
@@ -1391,6 +1414,13 @@ def solve_hand_for_ante_clear(
         import zlib
 
         _rand_state[0] = zlib.crc32(mc_seed.encode()) & 0x7FFFFFFF or 12345
+    # B3: closed-form joker sort ONCE per hand-turn (subset-independent) --
+    # the whole solve (ranking tier, MC sampler, recursion) then runs under
+    # this order; the exact path additionally re-runs the copy-target
+    # argmax per candidate inside `evaluate_value`. The env commits plays
+    # under the same ordering (action_to_engine_action), so labels and
+    # execution agree.
+    jokers = best_joker_order(jokers)
     future_samples = estimate_future_hand_distribution(
         deck, jokers, hand_levels, blind, rng, len(hand),
         game_state=game_state, blind_chips=blind_chips, mc_seed=mc_seed,

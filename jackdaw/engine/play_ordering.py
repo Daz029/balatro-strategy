@@ -249,6 +249,271 @@ def candidate_orderings(
     return all_perms
 
 
+# ---------------------------------------------------------------------------
+# Joker-list ordering (B3)
+# ---------------------------------------------------------------------------
+#
+# Phase 9 of ``score_hand`` walks the joker list left to right, accumulating
+# `mult += mult_mod` then `mult *= Xmult_mod` per joker, so joker LIST order
+# changes the total whenever an x-mult contributor interleaves with additive
+# mult: (m0 + m) * x >= m0 * x + m for x >= 1, with equality only when m == 0
+# or x == 1. Vanilla exposes joker reordering as a free unrestricted action,
+# so auto-ordering is vanilla-faithful; the RL design keeps reorder actions
+# out of the agent's action space for the same reason card ordering is
+# env-side (see module docstring). The per-card phase (Phase 7) runs jokers
+# in the same list order inside each scored card's loop, so the same
+# additive-before-xmult key benefits it too -- but the closed form is only
+# PROVEN for the independent Phase-9 chain; the per-card interleaving is
+# pinned empirically by the brute-force tests.
+#
+# Known approximations (accepted, documented):
+#   - Baseball Card contributes x-mult at every OTHER uncommon joker's
+#     position (the 9c joker-on-joker loop), so uncommon additive jokers
+#     carry an x-mult rider when it's owned -- the binary sort ignores this
+#     (second-order; the engine still scores whatever order we submit, so
+#     labels stay honest).
+#   - A joker mixing additive and x-mult at one position (e.g. a Foil/Holo
+#     edition on an x-mult joker: the additive edition applies at 9a before
+#     the joker's own effect) is classified by its x-mult component alone.
+#     The exact closed form for mixed (add-then-multiply) blocks is a sort
+#     by a*x/(x-1) descending, which needs per-joker magnitudes we don't
+#     have without evaluation -- the binary partition is the locked design.
+
+# Center keys whose handler can return Xmult_mod in the joker_main context
+# (Phase 9b) -- i.e. jokers that MULTIPLY at their own list position. Kept
+# hand-written for import cheapness; regenerated-and-compared from the
+# jokers.py handler source by tests/engine/test_play_ordering.py, so drift
+# against the engine dies in CI rather than silently mis-sorting.
+MAIN_PHASE_XMULT_JOKER_KEYS = frozenset(
+    {
+        "j_acrobat",
+        "j_blackboard",
+        "j_caino",
+        "j_campfire",
+        "j_card_sharp",
+        "j_cavendish",
+        "j_constellation",
+        "j_drivers_license",
+        "j_duo",
+        "j_family",
+        "j_flower_pot",
+        "j_glass",
+        "j_hit_the_road",
+        "j_hologram",
+        "j_loyalty_card",
+        "j_lucky_cat",
+        "j_madness",
+        "j_obelisk",
+        "j_order",
+        "j_ramen",
+        "j_seeing_double",
+        "j_steel_joker",
+        "j_stencil",
+        "j_throwback",
+        "j_tribe",
+        "j_trio",
+        "j_vampire",
+        "j_yorick",
+    }
+)
+
+COPY_JOKER_KEYS = frozenset({"j_blueprint", "j_brainstorm"})
+
+# With multiple copy jokers, placements are brute-forced as a full
+# cross-product only up to this many total jokers (10 slots: 2 copies among
+# 8 others = 90 candidate orderings, each one cheap score_hand); wider
+# boards fall back to sequential-greedy placement.
+MAX_JOKERS_FOR_COPY_BRUTE_FORCE = 10
+
+
+def joker_multiplies_at_position(j: Card) -> bool:
+    """Whether *j* contributes an x-mult AT ITS OWN list position: its main
+    handler can return ``Xmult_mod``, or it carries a Polychrome edition
+    (``x_mult_mod`` applies at Phase 9d, after the joker's own effect, at
+    the joker's position)."""
+    if getattr(j, "center_key", None) in MAIN_PHASE_XMULT_JOKER_KEYS:
+        return True
+    edition = j.get_edition() or {}
+    return "x_mult_mod" in edition
+
+
+def joker_order_matters(jokers: list[Card]) -> bool:
+    """Fast gate: can reordering `jokers` change a score at all?
+
+    True when a copy joker is owned (its target is adjacency-defined), or
+    when an x-mult-position joker coexists with any other joker (the
+    additive-vs-x interleaving case). Chips-only boards and single jokers
+    are order-free."""
+    if len(jokers) < 2:
+        return False
+    keys = {getattr(j, "center_key", None) for j in jokers}
+    if keys & COPY_JOKER_KEYS:
+        return True
+    n_x = sum(1 for j in jokers if joker_multiplies_at_position(j))
+    return 0 < n_x < len(jokers)
+
+
+def sorted_joker_order(jokers: list[Card]) -> list[Card]:
+    """Closed-form base ordering: stable partition with additive/neutral
+    jokers before x-mult-position jokers, copy jokers placed by adjacency
+    heuristic (no evaluation -- the context-free tier):
+
+      - Brainstorm copies the LEFTMOST joker regardless of its own slot; its
+        copied effect fires at its own position. After the partition the
+        leftmost is additive whenever any additive joker exists, so an early
+        slot (index 1, right after its target) is the safe placement.
+      - Blueprint copies its RIGHT neighbor, so it goes immediately before
+        the LAST non-copy joker -- an x-mult joker whenever one exists
+        (doubling an x-mult dominates doubling an additive of comparable
+        tier). Which x-mult is best needs evaluation; that precision lives
+        in `best_joker_order`'s argmax, not here.
+    """
+    non_copy = [j for j in jokers if getattr(j, "center_key", None) not in COPY_JOKER_KEYS]
+    ordered = sorted(non_copy, key=joker_multiplies_at_position)  # stable
+    brainstorms = [j for j in jokers if getattr(j, "center_key", None) == "j_brainstorm"]
+    blueprints = [j for j in jokers if getattr(j, "center_key", None) == "j_blueprint"]
+    for b in brainstorms:
+        ordered.insert(min(1, len(ordered)), b)
+    for b in blueprints:
+        ordered.insert(max(0, len(ordered) - 1), b)
+    return ordered
+
+
+def _cheap_play_value(
+    played_cards: list[Card],
+    held_cards: list[Card],
+    jokers: list[Card],
+    hand_levels: HandLevels,
+    blind: Any,
+    rng: PseudoRandom,
+    game_state: dict[str, Any] | None,
+    blind_chips: int,
+    objective: Any = None,
+) -> Any:
+    """One fixed-order `score_hand` on full clones (including the joker
+    list -- the fast_clone discipline extends to it: scaling jokers
+    accumulate onto ability state on every hypothetical call).
+
+    `objective` maps the ScoreResult to the value being argmaxed; None =
+    raw score total. The h1-seam upgrade path (user call 2026-07-15): the
+    double-agent env passes a money-aware objective so copy-joker
+    placement can weigh score against dollars. The copyable money channel
+    flows THROUGH scoring (Business Card's per-scored-card $, lucky-money
+    rolls amplified by copied retrigger jokers), so it lands in
+    ``ScoreResult.dollars_earned`` and the objective reads it off this
+    eval directly; end-of-round payers (Golden Joker, Rocket, Egg...) are
+    blueprint-INCOMPATIBLE (the engine's 29-joker blueprint_compat list)
+    and never copyable, so their invisibility here costs nothing. Copy
+    compatibility itself is engine-resolved: this eval runs the real
+    Blueprint/Brainstorm handlers, compat guard included. Solver labels
+    stay score-only either way -- loose label/env convergence accepted
+    (PPO against the real game is the standing corrector)."""
+    result = score_hand(
+        [fast_clone_card(c) for c in played_cards],
+        [fast_clone_card(c) for c in held_cards],
+        [fast_clone_card(j) for j in jokers],
+        fast_clone_hand_levels(hand_levels),
+        fast_clone_blind(blind) if blind is not None else None,
+        fast_clone_rng(rng),
+        game_state=game_state,
+        blind_chips=blind_chips,
+    )
+    # Any comparable value (floats, tie-break tuples) -- the argmax only
+    # needs ordering, not arithmetic.
+    return float(result.total) if objective is None else objective(result)
+
+
+def best_joker_order(
+    jokers: list[Card],
+    played_cards: list[Card] | None = None,
+    held_cards: list[Card] | None = None,
+    hand_levels: HandLevels | None = None,
+    blind: Any = None,
+    rng: PseudoRandom | None = None,
+    game_state: dict[str, Any] | None = None,
+    blind_chips: int = 0,
+    *,
+    objective: Any = None,
+) -> list[Card]:
+    """Best scoring order for the joker LIST (a new list of the same Card
+    objects; callers decide whether to write it back into the live state).
+
+    Two tiers, matching the play-order design:
+
+      - Context-free (no `played_cards`): the closed-form
+        `sorted_joker_order` -- additive before x-mult, adjacency-heuristic
+        copy placement. Used once per solver hand-turn and anywhere no
+        candidate play exists yet (the MC future-hand tier).
+      - With a candidate play AND copy joker(s) owned: argmax over ALL
+        copy-joker placements into the sorted base order, each candidate
+        scored by one cheap fixed-order evaluation. One copy joker = every
+        insertion slot (Blueprint's target = right neighbor, so each slot IS
+        a target choice; board size doesn't cap this -- 6+ jokers via
+        negative editions just means more slots). Multiple copy jokers =
+        FULL cross-product of ordered placements (user call 2026-07-15),
+        up to ``MAX_JOKERS_FOR_COPY_BRUTE_FORCE`` total jokers -- e.g. two
+        copies among 8 others is 90 candidates; beyond the cap it falls
+        back to sequential-greedy placement (each copy argmaxed in turn).
+
+    Without a copy joker the closed form needs no evaluation, so the play
+    context is ignored. Never mutates its inputs; evaluation runs on clones.
+
+    `objective` (keyword-only) re-targets the placement argmax away from
+    raw score -- see `_cheap_play_value` for the money-aware upgrade path.
+    It only affects the evaluated (copy-joker) tier; the closed-form sort
+    is objective-free by construction.
+    """
+    base = sorted_joker_order(jokers)
+    copy_jokers = [j for j in jokers if getattr(j, "center_key", None) in COPY_JOKER_KEYS]
+    if (
+        not copy_jokers
+        or played_cards is None
+        or hand_levels is None
+        or rng is None
+        or len(jokers) < 2
+    ):
+        return base
+
+    held = held_cards or []
+    # id()-based exclusion: duplicate jokers exist (two Blueprints via
+    # negative editions), and value-equality would drop both when one was
+    # meant -- the Erratic-deck bug class from best_immediate_play.
+    copy_ids = {id(j) for j in copy_jokers}
+    non_copy_order = [j for j in base if id(j) not in copy_ids]
+
+    def evaluate(candidate: list[Card]) -> float:
+        return _cheap_play_value(
+            played_cards,
+            held,
+            candidate,
+            hand_levels,
+            blind,
+            rng,
+            game_state,
+            blind_chips,
+            objective=objective,
+        )
+
+    if len(jokers) <= MAX_JOKERS_FOR_COPY_BRUTE_FORCE:
+        candidates = [non_copy_order]
+        for copy_joker in copy_jokers:
+            candidates = [
+                seq[:slot] + [copy_joker] + seq[slot:]
+                for seq in candidates
+                for slot in range(len(seq) + 1)
+            ]
+        return max(candidates, key=evaluate)
+
+    # Board too wide for the cross-product: place each copy joker greedily.
+    order = non_copy_order
+    for copy_joker in copy_jokers:
+        order = max(
+            (order[:slot] + [copy_joker] + order[slot:] for slot in range(len(order) + 1)),
+            key=evaluate,
+        )
+    return order
+
+
 def best_play_order(
     played_cards: list[Card],
     held_cards: list[Card],

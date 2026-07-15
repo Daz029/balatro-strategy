@@ -59,7 +59,12 @@ from jackdaw.agents.hand_action_space import (
 from jackdaw.engine.actions import Discard as EngineDiscard
 from jackdaw.engine.actions import GamePhase
 from jackdaw.engine.actions import PlayHand as EnginePlayHand
-from jackdaw.engine.play_ordering import best_play_order, needs_permutation_search
+from jackdaw.engine.play_ordering import (
+    best_joker_order,
+    best_play_order,
+    joker_order_matters,
+    needs_permutation_search,
+)
 from jackdaw.env.action_space import ActionType
 from jackdaw.env.hand_play_adapter import HandPlayAdapter, HandPlayConfig
 from jackdaw.env.observation import (
@@ -380,7 +385,11 @@ def hand_action_mask(gs: dict[str, Any]) -> np.ndarray:
     )
 
 
-def action_to_engine_action(action: int, gs: dict[str, Any]) -> EnginePlayHand | EngineDiscard:
+def action_to_engine_action(
+    action: int,
+    gs: dict[str, Any],
+    ordering_objective: Any = None,
+) -> EnginePlayHand | EngineDiscard:
     """Decode a canonical Discrete(436) index into an engine action.
 
     A play submits its card *subset* in engine-optimal scoring order via
@@ -388,6 +397,13 @@ def action_to_engine_action(action: int, gs: dict[str, Any]) -> EnginePlayHand |
     agent picks a subset; ordering is a mechanical optimization delegated to
     the engine). Module-level so ``HandPlayGymEnv`` and standalone policies
     share one decode path.
+
+    ``ordering_objective`` re-targets the JOKER-order copy-placement argmax
+    (see ``best_joker_order``); None = raw score. The double-agent (shop
+    env + hand partner) path passes a money-aware objective here at the h1
+    seam so copy-joker placement isn't forced score-optimizing (user call
+    2026-07-15); solver labels stay score-only -- loose convergence
+    accepted.
     """
     action_type, combo = action_to_combo(action)
     if action_type == ActionType.Discard:
@@ -396,6 +412,26 @@ def action_to_engine_action(action: int, gs: dict[str, Any]) -> EnginePlayHand |
     hand = gs["hand"]
     played = [hand[i] for i in combo]
     jokers = gs.get("jokers", [])
+    if joker_order_matters(jokers):
+        # B3 joker auto-ordering: once per COMMITTED play, applied as a
+        # persistent vanilla-legal mutation of the live joker list (vanilla
+        # exposes reorder as a free action; the agent never sees a reorder
+        # action). Done BEFORE the card-order search below so both
+        # optimizations see the same board.
+        held = [c for i, c in enumerate(hand) if i not in set(combo)]
+        blind = gs.get("blind")
+        gs["jokers"][:] = best_joker_order(
+            jokers,
+            played,
+            held,
+            gs["hand_levels"],
+            blind,
+            gs["rng"],
+            game_state=gs,
+            blind_chips=getattr(blind, "chips", 0) if blind else 0,
+            objective=ordering_objective,
+        )
+        jokers = gs["jokers"]
     if len(played) > 1 and needs_permutation_search(played, jokers):
         held = [c for i, c in enumerate(hand) if i not in set(combo)]
         blind = gs.get("blind")
