@@ -649,6 +649,124 @@ forces a second regen.
   (state-only potential, decays — pure training-script change), and the nextround
   floor re-baselines against s1's actual partner (h1). Both as already documented.
 
+## In-blind merge — shop targeting → pointer + Death direction — GRILLED AND LOCKED (2026-07-16)
+
+Decision record for retiring the shop's combinatorial `SelectTarget` block in favor
+of Candidate B's autoregressive pointer, plus how tarot targeting (esp. Death) is
+resolved. Ties into "h1 architecture — Candidate B COMMITTED" and the action-space
+ceiling open item.
+
+### Grounding findings (engine-verified this session)
+
+- **Targeting is ORDER-INSENSITIVE at the engine for every consumable.** Death copies
+  the **rightmost-by-`sort_id`** highlighted card onto the other (`consumables.py:431`
+  `_death`: `rightmost = max(highlighted, key=lambda c: c.sort_id)`); every other
+  targeted consumable iterates `ctx.highlighted` symmetrically or is single-target.
+  No handler reads selection ORDER. => Candidate B's **monotone-ascending pointer mask**
+  (each pick index > last) works VERBATIM for targeting; a target set is just an
+  ascending index set. No per-tarot order convention needed. REJECTED: order-carrying
+  pointer / Death-specific reorder action for *selection order* — the engine ignores
+  order, so those add null-direction entropy (the exact thing B's monotone mask
+  rejects). Vanilla-only claim; pin with a test in case a future consumable is
+  genuinely order-directed.
+- **Death direction is NOT an agent choice in the current engine, and a reorder action
+  can't create one.** `sort_id` is an immutable creation counter (`card.py:26`).
+  `SwapHand` (`game.py:1412`) reorders the hand LIST but not `sort_id`, and Death reads
+  `sort_id` — so swapping doesn't move Death's direction. The vanilla constraint the
+  user identified is real ("you can only duplicate a card leftward; you cannot duplicate
+  the leftmost card"), but the choice lives two layers down (engine `sort_id` semantics,
+  possibly a faithfulness gap vs `card.lua:1111` — the author's own comment calls
+  `sort_id` a "position proxy"), NOT in the action-space head.
+
+### Death direction — env-side auto-direction via DIRECT CONSTRUCTION (option ii)
+
+Agent picks the 2-card SET via the monotone pointer (unchanged); the ENV computes which
+card is the **survivor** (template, duplicated) vs the **override** (overwritten) and
+hands that direction to the handler directly (small `death_source` hint on
+`ConsumableContext`, or build `copy_card` in the caller) — **bypassing the `sort_id`
+rule entirely**. No `SwapHand`, no dependency on the `sort_id`-vs-vanilla faithfulness
+question. Mirrors the `best_play_order` / `best_joker_order` precedent: ordering that
+matters but is engine-computed so the agent never spends an action on it (direction is
+ordering-within-a-chosen-set, the play-ordering analog — NOT the target-SELECTION
+analog that CLAUDE.md says must be learned). REJECTED alt (i): make `_death` read hand
+list-index + internal `SwapHand` — works but changes engine semantics and leans on the
+swap machinery; only preferred if the engine must stay the source of truth for Death
+direction (e.g. a future human-play mode), which we don't need.
+
+**Survivor heuristic — 16-rung lexicographic ladder** (higher rung wins the moment
+exactly one card has that attribute; the winner is the survivor/duplicated):
+1 Red seal · 2 Purple seal · 3 Blue seal · 4 Gold seal · 5 Gold Card enhancement
+(`m_gold`) · 6 Glass · 7 Polychrome · 8 Steel · 9 Wild · 10 Lucky · 11 Holographic ·
+12 Foil · 13 Mult · 14 Bonus · 15 Rank · 16 Stone.
+- Rank rung uses a **bespoke `K>Q>J>A>10>9>…>2` key — NOT `get_nominal()`** (which is
+  Ace-high; easy trap since it's right there). Gold appears twice on purpose (seal @4,
+  `m_gold` enhancement @5). Negative dropped (not reachable on playing cards). Stone has
+  no rank so it loses rung 15 to any ranked card; rung 16 is only a two-Stones tiebreak.
+  Wild/Lucky sit ABOVE the Holo/Foil editions. Lexicographic => a single high rung
+  outranks any stack below it (a Red-seal deuce beats a Glass+Poly King) — intended.
+- **Known limitation**: the ladder is **build-blind** ("best card" is build-dependent —
+  flush build wants Wild, mult build wants Glass/Steel). Accepted for v1.
+
+### Pointer replaces combinatorial — WHEN, and why not earlier
+
+Candidate B (hand pointer, committed at the h1 seam) subsumes the shop's `SelectTarget`
+combo block **at the in-blind merge**. What transfers at the merge: the **trunk**
+(card/joker encoders + embeddings) and the **pointer machinery** (autoregressive decode,
+per-step masking, sequence-CE, KL leash). What does NOT transfer: the **tarot-targeting
+POLICY** — a play-selector is not a Death-targeter; that behavior is learned at the merge.
+Crucially, that learning is unavoidable with ANY head (the flat combinatorial block is
+equally cold on targeting), so the pointer does not ADD retrain cost — it REDUCES it
+(warm card encoder, no C(n,k) blowup, one mechanism instead of two). "Reuse of the same
+family" = same action family + mechanism, NOT a transferred skill.
+
+**CORRECTION (this session): targeting is LIVE in s0/s1 via packs — NOT inert.** Opening
+an Arcana/Spectral pack in the shop DEALS a hand from the deck for targeting
+(`game.py:327-342`, `gs["hand"] = combined_hand`), so `PickPackCard` on a pack tarot
+enters the pending state and the flat `SelectTarget` block IS exercised in the s-track.
+(Only `UseConsumable`-from-owned targeting is inert in s0 — empty shop hand + engine
+forbids `UseConsumable` during `PACK_OPENING`.) Consequence: the flat block carries its
+two weaknesses onto the pack path — the 8-position ceiling and C(n,k) growth — so
+**pack-tarot targeting for >8-card hand-size builds is undervalued in s0/s1** (real,
+bounded, second-order, same class as the hand-play ceiling; self-corrects at the merge).
+Bounded because s0 reaches early antes where the dealt pack hand is ~8 cards, fully
+coverable by the flat block (C(8,3)=56); the ceiling only bites for hand-size builds,
+rare that early.
+
+The pointer **still can't come earlier — for sequencing reasons, not inertness** (this
+corrects an earlier "defer because inert" rationale): s0 already committed to the flat
+`Discrete(686)` head (`s0_a4_v4` exists), the pointer doesn't exist until h1 (which runs
+AFTER s0), and s1 must `--init-from` s0's flat head. So s0/s1 are stuck with flat
+combinatorial pack-targeting regardless; the merge is the first point the pointer CAN
+replace it.
+
+### Timeline
+
+- **s0** (done / in progress): flat combinatorial pack-targeting, accepted limitations
+  above.
+- **h1**: Candidate B pointer built + validated BC-only against a flat-head control
+  (hand side; per the Candidate B section).
+- **s1**: flat head RETAINED (`--init-from` from s0); pack-targeting stays flat.
+- **In-blind merge**: pointer replaces the shop's `SelectTarget` block; Death
+  direct-construction + heuristic land here (targeting also goes live for owned
+  consumables); the tarot-targeting policy is learned here.
+- The Death engine piece (direct-construction hook + heuristic) is engine-side and
+  touches neither the head nor the obs, so it can be BUILT/tested in isolation any time;
+  it only FIRES once targeting is live, i.e. functionally at the merge.
+
+### Escape hatches
+
+- **Learned Death direction (v2)** — if the fixed ladder underperforms: replace it with
+  a LEARNED survivor pick via the autoregressive pointer, **never combinatorial exposure**
+  (C(n,k) explodes at large hand sizes — the same reason we retire `SelectTarget`).
+  Because option (ii) already has the env honoring whatever direction it's handed, v2 is
+  ADDITIVE — no rework. This is the one place "pointer carries order" becomes REAL
+  (non-null) entropy, because the survivor choice actually changes the outcome (unlike
+  selection order, which the engine discards).
+- **Earlier pointer (s1 instead of merge)** — if pack targeting proves to matter more
+  than the 8-card regime suggests: do the pointer surgery at s1 (load s0's trunk, swap
+  the target block for a cold pointer, fine-tune). Front-loads the pointer's complexity
+  ahead of the hand-side BC validation meant to de-risk it, so **emergency-only**.
+
 ## Open items / not yet implemented
 
 - [x] Speed fix for `hand_solver.py`: `_needs_permutation_search` already skips the search
@@ -1189,6 +1307,11 @@ forces a second regen.
         shop_gym counter is never built (the hand-size histogram falls out of the
         harvest corpus and only tunes B's max decode length). Full decision record in
         the "h1 / s1 seam" section.
+      - SHOP-SIDE (2026-07-16): the same combinatorial `SelectTarget` block also caps
+        pack-tarot targeting, which is LIVE in s0/s1 (Arcana/Spectral pack open deals a
+        hand, `game.py:327-342`) — the pointer replaces it at the in-blind merge. Full
+        record + timeline + escape hatches in the "In-blind merge — shop targeting →
+        pointer + Death direction" section.
 - [x] h0-checkpoint hand-policy wrapper for the shop env's `hand_policy` slot —
       `jackdaw/agents/hand_checkpoint_policy.py::HandCheckpointPolicy`, tested in
       `tests/agents/test_hand_checkpoint_policy.py` (10 tests, both BC .pt and PPO .zip
