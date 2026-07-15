@@ -24,12 +24,25 @@ from jackdaw.agents.hand_action_space import (
     combo_to_action,
 )
 from jackdaw.engine.actions import PlayHand
+from jackdaw.engine.card_factory import create_consumable, create_joker
 from jackdaw.env.action_space import ActionType
 from jackdaw.env.hand_play_adapter import HandPlayConfig
 from jackdaw.env.hand_play_gym import (
+    MAX_CONSUMABLES_V2,
     MAX_HAND_CARDS_OBS,
+    MAX_JOKERS,
     HandPlayGymEnv,
     build_observation,
+    build_observation_v2,
+    observation_space,
+    observation_space_v2,
+)
+from jackdaw.env.observation import (
+    D_GLOBAL,
+    D_HAND_CARD,
+    D_HAND_GLOBAL,
+    center_key_id,
+    encode_hand_potential,
 )
 
 _DEMO_SCHEMA_KEYS = {"global_context", "hand_cards", "hand_mask", "jokers", "joker_mask"}
@@ -282,3 +295,114 @@ class TestEnvSideOrdering:
         engine_action = env._to_engine_action(action)
         assert engine_action.card_indices == (0, 2, 4)
         assert action_to_combo(action)[1] == (0, 2, 4)
+
+
+class TestObservationV2:
+    """Schema v2 (h1 bump, B2 slice 4): a versioned seam next to v1, never a
+    replacement -- v1 is the frozen h0.5 checkpoint obs and must stay the
+    default (see docs/pre-regen-handoff.md, slice-4 sequencing flag)."""
+
+    def test_default_env_stays_v1(self):
+        env = _no_joker_env()
+        obs, _ = env.reset(seed=0)
+        assert set(obs.keys()) == _DEMO_SCHEMA_KEYS | _RESERVED_KEYS
+        assert env.observation_space == observation_space()
+        assert obs["global_context"].shape == (D_GLOBAL,)
+
+    def test_unknown_obs_version_raises(self):
+        with pytest.raises(ValueError, match="obs_version"):
+            _no_joker_env(obs_version=3)
+
+    def test_v2_obs_in_space(self):
+        env = _no_joker_env(obs_version=2)
+        obs, _ = env.reset(seed=0)
+        assert env.observation_space == observation_space_v2()
+        assert env.observation_space.contains(obs)
+        assert obs["global_context"].shape == (D_HAND_GLOBAL,)
+        assert obs["hand_cards"].shape == (MAX_HAND_CARDS_OBS, D_HAND_CARD)
+        assert obs["trigger_match"].shape == (MAX_HAND_CARDS_OBS, MAX_JOKERS, 2)
+        assert obs["consumables"].shape[0] == MAX_CONSUMABLES_V2
+        # HandPlayAdapter injects no consumables at this stage.
+        assert not obs["consumable_mask"].any()
+
+    def test_v2_episode_steps_in_space(self):
+        env = _no_joker_env(obs_version=2)
+        obs, info = env.reset(seed=1)
+        rng = np.random.default_rng(0)
+        for _ in range(8):
+            legal = np.nonzero(info["action_mask"])[0]
+            obs, _, terminated, truncated, info = env.step(int(rng.choice(legal)))
+            assert env.observation_space.contains(obs)
+            if terminated or truncated:
+                break
+
+    def test_v2_potential_features_wired(self):
+        env = _no_joker_env(obs_version=2)
+        obs, _ = env.reset(seed=2)
+        gs = env._adapter.raw_state
+        per_card, gc_ext = encode_hand_potential(gs)
+        n = len(gs["hand"])
+        assert np.allclose(obs["hand_cards"][:n, 15:], per_card)
+        assert np.allclose(obs["global_context"][D_GLOBAL:], gc_ext)
+        # The v1 feature prefix is untouched by the append.
+        v1_obs = build_observation(gs)
+        assert np.allclose(obs["hand_cards"][:n, :15], v1_obs["hand_cards"][:n])
+        assert np.allclose(obs["global_context"][:D_GLOBAL], v1_obs["global_context"])
+
+    def test_v2_trigger_match_wired(self):
+        env = HandPlayGymEnv(
+            config=HandPlayConfig(joker_pool=("j_greedy_joker",), joker_count_range=(1, 1)),
+            seed_prefix="TESTENV",
+            obs_version=2,
+        )
+        obs, _ = env.reset(seed=0)
+        gs = env._adapter.raw_state
+        assert obs["joker_ids"][0] == center_key_id("j_greedy_joker")
+        for i, card in enumerate(gs["hand"][:MAX_HAND_CARDS_OBS]):
+            expected = card.is_suit("Diamonds")
+            assert obs["trigger_match"][i, 0, 0] == float(expected), i
+
+    def test_v2_copy_fields_wired(self):
+        env = HandPlayGymEnv(
+            config=HandPlayConfig(joker_pool=("j_photograph",), joker_count_range=(1, 1)),
+            seed_prefix="TESTENV",
+            obs_version=2,
+        )
+        env.reset(seed=0)
+        gs = env._adapter.raw_state
+        gs["jokers"].insert(0, create_joker("j_blueprint"))
+        obs = build_observation_v2(gs)
+        # Blueprint copies its right neighbor (Photograph): active bit set,
+        # resolved-target id stored, match column inherited (faces marked).
+        assert obs["copy_active"][0] == 1.0
+        assert obs["copy_target_ids"][0] == center_key_id("j_photograph")
+        assert obs["copy_active"][1] == 0.0  # Photograph itself is not a copy
+        faces = [
+            i
+            for i, c in enumerate(gs["hand"][:MAX_HAND_CARDS_OBS])
+            if c.base is not None and c.base.id in (11, 12, 13)
+        ]
+        for i in faces:
+            assert obs["trigger_match"][i, 0, 0] == 1.0
+            assert obs["trigger_match"][i, 1, 0] == 1.0
+
+    def test_v2_consumables_encoded(self):
+        env = _no_joker_env(obs_version=2)
+        env.reset(seed=0)
+        gs = env._adapter.raw_state
+        gs["consumables"] = [create_consumable("c_magician"), create_consumable("c_pluto")]
+        obs = build_observation_v2(gs)
+        assert int(obs["consumable_mask"].sum()) == 2
+        assert obs["consumables"][0].any() and obs["consumables"][1].any()
+        assert not obs["consumables"][2:].any()
+
+    def test_v2_consumable_overflow_truncates(self):
+        # Perkeo-style negative copies can exceed any slot count; the block
+        # tail-truncates rather than raising (rows are engine slot order).
+        env = _no_joker_env(obs_version=2)
+        env.reset(seed=0)
+        gs = env._adapter.raw_state
+        gs["consumables"] = [create_consumable("c_pluto") for _ in range(MAX_CONSUMABLES_V2 + 3)]
+        obs = build_observation_v2(gs)
+        assert int(obs["consumable_mask"].sum()) == MAX_CONSUMABLES_V2
+        assert env.observation_space.contains(obs)

@@ -37,6 +37,7 @@ A1 harvest script ──> A2 run passes + reductions ──> (corpus banked)
 B1 add_to_deck fix ─> B2 feature bump ─> B3 best_joker_order ─> B4 labels/width/tier-1
                                                                     └─> B5 prescreen+validation
 A3 result ──────────────────────────────────────────────────────────> B6 (conditional)
+B5's ranking precedent ─────────────────────────────────────────────> B7 discard-ranking fidelity
 
 [all of B done] ──> C1 selection manifest ──> C2 snapshot-fed labeling front-end
                                                    └──> regen (9600X, not this scope)
@@ -44,11 +45,11 @@ A3 result ───────────────────────�
 
 Hard rules:
 - A1/A2 can run in parallel with all of B (blobs are engine state, not encoded obs).
-- Nothing in C runs until ALL of B is merged (B6 only if A3 triggered it).
+- Nothing in C runs until ALL of B is merged (B6 only if A3 triggered it; B7 always).
 - A3 must be resolved (triggered or cleared) before B6's go/no-go, and B6 —
   if it happens — must finish before C2.
 
-## Status (A1/A2/B1 directly on `main`; B2 on `worktree-pre-regen-b2-hand-potential`)
+## Status (A1/A2/B1 + B2 slices 1–3 on `main`; slice 4 on `worktree-pre-regen-b2-slice4-schema-v2`)
 
 - **A1 — DONE** (`scripts/harvest_s0_rollouts.py` + tests): capture pipeline,
   dual pass, per-run blob shards + blob-free metadata, reductions + readout.
@@ -77,7 +78,123 @@ Hard rules:
   handler compares against), and Blueprint/Brainstorm ignored
   `blueprint_compat` (all 29 incompatible jokers were copyable — e.g. a
   Blueprint beside an Egg doubled its end-of-round growth).
-- **A3, B2 slice 4, B3–B6, C1–C2** — not started.
+- **B2 slice 4 — DONE** (2026-07-13, branch
+  `worktree-pre-regen-b2-slice4-schema-v2`): `SCHEMA_VERSION = 2` in the demo
+  writer (18-wide hand cards, 256 GC, trigger_match, joker/copy id arrays,
+  real consumable block); `build_observation_v2` / `observation_space_v2` as a
+  VERSIONED SEAM in `hand_play_gym.py` (v1 stays byte-identical and the
+  `HandPlayGymEnv` default — `obs_version=2` opt-in — so every h0.5 consumer
+  and A3 keep working); `train_bc.py` originally loaded v2 only (v1 =
+  pre-regen data, rejected loudly) with a width-generic axis-1 up-pad
+  covering the 4-D trigger_match. Decisions made while building:
+  - **v2 was NOT FROZEN until B4 landed.** B4 promotes the completed shard
+    schema to **v3**: index-set labels replace the v2 card-target mask and
+    hand blocks retain their actual shard width. Do not generate v2 datasets
+    from the gap; the loader rejects v1/v2 loudly.
+  - **Consumable block = 8 PER-INSTANCE rows in engine slot order**
+    (`MAX_CONSUMABLES_V2`), tail-truncating: 2 (the v1 dormant width) is too
+    narrow for harvested states (Crystal Ball = 3 slots; Perkeo negatives
+    exceed any slot count), and width is nearly free. Stacked (type+count)
+    rows REJECTED: row index must stay engine slot index for the h2
+    UseConsumable/SellConsumable addressing (the shop obs invariant), and a
+    stacked shard would force exactly the h2 re-regen the rider prevents —
+    the stacked view is a lossy projection the model can compute internally.
+  - **Copy-target fields store the frozen-vocab key id, not the 24-dim
+    descriptor** (a pure function of the id; storing vectors would be a
+    drift surface — the same id-not-vector pattern as `joker_ids`).
+  - The current `HandPlayBCModel` trains against the v2 space by consuming
+    the widened float blocks and ignoring the new keys; the embedding-gather
+    encoder that consumes them is post-regen scope (recorded in CLAUDE.md).
+- **A3 — DONE, verdict CLEARED (2026-07-14): B6 is NOT built.**
+  `scripts/fingerprint_discard_bias.py`, report `data/fingerprint_a3.json`
+  (main checkout). h0.5 deterministic, 800 EVAL_ episodes/stage; teacher
+  stats from shard labels (buckets recovered from GC[13]/GC[14]).
+  - Signal 1 (locate): FIRES — recovery in discards>=2 buckets far below
+    discards==0: deficits +30.2pts (stage2, CI [8.0, 54.6]), +79.0pts
+    (stage3, CI [42.3, 119.5]), +104.9pts (stage4, CI [50.2, 165.4]);
+    stage1 +17.0pts (CI includes 0).
+  - Signal 2 (attribute): EXONERATES — h0.5 discards BELOW the teacher's
+    rate in exactly those buckets (gap −0.113 / −0.080 / −0.067 in stages
+    2/3/4, CIs entirely below zero). Under-discarding cannot be caused by
+    the play-only label bias (pitfall #15) → conjunction fails → the
+    solver's banked-discard estimator stays untouched; the deficit is a
+    TRAINING problem (h1's PPO/BC), not a label problem.
+  - Magnitude caveat for future readers: d0 recovery exceeds 1.0 in
+    stages 3/4 (1.24/1.37) — the MC future-hand labels are documented-
+    pessimistic, so recovery ratios inflate in buckets whose labels lean
+    on MC; part of the deficit is metric asymmetry. The greedy control
+    (stage1: deficit 62.3pts with a policy that barely banks discards)
+    supports that read. None of this changes the verdict — attribution
+    already failed on sign.
+  - Archetype decomposition (calibrates the B2 hand-potential bump):
+    pair-family recovery beats flush/straight in EVERY stage — stage2
+    0.562 vs 0.482/0.476, stage3 0.675 vs 0.467/0.410, stage4 0.542 vs
+    0.368/0.374. The flush/straight gap is real and is exactly what the
+    v2 features target; expect post-bump recovery in those buckets to
+    close toward the pair level.
+- **B5 — DONE (2026-07-14):** `prescreen_play_candidates` +
+  `best_immediate_play` prescreen path in `scripts/hand_solver.py`
+  (n > PRESCREEN_HAND_LIMIT=8), validation harness
+  `scripts/validate_prescreen.py`, 12 tests in
+  `tests/scripts/test_hand_solver_prescreen.py`. Three decisions made
+  while building (all user-grilled in-session):
+  - **Family = the candidate's REALIZED scoring line** (hand type +
+    scoring-card identity from the cheap eval), NOT the source template:
+    kicker padding lets every weak template piggyback the dominant line
+    (a lone Queen padded with four Kings scores as the same quads), so
+    template-keyed diversity fills every slot with relabeled copies of
+    one line — the exact pitfall-#13 crowding it exists to prevent.
+  - **Ranking is JOKER- and HELD-AWARE** (user call): one fixed-order
+    `score_hand` per candidate with true held cards, clones throughout.
+    Jokerless ranking filters joker-favored lines before exact eval.
+    The discard-side twin (`rank_templates_cheaply`, still jokerless/
+    held-empty) is now B7 — user-locked as a pre-regen requirement.
+  - **Validated k = 3, set to 4** (user margin call): sampled-distribution
+    regret 0.0 at every tested k (3/5/8) vs noise floor 0.022; regret AND
+    best-in-cut-rate (0.646) identical across k, so misses live in the
+    candidate GENERATOR, not the cut depth — raising k buys nothing, and
+    the lever for shrinking the boundary-stress exposure (mean 0.12
+    p_clear with a synthetic blind at exactly the best play's total;
+    0.02-0.03 at 1.1-1.5x) is candidate generation, not k. Report:
+    `data/prescreen_validation.json` (main checkout).
+  - **Pair pin** (user call): the best already-realized rank line (pair
+    or better) is promoted to index 1, so every k>=2 cut evaluates it —
+    weak cheap rank, but consistent (no draw, no luck) and rank-joker
+    upside. Ordering stays prefix-stable in top_k (the harness slices
+    k-cuts from one call).
+  - Solver cost with prescreen: 0.7–10.4s full labels at hand sizes
+    12–17 (within the ~12s/example budget; unprescreened n=14 is ~3.5k
+    exact evals per recursion node).
+- **B5 addendum — GENERATOR WIDENED, k=5 (2026-07-15):** all 17/48 misses
+  were cross-rank-group generation holes (two pair / full house never
+  proposed); rank-combination pass added, revalidated best-in-cut
+  0.646 → 0.958, regret 0.0; 2 kicker-choice misses ACCEPTED (user call).
+  Full record at the B5 spec below.
+- **B3 — DONE (2026-07-15,** same slice-4 branch): `best_joker_order` +
+  classification + `objective` hook in `play_ordering.py`; env mutation in
+  `action_to_engine_action`; solver entry sort + per-candidate copy argmax
+  in `evaluate_value`; brute-force-validated on constructed boards; 25 new
+  tests. Full decision record at the B3 spec below.
+- **B7 — code + tests DONE; validation REDESIGNED to faithful-MC
+  (2026-07-15).** A diagnostic showed the solver's own value model CANNOT
+  judge B7 (optimistic `_fill_hand_to_size` refill saturates the flipped-away
+  branch at p_clear=1.0), so both the final-p_clear and shortlist-coverage
+  harnesses were dead ends. New gate: disagreement-filtered, faithful Monte
+  Carlo over real redraws, paired best-in-box, adaptive goal-line sweep, MC
+  noise floor; `solve_hand_turn` gained a `joker_aware` comparison arm;
+  constructed full-solver existence proofs (Greedy flip, faithfully better)
+  are now the primary argument. 7/7 tests green; the ~200-state 9600X run is
+  the remaining gate. Full record below.
+- **B4 — DONE** (2026-07-15): shard schema v3 stores `(5,)` ascending
+  `card_indices` with `-1` padding, replacing the width-bound mask; demo
+  hand blocks are actual-width and the loader up-pads them to the width-40
+  observation. Loader validation hard-fails malformed/unsorted/duplicate,
+  out-of-hand-mask, empty, or budget-illegal labels. Wide labels remain in
+  the dataset; the legacy flat trainer rejects them explicitly until the
+  Candidate-B pointer trainer consumes the index sequence. Tier 1 is
+  schema-native and the pinned position-8 synthetic hand executes through
+  Tier 2. **C1–C2 — not started. B6 — SKIPPED, citing A3** (the conjunction failed on attribution; do not build it
+  without a NEW fingerprint showing teacher-mirroring over-discarding).
 
 ## Task specifications
 
@@ -263,6 +380,44 @@ merge is built.
   the per-card-phase interleaving is verified empirically here. Also: solver/env
   consistency test (the committed action's label value equals env execution value
   under the same subset).
+- **BUILT 2026-07-15** (same slice-4 branch). Decisions grilled with the user
+  in-session, on top of the locked spec:
+  - Classification: `MAIN_PHASE_XMULT_JOKER_KEYS` (28 keys, jokers whose main
+    handler can return Xmult_mod) is hand-written for import cheapness but
+    PINNED to the handler SOURCE by a regenerating scan in
+    `tests/engine/test_play_ordering.py` — a handler drift breaks CI, not the
+    sort. Polychrome edition on any joker classifies it x-mult (9d applies at
+    its position). Misclassification only costs order-optimality, never label
+    honesty (the engine scores whatever order is submitted).
+  - Copy-joker placement: argmax over ALL insertion slots (board size does not
+    cap it — 6+ jokers just means more slots); with MULTIPLE copy jokers, FULL
+    cross-product of ordered placements up to 10 total jokers (user call;
+    2 copies among 8 = 90 candidates), sequential-greedy beyond. Candidate
+    exclusion is id()-based (two Blueprints via negatives — the Erratic-deck
+    equality bug class).
+  - `objective` hook (user call, decided over my initial doc-note-only
+    recommendation): `best_joker_order(..., objective=)` re-targets the
+    placement argmax; default None = raw score. Channel that justified it:
+    copy-joker placement DECIDES what gets duplicated, and a score-argmax
+    never copies economy effects. The copyable money flows THROUGH scoring
+    (Business Card per-card $, lucky-money via copied retriggers) so it lands
+    in ScoreResult.dollars_earned; end-of-round payers (Golden/Rocket/Egg) are
+    blueprint-INCOMPATIBLE and never copyable. The double-agent env passes a
+    money-aware objective at the h1 seam via `action_to_engine_action`'s
+    `ordering_objective` param; solver labels stay score-only — loose
+    label/env convergence accepted (PPO-against-real-game corrects). Pinned:
+    a dollars-first objective flips Blueprint's neighbor to Business Card.
+  - Env: mutation lives in `action_to_engine_action` (the single shared decode
+    path — HandPlayGymEnv AND checkpoint partners), plays only, gated by
+    `joker_order_matters` (copy joker owned, or x-mult coexisting with any
+    other joker). Solver: context-free sort once at `solve_hand_for_ante_clear`
+    entry; `evaluate_value` re-runs the full best_joker_order per candidate on
+    the exact path only (MC tier keeps the entry order — its approximation
+    tier). Solver/env consistency + mutation-safety pinned in
+    `tests/scripts/test_hand_solver_joker_order.py`.
+  - Known-deferred: Baseball Card contributes x-mult at OTHER uncommon jokers'
+    positions (9c) — the binary sort ignores the rider (second-order, labels
+    stay engine-honest).
 
 ### B4 — index-set labels, width 40, tier-1 rework (`scripts/generate_hand_demos.py`)
 
@@ -292,6 +447,27 @@ merge is built.
   the floor. Record the chosen k in CLAUDE.md.
 - If no k passes: raise k / widen families; if still failing, the prescreen design
   returns to review — do NOT ship a failing k because the schedule wants it.
+- **GENERATOR WIDENED + REVALIDATED 2026-07-15** (rode in on the B7 harness
+  session): reading the first validation run's per-hand data showed ALL 17/48
+  misses were GENERATION holes (`best_in_candidates=False` in every one, at
+  every k) of a single class — cross-rank-group combinations (Two Pair from
+  two separate pairs, Full House from trips + pair). Root cause: kicker
+  padding ranks INDIVIDUAL cards by nominal priority, so a second rank group
+  never wins a padding contest against a loose Ace — the docstring's claim
+  that FH/two-pair "emerge from padding" was false in practice. Fix: a
+  rank-combination pass in `prescreen_play_candidates` — every ordered pair
+  of 2+-card rank groups proposes 2+2 (bare AND kicker-padded; bare matters
+  when the 5th card is better held — Baron/Blackboard class) and 3+2 when a
+  group has trips. Revalidation (48 hands): best-in-cut 0.646 -> 0.958,
+  regret 0.0 on 44/48 MC-active states, stress regret f=1.0 0.12 -> 0.02 /
+  f=1.1 -> 0.0, wall-time cost ~free, minimal k still 3.
+  `PRESCREEN_TOP_K` raised 4 -> 5 (user call, preemptive margin).
+  **ACCEPTED RESIDUAL (user call 2026-07-15)**: 2/48 kicker-CHOICE misses
+  (right line, wrong kicker — keep-priority pads nominal-best where a joker
+  wants a suit/enhancement; ratios 0.92/0.71, measured regret 0.0). Named
+  lever if it ever matters: kicker VARIANTS per combination, not k.
+  Regression tests modeled on the failing hands:
+  `test_hand_solver_prescreen.py::TestRankCombinationCandidates`.
 
 ### B6 (CONDITIONAL on A3) — banked-discard credit in `estimate_future_hand_distribution`
 
@@ -300,6 +476,104 @@ regret harness (prescreen-style validation vs brute force on discard-rich states
 before any label is generated with it. Budget expectation: it will slow labeling;
 that cost lands on all ~42k examples — keep the implementation's cost profile
 explicit in the PR.
+
+### B7 — joker/held-aware discard-branch ranking (`scripts/hand_solver.py`)
+
+USER-LOCKED 2026-07-14 (rode in on the B5 session): `rank_templates_cheaply`
+— the top-k selection of which discard templates the recursion explores —
+still ranks with jokerless, held-empty `score_hand_base`. Same failure shape
+the B5 play prescreen just fixed: a joker- or held-favored line (Greedy's
+suit, Baron's held Kings) can rank below its true value and never reach the
+exact hit/miss recursion. This is a LABEL-SEMANTICS change for every hand
+size (the discard path runs at n<=8 too), so it must land before C2/regen.
+
+- Mechanics (BUILT 2026-07-14, same session as B5): `_ranking_score` — the
+  shared ranking-tier scorer (one fixed-order `score_hand`, fast-clones
+  everything, returns a clone→original identity map) — now backs BOTH the
+  B5 play prescreen and `rank_templates_cheaply`. Per-branch held =
+  `kept` + any (hold+completion) overflow beyond the played 5; unknown
+  replacement draws contribute nothing (same representative-completion
+  tier). Only the RANKING scorer changed — reachability math and the
+  exact recursion valuation are untouched, so labels shift only where a
+  different template set gets explored. `jokers=None` / `joker_aware=False`
+  keep the old jokerless scorer (legacy callers + the harness's
+  comparison arm). Tests:
+  `tests/scripts/test_hand_solver_discard_ranking.py` (Greedy flips the
+  ranking toward its suit's flush; Baron raises a branch whose discard
+  cap keeps a King in hand; escape-hatch equivalence; Eye mutation
+  safety).
+- The completion-card hypothetical (`_best_completion_cards`) stays — only
+  the SCORER upgrades, not the reachability math.
+- **Validation design REPLACED TWICE.** (1) The original old-vs-new
+  final-`p_clear` compare tested the shared outer solver (the max
+  saturates once either ranker keeps a certain-clear branch). (2) The
+  2026-07-15 shortlist-coverage replacement was itself discarded after a
+  30-state run and a diagnostic exposed a deeper flaw — see below.
+- **THE FINDING (2026-07-15): the solver cannot judge B7 with its own
+  value model.** A discard branch is valued by the two-point representative
+  hit/miss recursion, and the "hit" hand is refilled by `_fill_hand_to_size`
+  with the HIGHEST-remaining-rank optimistic filler. A `still_needed==0`
+  branch (e.g. discard around trip Kings) therefore refills to a monster and
+  clears EVERY goal line — its p_clear pins at 1.0. When B7 flips the emitted
+  discard from that trips-refill line to a joker-favored flush line, BOTH read
+  p_clear=1.0: the solver records a different, genuinely better ACTION but is
+  structurally blind to the improvement. Any metric built on the solver's own
+  recursion reads ~0 (and can read a FALSE regression, since the optimistic
+  refill pins the old box at 1.0). The 30-state shortlist-coverage run
+  ("new loses rank-2/3 coverage, rank-1 100%/100%, regret 0/0") was exactly
+  this artifact — and its rank-2/3 / reach-bucket metrics measured the
+  NON-argmax tail the solver's `max` discards, which is not label-relevant.
+- **New gate = FAITHFUL Monte Carlo, disagreement-filtered, paired.**
+  `scripts/validate_discard_ranking.py`, rewritten 2026-07-15.
+  - *Box-set agreement ⟹ identical label.* Verified `solve_hand_turn`
+    iterates all `top_k` with a strict-`>` max and no order-dependent early
+    exit, so B7 can only move a label where the old (jokerless) and new
+    (joker/held-aware) top-k SETS differ. Disagreement is a cheap two-pass
+    filter (the box is chosen by `cheap_value`, goal-line-independent);
+    agreement states are recorded exactly-zero and never valued.
+  - *Faithful ground truth.* Value each candidate discard by REAL random
+    redraws from the deck — discard, draw, `best_immediate_play`, fraction
+    clearing — NOT the solver's optimistic recursion. Real draws de-saturate
+    the trips-refill line (random draws rarely make a monster) while the
+    flush completes at its true probability and the joker mult carries it.
+  - *Paired best-in-box.* Report `best_in_new_box − best_in_old_box`; the
+    global-best term cancels, so only `old_box ∪ new_box` is valued.
+    Absolute regret vs ALL template branches is a B5 (generator-coverage)
+    question, deliberately out of scope.
+  - *Adaptive goal-line sweep.* `hands_left` AND `discards_left` forced to 1
+    (one discard node, valued exactly as `P(best play ≥ chips_needed)`; no
+    downstream solver model). Per-draw best-play totals are goal-line-
+    independent, so sample ONCE per action and threshold for free. Goal
+    lines = quantiles of the pooled achievable totals ABOVE the best
+    play-now `P` (below `P` the label is not a discard). This adapts the
+    band to each state's real reachable range — the "adaptive goal line"
+    the flat sampled blind never provides.
+  - *MC-reseed noise floor* (yes, it is needed — faithful values are MC;
+    an earlier note claiming the `hands_left=1` isolation removed all MC
+    was WRONG: it removes the FUTURE-HAND boundary, but the redraw MC is the
+    whole point). A separate n≤8 pass reseeds the best action; a state
+    counts as a B7 win only if `max_help > accept_factor × floor`; a
+    `min_paired < −floor` is a real regression (the safety gate).
+- **`solve_hand_turn` gains `joker_aware: bool = True`** threaded through the
+  recursion (default = production). It is the comparison arm: the constructed
+  existence proofs toggle it to get the two arms' EMITTED discards, then judge
+  which is better by faithful MC.
+- **Existence proofs are the PRIMARY argument** (not the aggregate):
+  `tests/scripts/test_hand_solver_discard_ranking.py::TestFullSolverExistenceProof`
+  — a constructed Greedy board where the full solver's emitted discard flips
+  jokerless→joker-aware toward `flush_Diamonds`; the solver's own p_clear does
+  NOT prefer it (`new.p_clear ≤ old.p_clear` — the saturation documented);
+  faithful MC (200 draws) shows the flush clears >5pts more often above
+  play-now; a d=2 variant pins the `joker_aware` threading through one level
+  of recursion. B7 is a consistency/correctness fix (mirror the B5 play
+  prescreen) — the aggregate answers how-often / does-it-regress, and is NOT
+  expected to show large lift (argmax is robust; the effect is rare-but-real).
+- **Status:** code + all 7 discard-ranking tests green; harness plumbing
+  smoke (3 states, n_samples=20) completes and emits valid JSON. The real
+  gate is a background/9600X run (`--n-states ~200 --n-samples ~80`) —
+  headline numbers = disagreement rate, `frac_helped` above floor, and
+  `n_regressions_below_floor` (must be 0). Do not read the tiny smoke as the
+  gate.
 
 ### C1 — selection script → manifest (new, small)
 
@@ -403,6 +677,18 @@ explicit in the PR.
     token as a fixed extra logit slot (not positioned at hand size); stop illegal
     at zero picks, forced at five. The mask constraint must be identical at BC,
     PPO, and eval — pin with a parity test when B is built.
+    Two riders (agreed 2026-07-13, slice-4 session):
+    - **Flat-head control on big-hand labels:** the BC-only validation's flat
+      436-head control structurally cannot represent labels touching position
+      ≥8 — it DROPS those examples, and the dropped fraction must be reported
+      alongside the CE comparison so the numbers are read with that caveat.
+    - **B's env interface = the label encoding itself:** step() takes the
+      (type + up-to-5 ascending picks, -1 pad) vector — Discrete(436) cannot
+      carry variable-length picks. Per-step masks are built POLICY-side (the
+      prefix-dependent monotone/stop constraints only exist mid-decode; the
+      base facts — hand_mask, hands/discards-left — are already in the v2
+      obs). The v1 Discrete(436) path survives alongside, same seam pattern
+      as `obs_version` (h0.5 stays the shop partner through s1).
 18. **Coverage criteria that can never pass are not criteria.** Do not gate the
     harvest on things like "every joker seen N times" — an argmax policy will never
     buy all 150 jokers, and vocabulary breadth is stages 1-4's job. The readout
@@ -419,7 +705,9 @@ explicit in the PR.
   green.
 - **B:** all feature/label/solver tests green including the brute-force ordering
   test and the big-hand tier-1 pin; prescreen k chosen and recorded; B6 resolved
-  (built+validated, or explicitly skipped citing A3).
+  (built+validated, or explicitly skipped citing A3); B7 remains to be built —
+  phase B is NOT done until its joker/held-aware discard ranking is in and its
+  old-vs-new regret check has passed.
 - **C:** manifest checked in; a smoke labeling run (a few dozen manifest records
   end-to-end into a shard, loaded back by `train_bc.py`'s loader) passes before
   the full 9600X job is queued.

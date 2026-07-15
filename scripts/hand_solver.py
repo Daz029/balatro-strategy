@@ -55,9 +55,12 @@ from dataclasses import dataclass, field
 from math import comb
 
 from jackdaw.engine.card import Card
+from jackdaw.engine.hand_eval import get_hand_eval_flags
 from jackdaw.engine.hand_levels import HandLevels
 from jackdaw.engine.play_ordering import (
     MAX_PERMUTATIONS,  # noqa: F401 -- re-export for existing importers
+    COPY_JOKER_KEYS,
+    best_joker_order,
     candidate_orderings,
 )
 from jackdaw.engine.play_ordering import (
@@ -418,8 +421,29 @@ def evaluate_value(
     hand MC sampler): paying a 6-20x permutation search to find the exact
     best ordering of a *hypothetical* hand is precision the estimate can't
     use. Exact consumers (labels, current-turn decisions) must leave it on.
+
+    B3 joker auto-ordering: on the exact path, the joker LIST is also
+    re-ordered per candidate play via ``best_joker_order`` -- the closed-
+    form additive-before-x-mult sort always (idempotent when the caller
+    pre-sorted at hand-turn entry), plus the copy-target placement argmax
+    when Blueprint/Brainstorm is owned. The MC future-hand path
+    (``search_orderings=False``) keeps the caller's fixed hand-turn-entry
+    order -- same approximation tier as its fixed card order. Labels
+    valued this way assume the env commits plays under the same ordering,
+    which ``action_to_engine_action`` does (consistency pinned in
+    tests/engine/test_play_ordering.py).
     """
     if search_orderings:
+        jokers = best_joker_order(
+            jokers,
+            played_cards,
+            held_cards,
+            hand_levels,
+            blind,
+            rng,
+            game_state=game_state,
+            blind_chips=blind_chips,
+        )
         orderings = candidate_orderings(played_cards, jokers)
     else:
         orderings = [tuple(played_cards)]
@@ -473,6 +497,249 @@ class DiscardChoice:
     reach_probability: float | None  # None for "play now"
 
 
+# --- Big-hand play prescreen ------------------------------------------------
+#
+# `best_immediate_play` is C(n,5) exact evaluations per call: 56 subsets at
+# n=8, ~4.4k at n=16 -- and it runs at every recursion node of
+# `solve_hand_turn` plus 16x per MC future-hand estimate. Beyond
+# PRESCREEN_HAND_LIMIT cards, only the top-k template-derived candidate
+# subsets are evaluated exactly; the label becomes "exact among prescreened
+# candidates" (PPO against the real game is the documented corrector for the
+# residual bias -- see CLAUDE.md "Solver big-hand cost").
+#
+# PRESCREEN_TOP_K validated 2026-07-14 (`scripts/validate_prescreen.py`, 48
+# hands flat over sizes 9-12, stage3_full + hand-size tail) and REVALIDATED
+# 2026-07-15 after the rank-combination generator widening (all 17/48
+# generation holes were cross-rank-group lines -- two pair / full house --
+# that single-rank templates + nominal-priority kicker padding could never
+# propose; see the combination pass in prescreen_play_candidates):
+# best-in-cut rate 0.646 -> 0.958, regret 0.0 at every tested k on 44/48
+# MC-active states vs noise floor 0.022, boundary-stress regret 0.12 ->
+# 0.02 at f=1.0 (the knife-edge placement) and -> 0.0 at f=1.1. Minimal
+# passing k is 3 both times; set to 5 as a user-called margin (2026-07-15,
+# preemptive headroom after the widening). KNOWN ACCEPTED RESIDUAL (user
+# call 2026-07-15): 2/48 kicker-CHOICE misses remain (right line, wrong
+# kicker -- keep-priority pads a nominal-best card where a joker values a
+# specific suit/rank; ratios 0.92/0.71, measured regret 0.0). The named
+# lever if it ever matters: kicker VARIANTS per combination (per-suit /
+# per-enhancement alternatives), not k. Full report:
+# data/prescreen_validation.json.
+PRESCREEN_HAND_LIMIT = 8
+PRESCREEN_TOP_K = 5
+
+# Realized hand types that count as an in-hand rank line for the pair pin
+# (see prescreen_play_candidates): complete now, zero draw risk.
+_RANK_LINE_TYPES = frozenset(
+    {"Pair", "Two Pair", "Three of a Kind", "Full House", "Four of a Kind", "Five of a Kind"}
+)
+
+
+def _ranking_score(
+    cards: list[Card],
+    held: list[Card],
+    jokers: list[Card],
+    hand_levels: HandLevels,
+    blind,
+    rng: PseudoRandom,
+    game_state: dict | None,
+    blind_chips: int,
+) -> tuple[ScoreResult, dict[int, Card]]:
+    """Shared RANKING-tier scorer for candidate selection (the play
+    prescreen and the discard-template ranking): one `score_hand` call,
+    fixed order, no permutation search, joker- and held-aware, fast-clones
+    throughout (score_hand mutates card/joker/hand_levels/rng/blind state
+    in place on every hypothetical call -- The Eye/The Mouth history,
+    scaling-joker accumulation). Returns the result plus a clone-id ->
+    original-card map so callers can key on original card identity
+    (score_hand reports scoring_cards as the clones it was given)."""
+    played_clones = [_fast_clone_card(c) for c in cards]
+    held_clones = [_fast_clone_card(c) for c in held]
+    result = score_hand(
+        played_clones,
+        held_clones,
+        [_fast_clone_card(j) for j in jokers],
+        _fast_clone_hand_levels(hand_levels),
+        _fast_clone_blind(blind),
+        _fast_clone_rng(rng),
+        game_state=game_state,
+        blind_chips=blind_chips,
+    )
+    clone_to_orig = {
+        id(clone): orig for clone, orig in zip(played_clones + held_clones, cards + held)
+    }
+    return result, clone_to_orig
+
+
+def prescreen_play_candidates(
+    hand: list[Card],
+    jokers: list[Card],
+    hand_levels: HandLevels,
+    blind,
+    rng: PseudoRandom,
+    *,
+    four_fingers: bool = False,
+    shortcut: bool = False,
+    top_k: int = PRESCREEN_TOP_K,
+    game_state: dict | None = None,
+    blind_chips: int = 0,
+) -> list[list[Card]]:
+    """Template-derived candidate play subsets for big hands, ranked
+    cheaply and selected FAMILY-DIVERSE: the best candidate of each family
+    first, then remaining slots filled by cheap rank. Naive top-k would
+    return k variants of one dominant line and starve e.g. straight
+    candidates whose cheap rank is systematically lower than their exact
+    value (handoff pitfall #13).
+
+    The ranking is JOKER-AWARE (user call, 2026-07-14): one `score_hand`
+    call per candidate, fixed order, no permutation search. Jokerless
+    ranking (`score_hand_base`, the `rank_templates_cheaply` precedent) is
+    wrong HERE because the ranking decides which lines ever reach exact
+    evaluation -- a joker-favored line (Greedy turning a weak diamond
+    flush into the true best play) would be filtered out before the
+    joker-aware exact pass could see it. Held cards are passed too (Baron/
+    steel-class held effects shift line values). The single fixed ordering
+    is the same approximation tier `estimate_future_hand_distribution`
+    accepts: ranking precision, not label precision -- the top-k get the
+    full ordering search afterwards.
+
+    A family is the candidate's REALIZED scoring line -- (detected hand
+    type, scoring-card identity set) from the cheap evaluation -- not the
+    template that spawned it. Template identity is the wrong key: kicker
+    padding lets every weak template piggyback a dominant line (a lone
+    Queen padded with four held Kings scores as the SAME four-of-a-kind
+    as the quads template's own candidate), so template-keyed diversity
+    would fill every slot with re-labeled copies of one line -- the exact
+    crowding the family pass exists to prevent. Keying by what the
+    candidate actually scores as collapses those copies into one family
+    while keeping genuinely distinct lines (each flush suit, each straight
+    line, each rank group) separate for free.
+
+    Ordering is PREFIX-STABLE in `top_k`: the first j entries of a
+    `top_k=k` call equal the `top_k=j` call for j < k -- the validation
+    harness scores multiple k-cuts from one call and relies on this.
+
+    PAIR PIN: the best already-realized rank line (pair or better) is
+    promoted to index 1 of the ordering, so every k>=2 cut evaluates it.
+    A pair's cheap rank is weak but its value is CONSISTENT -- complete
+    now, no draw, no luck -- and cheap (jokerless) ranking systematically
+    underprices it against speculative draw lines.
+
+    Candidates per template: the template's matching cards capped at 5
+    (highest keep-priority first), plus -- when that leaves room -- the
+    same cards padded to 5 with the best non-matching kickers. The
+    fallback candidate (top 5 of the whole hand by keep-priority) covers
+    hands where no template matches anything useful (e.g. base-less stone
+    cards, which no rank/suit predicate can see).
+    """
+    templates = build_templates(hand, four_fingers=four_fingers, shortcut=shortcut)
+
+    def _kicker_pad(cards: list[Card]) -> list[Card]:
+        if len(cards) >= 5:
+            return cards
+        chosen = {id(c) for c in cards}
+        kickers = sorted(
+            (c for c in hand if id(c) not in chosen), key=_keep_priority, reverse=True
+        )
+        return cards + kickers[: 5 - len(cards)]
+
+    raw: list[list[Card]] = []
+    for template in templates:
+        hold, _ = construct_hold(hand, template)
+        if not hold:
+            continue
+        playable = sorted(hold, key=_keep_priority, reverse=True)[:5]
+        raw.append(playable)
+        if len(playable) < 5:
+            # Padded variant: pair+kickers. (Historically claimed to also
+            # cover full house / two pair "emerging" from a rank hold padded
+            # with another rank's cards -- FALSE in practice: padding picks
+            # kickers by nominal priority, so the second rank group is only
+            # chosen when it happens to outrank every loose high card. All
+            # 17/48 generation holes in the B5 validation were exactly the
+            # missing combinations; see the rank-combination pass below.)
+            raw.append(_kicker_pad(playable))
+    raw.append(_kicker_pad([]))  # template-free fallback
+
+    # Rank-line COMBINATIONS (B5 widening, 2026-07-15): two pair and full
+    # house are cross-GROUP lines no single-rank template can propose.
+    # Enumerate ordered pairs of multi-card rank groups: 2+2 (two pair,
+    # bare and kicker-padded -- the bare variant matters when the 5th card
+    # is better held: Baron/Blackboard-class held effects) and 3+2 (full
+    # house, from either group's trips side). Within-group card choice by
+    # keep-priority (enhancement-aware); dedup + the family pass absorb
+    # the overlap.
+    rank_groups: dict[object, list[Card]] = {}
+    for c in hand:
+        if c.base is not None:
+            rank_groups.setdefault(c.base.id, []).append(c)
+    multi = [
+        sorted(g, key=_keep_priority, reverse=True)
+        for g in rank_groups.values()
+        if len(g) >= 2
+    ]
+    for g1, g2 in itertools.permutations(multi, 2):
+        two_pair = g1[:2] + g2[:2]
+        raw.append(two_pair)
+        raw.append(_kicker_pad(list(two_pair)))
+        if len(g1) >= 3:
+            raw.append(g1[:3] + g2[:2])  # full house
+
+    # Dedup by card-identity set (padded variants of different templates
+    # frequently coincide), cheap-score survivors on CLONES -- score_hand
+    # mutates card/joker/hand_levels/rng/blind state in place on every
+    # hypothetical call (The Eye/The Mouth history, scaling-joker
+    # accumulation; see evaluate_value's clone note). Family = the realized
+    # scoring line (see docstring), mapped back from the scored CLONES to
+    # original card identity so identical lines actually collide.
+    seen_sets: set[frozenset[int]] = set()
+    scored: list[tuple[tuple, list[Card], float]] = []
+    for cards in raw:
+        key = frozenset(id(c) for c in cards)
+        if not cards or key in seen_sets:
+            continue
+        seen_sets.add(key)
+        held = [c for c in hand if id(c) not in key]
+        cheap, clone_to_orig = _ranking_score(
+            cards, held, jokers, hand_levels, blind, rng, game_state, blind_chips
+        )
+        family = (
+            cheap.hand_type,
+            frozenset(
+                id(clone_to_orig.get(id(c), c)) for c in cheap.scoring_cards
+            ),
+        )
+        scored.append((family, cards, cheap.total))
+    scored.sort(key=lambda t: t[2], reverse=True)
+
+    families_seen: set[tuple] = set()
+    family_best: list[list[Card]] = []
+    fills: list[list[Card]] = []
+    pair_line: list[Card] | None = None
+    for family, cards, _val in scored:
+        if family not in families_seen:
+            families_seen.add(family)
+            family_best.append(cards)
+            if pair_line is None and family[0] in _RANK_LINE_TYPES:
+                pair_line = cards
+        else:
+            fills.append(cards)
+    ordered = family_best + fills
+
+    # Pair pin (user call, 2026-07-14): the best ALREADY-REALIZED rank line
+    # (pair or better) is guaranteed a slot in every k>=2 cut. Its cheap
+    # rank is weak -- base score of a low pair loses to any flashy draw
+    # line -- but it is the one line that needs no draw and no luck, and
+    # rank-triggered jokers can make its exact value far exceed its cheap
+    # rank. Promoted to index 1 (never displacing the overall best) so the
+    # ordering stays a single list and prefix-stability in top_k survives.
+    if pair_line is not None:
+        idx = next(i for i, c in enumerate(ordered) if c is pair_line)
+        if idx > 1:
+            ordered.pop(idx)
+            ordered.insert(1, pair_line)
+    return ordered[:top_k]
+
+
 def best_immediate_play(
     hand: list[Card],
     jokers: list[Card],
@@ -483,16 +750,42 @@ def best_immediate_play(
     blind_chips: int = 0,
     *,
     search_orderings: bool = True,
+    prescreen_top_k: int | None = None,
 ) -> tuple[list[Card], ScoreResult]:
     """No discards being considered -- brute force over all non-empty
-    subsets of size <=5 (cheap: C(8,5)=56 worst case).
+    subsets of size <=5 (cheap: C(8,5)=56 worst case). Above
+    PRESCREEN_HAND_LIMIT cards, brute force is replaced by exact evaluation
+    of the prescreened template-derived candidates only (see
+    `prescreen_play_candidates`); `prescreen_top_k` overrides the module
+    default k there (None = PRESCREEN_TOP_K).
 
     `search_orderings` -- see `evaluate_value`; forwarded per subset."""
     best_subset: list[Card] | None = None
     best_result: ScoreResult | None = None
     n = len(hand)
-    for size in range(1, min(5, n) + 1):
-        for combo in itertools.combinations(hand, size):
+
+    if n > PRESCREEN_HAND_LIMIT:
+        flags = get_hand_eval_flags(jokers)
+        candidates = prescreen_play_candidates(
+            hand,
+            jokers,
+            hand_levels,
+            blind,
+            rng,
+            four_fingers=flags["four_fingers"],
+            shortcut=flags["shortcut"],
+            top_k=prescreen_top_k if prescreen_top_k is not None else PRESCREEN_TOP_K,
+            game_state=game_state,
+            blind_chips=blind_chips,
+        )
+        subset_pools: list = [candidates]
+    else:
+        subset_pools = [
+            itertools.combinations(hand, size) for size in range(1, min(5, n) + 1)
+        ]
+
+    for pool in subset_pools:
+        for combo in pool:
             # Identity-based, not `c not in combo` (value-equality): Card is
             # a plain @dataclass, so two genuinely distinct cards that
             # happen to have identical field values (e.g. an Erratic deck's
@@ -782,12 +1075,31 @@ def rank_templates_cheaply(
     four_fingers: bool = False,
     shortcut: bool = False,
     top_k: int = 4,
+    jokers: list[Card] | None = None,
+    game_state: dict | None = None,
+    blind_chips: int = 0,
+    joker_aware: bool = True,
 ) -> list[tuple[Template, list[Card], list[Card], list[Card], float, float, int]]:
     """Returns up to `top_k` (template, hold, kept, discard, p_reach,
-    cheap_value, still_needed) tuples, ranked by p_reach * cheap_value
-    using the jokerless `score_hand_base` (no engine joker loop, no
-    permutation search -- safe because base scoring is order-invariant
-    without jokers).
+    cheap_value, still_needed) tuples, ranked by p_reach * cheap_value.
+
+    RANKING FIDELITY (B7, user-locked 2026-07-14): when `jokers` is given
+    (and `joker_aware` is left on), cheap_value comes from one fixed-order
+    `score_hand` with the branch's honest held cards -- the same ranking
+    tier as the play prescreen. The historical jokerless/held-empty
+    `score_hand_base` path had the failure shape the prescreen fixed: a
+    joker- or held-favored line (Greedy's suit, Baron's held Kings) could
+    rank below its true value and never reach the exact hit/miss
+    recursion. Per-branch held = `kept` plus any (hold+completion)
+    overflow beyond the played 5; unknown replacement draws contribute
+    nothing (same representative-completion approximation tier). Only the
+    RANKING scorer changes -- reachability math and the exact recursion
+    valuation are untouched, so labels shift only where a different
+    template set gets explored.
+
+    `jokers=None` or `joker_aware=False` selects the old jokerless scorer
+    (kept as the comparison arm for `scripts/validate_discard_ranking.py`
+    and for legacy callers).
 
     `hold` contains only template-MATCHING cards (still_needed/eval math
     depends on that); `kept` is excess non-matches retained in hand because
@@ -831,16 +1143,24 @@ def rank_templates_cheaply(
             eval_cards = (hold + _best_completion_cards(deck, template, still_needed))[:5]
 
         # blind clone: see the note in evaluate_value -- this loop tries
-        # many candidate templates per decision, and score_hand_base
-        # mutates history-dependent boss state (The Eye/The Mouth) on every
+        # many candidate templates per decision, and the scorer mutates
+        # history-dependent boss state (The Eye/The Mouth) on every
         # hypothetical call, not just the eventually-chosen one.
-        cheap_result = score_hand_base(
-            eval_cards,
-            [],
-            _fast_clone_hand_levels(hand_levels),
-            _fast_clone_blind(blind),
-            _fast_clone_rng(rng),
-        )
+        if joker_aware and jokers is not None:
+            eval_ids = {id(c) for c in eval_cards}
+            branch_held = [c for c in list(hold) + kept if id(c) not in eval_ids]
+            cheap_result, _ = _ranking_score(
+                eval_cards, branch_held, jokers, hand_levels, blind, rng,
+                game_state, blind_chips,
+            )
+        else:
+            cheap_result = score_hand_base(
+                eval_cards,
+                [],
+                _fast_clone_hand_levels(hand_levels),
+                _fast_clone_blind(blind),
+                _fast_clone_rng(rng),
+            )
         scored.append((template, hold, kept, discard, p_reach, cheap_result.total, still_needed))
 
     scored.sort(key=lambda t: t[4] * t[5], reverse=True)
@@ -990,6 +1310,7 @@ def solve_hand_turn(
     shortcut: bool = False,
     top_k: int = 4,
     hand_size: int | None = None,
+    joker_aware: bool = True,
 ) -> AnteClearChoice:
     """Recursive discard-chain solver for ONE hand-turn. At every node:
     compare playing now (deterministic, exact) against discarding toward
@@ -1006,6 +1327,13 @@ def solve_hand_turn(
     shrinking deck as the discard chain progresses -- a documented
     simplification, since within one hand-turn the deck only changes by a
     handful of cards.
+
+    `joker_aware` selects the discard-shortlist ranker (B7): the default
+    True is production (joker/held-aware `rank_templates_cheaply`); False
+    forces the legacy jokerless/held-empty scorer at EVERY node and exists
+    only as the comparison arm for B7 validation and existence-proof tests.
+    It is threaded through the recursion so an old-vs-new full-solver
+    comparison differs at every shortlist cut, not just the root.
     """
     if hand_size is None:
         hand_size = len(hand)
@@ -1042,6 +1370,8 @@ def solve_hand_turn(
     candidates = rank_templates_cheaply(
         hand, deck, hand_levels, blind, rng,
         four_fingers=four_fingers, shortcut=shortcut, top_k=top_k,
+        jokers=jokers, game_state=game_state, blind_chips=blind_chips,
+        joker_aware=joker_aware,
     )
 
     for template, hold, kept, discard, p_reach, _cheap_val, still_needed in candidates:
@@ -1057,6 +1387,7 @@ def solve_hand_turn(
                 hit_hand, jokers, hand_levels, blind, rng, hit_deck, chips_needed,
                 hands_left, discards_left - 1, future_samples, game_state, blind_chips,
                 four_fingers=four_fingers, shortcut=shortcut, top_k=top_k, hand_size=hand_size,
+                joker_aware=joker_aware,
             )
             p_clear = hit_choice.p_clear
         else:
@@ -1067,6 +1398,7 @@ def solve_hand_turn(
                 hit_hand, jokers, hand_levels, blind, rng, hit_deck, chips_needed,
                 hands_left, discards_left - 1, future_samples, game_state, blind_chips,
                 four_fingers=four_fingers, shortcut=shortcut, top_k=top_k, hand_size=hand_size,
+                joker_aware=joker_aware,
             )
 
             miss_priority = _representative_miss_cards(deck, template, still_needed)
@@ -1076,6 +1408,7 @@ def solve_hand_turn(
                 miss_hand, jokers, hand_levels, blind, rng, miss_deck, chips_needed,
                 hands_left, discards_left - 1, future_samples, game_state, blind_chips,
                 four_fingers=four_fingers, shortcut=shortcut, top_k=top_k, hand_size=hand_size,
+                joker_aware=joker_aware,
             )
             p_clear = p_reach * hit_choice.p_clear + (1 - p_reach) * miss_choice.p_clear
 
@@ -1126,6 +1459,13 @@ def solve_hand_for_ante_clear(
         import zlib
 
         _rand_state[0] = zlib.crc32(mc_seed.encode()) & 0x7FFFFFFF or 12345
+    # B3: closed-form joker sort ONCE per hand-turn (subset-independent) --
+    # the whole solve (ranking tier, MC sampler, recursion) then runs under
+    # this order; the exact path additionally re-runs the copy-target
+    # argmax per candidate inside `evaluate_value`. The env commits plays
+    # under the same ordering (action_to_engine_action), so labels and
+    # execution agree.
+    jokers = best_joker_order(jokers)
     future_samples = estimate_future_hand_distribution(
         deck, jokers, hand_levels, blind, rng, len(hand),
         game_state=game_state, blind_chips=blind_chips, mc_seed=mc_seed,
