@@ -287,3 +287,105 @@ class TestStateSafety:
         assert [[id(c) for c in cards] for cards in first] == [
             [id(c) for c in cards] for cards in second
         ]
+
+
+class TestRankCombinationCandidates:
+    """B5 widening (2026-07-15): all 17/48 generation holes in the first
+    validation run were multi-rank-group combinations -- Two Pair from two
+    separate pairs, Full House from trips + pair -- which single-rank
+    templates plus nominal-priority kicker padding can never propose.
+    These pin the combination pass on hands modeled directly on the
+    observed holes (PRESCREEN_VAL_00000064 / _00000005 / _00000011)."""
+
+    def _fh_hand(self) -> list[Card]:
+        """9 cards: J-J trips-blocker shape from _00000064 -- 5-5-5 + J-J,
+        where high-card kickers (Q) would previously pad the trips."""
+        return [
+            _card(Suit.HEARTS, Rank.QUEEN),
+            _card(Suit.HEARTS, Rank.JACK),
+            _card(Suit.CLUBS, Rank.JACK),
+            _card(Suit.DIAMONDS, Rank.NINE),
+            _card(Suit.HEARTS, Rank.SEVEN),
+            _card(Suit.SPADES, Rank.SIX),
+            _card(Suit.SPADES, Rank.FIVE),
+            _card(Suit.HEARTS, Rank.FIVE),
+            _card(Suit.DIAMONDS, Rank.FIVE),
+        ]
+
+    def _two_pair_hand(self) -> list[Card]:
+        """11 cards from the _00000011 shape: 6-6 + 4-4 buried under
+        high-card kickers and a straight draw."""
+        return [
+            _card(Suit.HEARTS, Rank.ACE),
+            _card(Suit.DIAMONDS, Rank.KING),
+            _card(Suit.DIAMONDS, Rank.QUEEN),
+            _card(Suit.SPADES, Rank.JACK),
+            _card(Suit.HEARTS, Rank.JACK),
+            _card(Suit.SPADES, Rank.TEN),
+            _card(Suit.SPADES, Rank.SIX),
+            _card(Suit.CLUBS, Rank.SIX),
+            _card(Suit.SPADES, Rank.FOUR),
+            _card(Suit.CLUBS, Rank.FOUR),
+            _card(Suit.DIAMONDS, Rank.THREE),
+        ]
+
+    def test_full_house_candidate_generated(self):
+        hand_levels, blind, rng = _fixtures()
+        candidates = prescreen_play_candidates(
+            self._fh_hand(), [], hand_levels, blind, rng, top_k=8
+        )
+        fh = [
+            cards
+            for cards in candidates
+            if sorted(c.base.id for c in cards) in ([5, 5, 5, 11, 11],)
+        ]
+        assert fh, "trips+pair full house must be a generated candidate"
+
+    def test_full_house_beats_lone_trips(self):
+        # End to end: the exact pass must now pick the full house over the
+        # trips the old generator was limited to.
+        hand = self._fh_hand()
+        hand_levels, blind, rng = _fixtures()
+        _, result = best_immediate_play(hand, [], hand_levels, blind, rng)
+        assert result.total == _brute_force_best(hand, [])
+        assert result.hand_type == "Full House"
+
+    def test_two_pair_bare_candidate_generated(self):
+        # Jokerless, the padded variant ties the bare one (the kicker
+        # doesn't score), so the family pass keeps exactly one -- the bare
+        # set. The padded variant is pinned separately under Splash below.
+        hand_levels, blind, rng = _fixtures()
+        candidates = prescreen_play_candidates(
+            self._two_pair_hand(), [], hand_levels, blind, rng, top_k=8
+        )
+        combos = [sorted(c.base.id for c in cards) for cards in candidates]
+        assert [4, 4, 6, 6] in combos, "bare two pair (5th card held) missing"
+
+    def test_two_pair_padded_variant_survives_under_splash(self):
+        # Splash makes the kicker a scoring card, so padded two pair is a
+        # genuinely different (better) line than the bare set -- it must
+        # surface as its own candidate.
+        from jackdaw.engine.card_factory import create_joker
+
+        hand_levels, blind, rng = _fixtures()
+        candidates = prescreen_play_candidates(
+            self._two_pair_hand(),
+            [create_joker("j_splash")],
+            hand_levels,
+            blind,
+            rng,
+            top_k=8,
+        )
+        padded = [
+            sorted(c.base.id for c in cards)
+            for cards in candidates
+            if len(cards) == 5
+            and sorted(c.base.id for c in cards)[:4] == [4, 4, 6, 6]
+        ]
+        assert padded, "kicker-padded two pair missing under Splash"
+
+    def test_two_pair_matches_brute_force(self):
+        hand = self._two_pair_hand()
+        hand_levels, blind, rng = _fixtures()
+        _, result = best_immediate_play(hand, [], hand_levels, blind, rng)
+        assert result.total == _brute_force_best(hand, [])

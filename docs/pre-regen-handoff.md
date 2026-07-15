@@ -419,6 +419,27 @@ merge is built.
   the floor. Record the chosen k in CLAUDE.md.
 - If no k passes: raise k / widen families; if still failing, the prescreen design
   returns to review — do NOT ship a failing k because the schedule wants it.
+- **GENERATOR WIDENED + REVALIDATED 2026-07-15** (rode in on the B7 harness
+  session): reading the first validation run's per-hand data showed ALL 17/48
+  misses were GENERATION holes (`best_in_candidates=False` in every one, at
+  every k) of a single class — cross-rank-group combinations (Two Pair from
+  two separate pairs, Full House from trips + pair). Root cause: kicker
+  padding ranks INDIVIDUAL cards by nominal priority, so a second rank group
+  never wins a padding contest against a loose Ace — the docstring's claim
+  that FH/two-pair "emerge from padding" was false in practice. Fix: a
+  rank-combination pass in `prescreen_play_candidates` — every ordered pair
+  of 2+-card rank groups proposes 2+2 (bare AND kicker-padded; bare matters
+  when the 5th card is better held — Baron/Blackboard class) and 3+2 when a
+  group has trips. Revalidation (48 hands): best-in-cut 0.646 -> 0.958,
+  regret 0.0 on 44/48 MC-active states, stress regret f=1.0 0.12 -> 0.02 /
+  f=1.1 -> 0.0, wall-time cost ~free, minimal k still 3.
+  `PRESCREEN_TOP_K` raised 4 -> 5 (user call, preemptive margin).
+  **ACCEPTED RESIDUAL (user call 2026-07-15)**: 2/48 kicker-CHOICE misses
+  (right line, wrong kicker — keep-priority pads nominal-best where a joker
+  wants a suit/enhancement; ratios 0.92/0.71, measured regret 0.0). Named
+  lever if it ever matters: kicker VARIANTS per combination, not k.
+  Regression tests modeled on the failing hands:
+  `test_hand_solver_prescreen.py::TestRankCombinationCandidates`.
 
 ### B6 (CONDITIONAL on A3) — banked-discard credit in `estimate_future_hand_distribution`
 

@@ -508,19 +508,24 @@ class DiscardChoice:
 # residual bias -- see CLAUDE.md "Solver big-hand cost").
 #
 # PRESCREEN_TOP_K validated 2026-07-14 (`scripts/validate_prescreen.py`, 48
-# hands flat over sizes 9-12, stage3_full + hand-size tail): sampled-
-# distribution regret 0.0 at every tested k (3/5/8) vs noise floor 0.022,
-# and regret/best-in-cut-rate (0.646) are IDENTICAL across k -- misses live
-# in the candidate GENERATOR, not the cut depth, so the harness's minimal
-# passing k is 3; set to 4 as a user-called margin (one extra exact eval per
-# node is cheap). Boundary stress (synthetic blind at 1.0x the best play's
-# total, the adversarial placement): mean 0.12 p_clear, dropping to
-# 0.02-0.03 at 1.1-1.5x -- residual covered by the documented
-# PPO-against-the-real-game corrector. If that exposure ever needs
-# shrinking, the lever is candidate generation (template variants/padding
-# combos), not k. Full report: data/prescreen_validation.json.
+# hands flat over sizes 9-12, stage3_full + hand-size tail) and REVALIDATED
+# 2026-07-15 after the rank-combination generator widening (all 17/48
+# generation holes were cross-rank-group lines -- two pair / full house --
+# that single-rank templates + nominal-priority kicker padding could never
+# propose; see the combination pass in prescreen_play_candidates):
+# best-in-cut rate 0.646 -> 0.958, regret 0.0 at every tested k on 44/48
+# MC-active states vs noise floor 0.022, boundary-stress regret 0.12 ->
+# 0.02 at f=1.0 (the knife-edge placement) and -> 0.0 at f=1.1. Minimal
+# passing k is 3 both times; set to 5 as a user-called margin (2026-07-15,
+# preemptive headroom after the widening). KNOWN ACCEPTED RESIDUAL (user
+# call 2026-07-15): 2/48 kicker-CHOICE misses remain (right line, wrong
+# kicker -- keep-priority pads a nominal-best card where a joker values a
+# specific suit/rank; ratios 0.92/0.71, measured regret 0.0). The named
+# lever if it ever matters: kicker VARIANTS per combination (per-suit /
+# per-enhancement alternatives), not k. Full report:
+# data/prescreen_validation.json.
 PRESCREEN_HAND_LIMIT = 8
-PRESCREEN_TOP_K = 4
+PRESCREEN_TOP_K = 5
 
 # Realized hand types that count as an in-hand rank line for the pair pin
 # (see prescreen_play_candidates): complete now, zero draw risk.
@@ -645,11 +650,39 @@ def prescreen_play_candidates(
         playable = sorted(hold, key=_keep_priority, reverse=True)[:5]
         raw.append(playable)
         if len(playable) < 5:
-            # Padded variant: pair+kickers, and the ONLY route to lines no
-            # template proposes directly (full house / two pair emerge from
-            # a rank hold padded with another held rank's cards).
+            # Padded variant: pair+kickers. (Historically claimed to also
+            # cover full house / two pair "emerging" from a rank hold padded
+            # with another rank's cards -- FALSE in practice: padding picks
+            # kickers by nominal priority, so the second rank group is only
+            # chosen when it happens to outrank every loose high card. All
+            # 17/48 generation holes in the B5 validation were exactly the
+            # missing combinations; see the rank-combination pass below.)
             raw.append(_kicker_pad(playable))
     raw.append(_kicker_pad([]))  # template-free fallback
+
+    # Rank-line COMBINATIONS (B5 widening, 2026-07-15): two pair and full
+    # house are cross-GROUP lines no single-rank template can propose.
+    # Enumerate ordered pairs of multi-card rank groups: 2+2 (two pair,
+    # bare and kicker-padded -- the bare variant matters when the 5th card
+    # is better held: Baron/Blackboard-class held effects) and 3+2 (full
+    # house, from either group's trips side). Within-group card choice by
+    # keep-priority (enhancement-aware); dedup + the family pass absorb
+    # the overlap.
+    rank_groups: dict[object, list[Card]] = {}
+    for c in hand:
+        if c.base is not None:
+            rank_groups.setdefault(c.base.id, []).append(c)
+    multi = [
+        sorted(g, key=_keep_priority, reverse=True)
+        for g in rank_groups.values()
+        if len(g) >= 2
+    ]
+    for g1, g2 in itertools.permutations(multi, 2):
+        two_pair = g1[:2] + g2[:2]
+        raw.append(two_pair)
+        raw.append(_kicker_pad(list(two_pair)))
+        if len(g1) >= 3:
+            raw.append(g1[:3] + g2[:2])  # full house
 
     # Dedup by card-identity set (padded variants of different templates
     # frequently coincide), cheap-score survivors on CLONES -- score_hand
