@@ -1310,6 +1310,7 @@ def solve_hand_turn(
     shortcut: bool = False,
     top_k: int = 4,
     hand_size: int | None = None,
+    joker_aware: bool = True,
 ) -> AnteClearChoice:
     """Recursive discard-chain solver for ONE hand-turn. At every node:
     compare playing now (deterministic, exact) against discarding toward
@@ -1326,6 +1327,13 @@ def solve_hand_turn(
     shrinking deck as the discard chain progresses -- a documented
     simplification, since within one hand-turn the deck only changes by a
     handful of cards.
+
+    `joker_aware` selects the discard-shortlist ranker (B7): the default
+    True is production (joker/held-aware `rank_templates_cheaply`); False
+    forces the legacy jokerless/held-empty scorer at EVERY node and exists
+    only as the comparison arm for B7 validation and existence-proof tests.
+    It is threaded through the recursion so an old-vs-new full-solver
+    comparison differs at every shortlist cut, not just the root.
     """
     if hand_size is None:
         hand_size = len(hand)
@@ -1363,6 +1371,7 @@ def solve_hand_turn(
         hand, deck, hand_levels, blind, rng,
         four_fingers=four_fingers, shortcut=shortcut, top_k=top_k,
         jokers=jokers, game_state=game_state, blind_chips=blind_chips,
+        joker_aware=joker_aware,
     )
 
     for template, hold, kept, discard, p_reach, _cheap_val, still_needed in candidates:
@@ -1378,6 +1387,7 @@ def solve_hand_turn(
                 hit_hand, jokers, hand_levels, blind, rng, hit_deck, chips_needed,
                 hands_left, discards_left - 1, future_samples, game_state, blind_chips,
                 four_fingers=four_fingers, shortcut=shortcut, top_k=top_k, hand_size=hand_size,
+                joker_aware=joker_aware,
             )
             p_clear = hit_choice.p_clear
         else:
@@ -1388,6 +1398,7 @@ def solve_hand_turn(
                 hit_hand, jokers, hand_levels, blind, rng, hit_deck, chips_needed,
                 hands_left, discards_left - 1, future_samples, game_state, blind_chips,
                 four_fingers=four_fingers, shortcut=shortcut, top_k=top_k, hand_size=hand_size,
+                joker_aware=joker_aware,
             )
 
             miss_priority = _representative_miss_cards(deck, template, still_needed)
@@ -1397,6 +1408,7 @@ def solve_hand_turn(
                 miss_hand, jokers, hand_levels, blind, rng, miss_deck, chips_needed,
                 hands_left, discards_left - 1, future_samples, game_state, blind_chips,
                 four_fingers=four_fingers, shortcut=shortcut, top_k=top_k, hand_size=hand_size,
+                joker_aware=joker_aware,
             )
             p_clear = p_reach * hit_choice.p_clear + (1 - p_reach) * miss_choice.p_clear
 

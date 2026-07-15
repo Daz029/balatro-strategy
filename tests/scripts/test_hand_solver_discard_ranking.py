@@ -22,7 +22,14 @@ docs/pre-regen-handoff.md).
 
 from __future__ import annotations
 
-from hand_solver import DeckComposition, rank_templates_cheaply
+import numpy as np
+
+from hand_solver import (
+    DeckComposition,
+    best_immediate_play,
+    rank_templates_cheaply,
+    solve_hand_turn,
+)
 
 from jackdaw.engine.blind import Blind
 from jackdaw.engine.card import Card
@@ -126,6 +133,83 @@ class TestOldScorerEscapeHatch:
     def test_legacy_positional_call_unchanged(self):
         # Old call shape (no joker kwargs at all) must keep working.
         assert self._outputs() == self._outputs(jokers=None)
+
+
+class TestFullSolverExistenceProof:
+    """The RANKING-flip tests above prove the box reorders; these prove the
+    flip changes the EMITTED discard through the whole `solve_hand_turn`
+    recursion AND that the new discard is genuinely better -- judged by a
+    FAITHFUL Monte Carlo model, because the solver's own value model cannot
+    see it. A still_needed==0 line (discard around trip Kings) refills to a
+    monster via optimistic filler and saturates at p_clear=1.0, so the solver
+    ties it with Greedy's flush line even though real draws make the flush
+    strictly better. This is the whole reason B7 needs an external arbiter."""
+
+    def _discard_ids(self, choice) -> frozenset[int]:
+        return frozenset(id(c) for c in choice.discard)
+
+    def _emit(self, hand, jokers, deck, hand_levels, blind, rng, chips, *, top_k, discards_left, joker_aware):
+        return solve_hand_turn(
+            hand, jokers, hand_levels, blind, rng, deck, chips,
+            1, discards_left, [], None, 0,
+            top_k=top_k, hand_size=len(hand), joker_aware=joker_aware,
+        )
+
+    def test_greedy_flip_is_faithfully_better_d1(self):
+        from validate_discard_ranking import (
+            _action_key,
+            _deck_pool,
+            _value_at,
+            faithful_totals,
+        )
+
+        hand = _diamond_draw_vs_trips_hand()
+        jokers = [create_joker("j_greedy_joker")]
+        deck = _full_deck_minus(hand)
+        hand_levels, blind, rng = _fixtures()
+        play_now = best_immediate_play(hand, jokers, hand_levels, blind, rng)[1].total
+        chips = play_now * 1.5  # above play-now -> the label must be a discard
+
+        old = self._emit(hand, jokers, deck, hand_levels, blind, rng, chips, top_k=1, discards_left=1, joker_aware=False)
+        new = self._emit(hand, jokers, deck, hand_levels, blind, rng, chips, top_k=1, discards_left=1, joker_aware=True)
+
+        # B7 flips the emitted discard toward Greedy's flush line.
+        assert new.template_name == "flush_Diamonds"
+        assert old.template_name != "flush_Diamonds"
+        assert self._discard_ids(new) != self._discard_ids(old)
+
+        # The solver's own model does NOT prefer the new action (optimistic
+        # refill saturates both) -- so faithful judgment is necessary.
+        assert new.p_clear <= old.p_clear + 1e-9
+
+        # Faithful MC over real draws: the flush line clears strictly more
+        # often than the trips-refill line somewhere above play-now.
+        pool = _deck_pool(deck)
+
+        def totals(choice, tag):
+            return faithful_totals(
+                hand=hand, discard_key=_action_key(hand, choice.discard), jokers=jokers,
+                hand_levels=hand_levels, blind=blind, rng=rng, pool=pool,
+                game_state=None, blind_chips=0, n_samples=200, mc_seed=f"ex:{tag}",
+            )
+
+        new_tot, old_tot = totals(new, "new"), totals(old, "old")
+        pooled = new_tot + old_tot
+        goals = [g for g in np.quantile(pooled, [0.5, 0.7, 0.85, 0.95]) if g > play_now]
+        gaps = [_value_at(new_tot, g) - _value_at(old_tot, g) for g in goals]
+        assert max(gaps) > 0.05, f"faithful gaps {gaps} do not favor the flush line"
+
+    def test_greedy_flip_threads_through_recursion_d2(self):
+        # Two discards remaining: the joker_aware flag must reach the deeper
+        # shortlist cut, not just the root, for new to still emit the flush.
+        hand = _diamond_draw_vs_trips_hand()
+        jokers = [create_joker("j_greedy_joker")]
+        deck = _full_deck_minus(hand)
+        hand_levels, blind, rng = _fixtures()
+        play_now = best_immediate_play(hand, jokers, hand_levels, blind, rng)[1].total
+        new = self._emit(hand, jokers, deck, hand_levels, blind, rng, play_now * 1.5, top_k=1, discards_left=2, joker_aware=True)
+        assert new.action == "discard"
+        assert new.template_name == "flush_Diamonds"
 
 
 class TestStateSafety:

@@ -84,12 +84,13 @@ Hard rules:
   real consumable block); `build_observation_v2` / `observation_space_v2` as a
   VERSIONED SEAM in `hand_play_gym.py` (v1 stays byte-identical and the
   `HandPlayGymEnv` default — `obs_version=2` opt-in — so every h0.5 consumer
-  and A3 keep working); `train_bc.py` loads v2 only (v1 = pre-regen data,
-  rejected loudly) with a width-generic axis-1 up-pad covering the 4-D
-  trigger_match. Decisions made while building:
-  - **v2 IS NOT FROZEN until B4 lands** — B4 amends the same version number
-    (index-set labels, actual-width hand blocks). Do not generate v2 datasets
-    in the gap (documented at the constant).
+  and A3 keep working); `train_bc.py` originally loaded v2 only (v1 =
+  pre-regen data, rejected loudly) with a width-generic axis-1 up-pad
+  covering the 4-D trigger_match. Decisions made while building:
+  - **v2 was NOT FROZEN until B4 landed.** B4 promotes the completed shard
+    schema to **v3**: index-set labels replace the v2 card-target mask and
+    hand blocks retain their actual shard width. Do not generate v2 datasets
+    from the gap; the loader rejects v1/v2 loudly.
   - **Consumable block = 8 PER-INSTANCE rows in engine slot order**
     (`MAX_CONSUMABLES_V2`), tail-truncating: 2 (the v1 dormant width) is too
     narrow for harvested states (Crystal Ball = 3 slots; Perkeo negatives
@@ -164,9 +165,36 @@ Hard rules:
   - Solver cost with prescreen: 0.7–10.4s full labels at hand sizes
     12–17 (within the ~12s/example budget; unprescreened n=14 is ~3.5k
     exact evals per recursion node).
-- **B3–B4, B7, C1–C2** — not started. **B6 — SKIPPED, citing A3** (the
-  conjunction failed on attribution; do not build it without a NEW
-  fingerprint showing teacher-mirroring over-discarding).
+- **B5 addendum — GENERATOR WIDENED, k=5 (2026-07-15):** all 17/48 misses
+  were cross-rank-group generation holes (two pair / full house never
+  proposed); rank-combination pass added, revalidated best-in-cut
+  0.646 → 0.958, regret 0.0; 2 kicker-choice misses ACCEPTED (user call).
+  Full record at the B5 spec below.
+- **B3 — DONE (2026-07-15,** same slice-4 branch): `best_joker_order` +
+  classification + `objective` hook in `play_ordering.py`; env mutation in
+  `action_to_engine_action`; solver entry sort + per-candidate copy argmax
+  in `evaluate_value`; brute-force-validated on constructed boards; 25 new
+  tests. Full decision record at the B3 spec below.
+- **B7 — code + tests DONE; validation REDESIGNED to faithful-MC
+  (2026-07-15).** A diagnostic showed the solver's own value model CANNOT
+  judge B7 (optimistic `_fill_hand_to_size` refill saturates the flipped-away
+  branch at p_clear=1.0), so both the final-p_clear and shortlist-coverage
+  harnesses were dead ends. New gate: disagreement-filtered, faithful Monte
+  Carlo over real redraws, paired best-in-box, adaptive goal-line sweep, MC
+  noise floor; `solve_hand_turn` gained a `joker_aware` comparison arm;
+  constructed full-solver existence proofs (Greedy flip, faithfully better)
+  are now the primary argument. 7/7 tests green; the ~200-state 9600X run is
+  the remaining gate. Full record below.
+- **B4 — DONE** (2026-07-15): shard schema v3 stores `(5,)` ascending
+  `card_indices` with `-1` padding, replacing the width-bound mask; demo
+  hand blocks are actual-width and the loader up-pads them to the width-40
+  observation. Loader validation hard-fails malformed/unsorted/duplicate,
+  out-of-hand-mask, empty, or budget-illegal labels. Wide labels remain in
+  the dataset; the legacy flat trainer rejects them explicitly until the
+  Candidate-B pointer trainer consumes the index sequence. Tier 1 is
+  schema-native and the pinned position-8 synthetic hand executes through
+  Tier 2. **C1–C2 — not started. B6 — SKIPPED, citing A3** (the conjunction failed on attribution; do not build it
+  without a NEW fingerprint showing teacher-mirroring over-discarding).
 
 ## Task specifications
 
@@ -476,20 +504,76 @@ size (the discard path runs at n<=8 too), so it must land before C2/regen.
   safety).
 - The completion-card hypothetical (`_best_completion_cards`) stays — only
   the SCORER upgrades, not the reachability math.
-- Validation (`scripts/validate_discard_ranking.py`, BUILT 2026-07-14,
-  run pending — results to be recorded here): samples discard-rich states
-  (discards>=2, jokers present), solves each with new vs old ranking
-  under the SAME mc_seed (identical future samples), compares the claimed
-  p_clear of the chosen action (an honest max over the explored branch
-  set under identical valuation); floor = same-arm MC-reseed spread.
-  Accept mean delta >= -1.33 x floor (better information should give
-  delta >= 0; materially negative = the new ranking steers into worse
-  branches — do not ship, investigate; the discard-cap bug class lives
-  exactly here).
-- Cost check rides the same harness (per-arm mean solve seconds; budget
-  is the ~12s/example regen envelope). NOTE the runtime tail is dominated
-  by pre-existing exact-path costs (order-sensitive jokers ->
-  permutation search), equal in both arms.
+- **Validation design REPLACED TWICE.** (1) The original old-vs-new
+  final-`p_clear` compare tested the shared outer solver (the max
+  saturates once either ranker keeps a certain-clear branch). (2) The
+  2026-07-15 shortlist-coverage replacement was itself discarded after a
+  30-state run and a diagnostic exposed a deeper flaw — see below.
+- **THE FINDING (2026-07-15): the solver cannot judge B7 with its own
+  value model.** A discard branch is valued by the two-point representative
+  hit/miss recursion, and the "hit" hand is refilled by `_fill_hand_to_size`
+  with the HIGHEST-remaining-rank optimistic filler. A `still_needed==0`
+  branch (e.g. discard around trip Kings) therefore refills to a monster and
+  clears EVERY goal line — its p_clear pins at 1.0. When B7 flips the emitted
+  discard from that trips-refill line to a joker-favored flush line, BOTH read
+  p_clear=1.0: the solver records a different, genuinely better ACTION but is
+  structurally blind to the improvement. Any metric built on the solver's own
+  recursion reads ~0 (and can read a FALSE regression, since the optimistic
+  refill pins the old box at 1.0). The 30-state shortlist-coverage run
+  ("new loses rank-2/3 coverage, rank-1 100%/100%, regret 0/0") was exactly
+  this artifact — and its rank-2/3 / reach-bucket metrics measured the
+  NON-argmax tail the solver's `max` discards, which is not label-relevant.
+- **New gate = FAITHFUL Monte Carlo, disagreement-filtered, paired.**
+  `scripts/validate_discard_ranking.py`, rewritten 2026-07-15.
+  - *Box-set agreement ⟹ identical label.* Verified `solve_hand_turn`
+    iterates all `top_k` with a strict-`>` max and no order-dependent early
+    exit, so B7 can only move a label where the old (jokerless) and new
+    (joker/held-aware) top-k SETS differ. Disagreement is a cheap two-pass
+    filter (the box is chosen by `cheap_value`, goal-line-independent);
+    agreement states are recorded exactly-zero and never valued.
+  - *Faithful ground truth.* Value each candidate discard by REAL random
+    redraws from the deck — discard, draw, `best_immediate_play`, fraction
+    clearing — NOT the solver's optimistic recursion. Real draws de-saturate
+    the trips-refill line (random draws rarely make a monster) while the
+    flush completes at its true probability and the joker mult carries it.
+  - *Paired best-in-box.* Report `best_in_new_box − best_in_old_box`; the
+    global-best term cancels, so only `old_box ∪ new_box` is valued.
+    Absolute regret vs ALL template branches is a B5 (generator-coverage)
+    question, deliberately out of scope.
+  - *Adaptive goal-line sweep.* `hands_left` AND `discards_left` forced to 1
+    (one discard node, valued exactly as `P(best play ≥ chips_needed)`; no
+    downstream solver model). Per-draw best-play totals are goal-line-
+    independent, so sample ONCE per action and threshold for free. Goal
+    lines = quantiles of the pooled achievable totals ABOVE the best
+    play-now `P` (below `P` the label is not a discard). This adapts the
+    band to each state's real reachable range — the "adaptive goal line"
+    the flat sampled blind never provides.
+  - *MC-reseed noise floor* (yes, it is needed — faithful values are MC;
+    an earlier note claiming the `hands_left=1` isolation removed all MC
+    was WRONG: it removes the FUTURE-HAND boundary, but the redraw MC is the
+    whole point). A separate n≤8 pass reseeds the best action; a state
+    counts as a B7 win only if `max_help > accept_factor × floor`; a
+    `min_paired < −floor` is a real regression (the safety gate).
+- **`solve_hand_turn` gains `joker_aware: bool = True`** threaded through the
+  recursion (default = production). It is the comparison arm: the constructed
+  existence proofs toggle it to get the two arms' EMITTED discards, then judge
+  which is better by faithful MC.
+- **Existence proofs are the PRIMARY argument** (not the aggregate):
+  `tests/scripts/test_hand_solver_discard_ranking.py::TestFullSolverExistenceProof`
+  — a constructed Greedy board where the full solver's emitted discard flips
+  jokerless→joker-aware toward `flush_Diamonds`; the solver's own p_clear does
+  NOT prefer it (`new.p_clear ≤ old.p_clear` — the saturation documented);
+  faithful MC (200 draws) shows the flush clears >5pts more often above
+  play-now; a d=2 variant pins the `joker_aware` threading through one level
+  of recursion. B7 is a consistency/correctness fix (mirror the B5 play
+  prescreen) — the aggregate answers how-often / does-it-regress, and is NOT
+  expected to show large lift (argmax is robust; the effect is rare-but-real).
+- **Status:** code + all 7 discard-ranking tests green; harness plumbing
+  smoke (3 states, n_samples=20) completes and emits valid JSON. The real
+  gate is a background/9600X run (`--n-states ~200 --n-samples ~80`) —
+  headline numbers = disagreement rate, `frac_helped` above floor, and
+  `n_regressions_below_floor` (must be 0). Do not read the tiny smoke as the
+  gate.
 
 ### C1 — selection script → manifest (new, small)
 
