@@ -512,8 +512,8 @@ forces a second regen.
   block), `build_observation_v2`/`observation_space_v2` as a VERSIONED SEAM
   (v1 stays byte-identical and the env default per the h0.5 sequencing flag;
   flips only at h1 BC/PPO), v2-only BC loader with width-generic up-pad.
-  Slice-4 decisions: v2 NOT frozen until B4 (B4 amends the same version —
-  no v2 datasets in the gap); consumable block = 8 PER-INSTANCE rows in
+  Slice-4 decisions: v2 NOT frozen until B4 (B4 promotes the completed
+  schema to v3 — no v2 datasets in the gap); consumable block = 8 PER-INSTANCE rows in
   engine slot order, tail-truncating (Crystal Ball=3 slots, Perkeo
   negatives unbounded; stacked type+count rows REJECTED — row index must
   stay engine slot index for h2 UseConsumable addressing, and stacking
@@ -553,7 +553,15 @@ forces a second regen.
   hatch); its old-vs-new validation run
   (`scripts/validate_discard_ranking.py`) must ACCEPT before any label
   generation — record the result at the B7 spec in the handoff doc.
-  Next: B3, B4, B7 validation run.
+  B4 DONE (2026-07-15): v3 shards write actual-width hand blocks and
+  `(5,)` ascending `card_indices` labels padded with `-1`; loader up-pads
+  cards/trigger matches to width 40 and hard-validates label canonicality,
+  hand-mask bounds, and action budgets. The legacy flat BC trainer rejects
+  wide labels explicitly pending Candidate B, rather than dropping them.
+  Verification: Ruff + 64 generator/solver/env B4 tests pass in the native
+  WSL environment; the torch-dependent `test_train_bc.py` loader suite is
+  pending a native CPU Torch install.
+  Next: B7 validation run, then C1 after all B gates are complete.
 
 ### h1 architecture — Candidate B COMMITTED (autoregressive pointer head)
 

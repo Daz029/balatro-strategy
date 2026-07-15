@@ -51,9 +51,10 @@ if str(_REPO_ROOT) not in sys.path:
 import torch  # noqa: E402
 
 from jackdaw.agents.hand_action_space import (  # noqa: E402
+    MAX_HAND_CARDS,
     NUM_HAND_ACTIONS,
+    combo_to_action,
     legal_action_mask,
-    mask_to_action,
 )
 from jackdaw.agents.hand_policy import HandPlayBCModel  # noqa: E402
 from jackdaw.env.hand_play_gym import (  # noqa: E402
@@ -62,11 +63,12 @@ from jackdaw.env.hand_play_gym import (  # noqa: E402
     observation_space_v2,
 )
 
-# v2 = the h1 schema bump (B2 slice 4; see scripts/generate_hand_demos.py
-# SCHEMA_VERSION). v1 shards are pre-regen data and are REJECTED: their
-# feature layout (15-wide hand cards, 235-wide GC, no trigger-match /
-# copy-resolution / consumable arrays) no longer matches the model inputs.
-EXPECTED_SCHEMA_VERSION = 2
+# v3 = v2's h1 observation bump plus B4's width-independent, canonical
+# card-index labels. v1/v2 shards are pre-regen data and are REJECTED: their
+# feature/label layouts no longer match this loader.
+EXPECTED_SCHEMA_VERSION = 3
+MAX_LABEL_CARDS = 5
+LABEL_PAD_VALUE = -1
 
 # Indices of hands_left / discards_left in the global context vector
 # (scalars block, see observation.py encode_global_context: v[13], v[14],
@@ -80,7 +82,9 @@ class DemoDataset:
     """All demo examples in memory as tensors (26k examples ~ 40 MB)."""
 
     obs: dict[str, torch.Tensor]  # each (N, ...)
-    actions: torch.Tensor  # (N,) long — canonical action indices
+    action_types: torch.Tensor  # (N,) long — PlayHand/Discard
+    card_indices: torch.Tensor  # (N, 5) long — ascending, -1 padded
+    actions: torch.Tensor  # (N,) legacy flat-head action, -1 if hand index >= 8
     legal_masks: torch.Tensor  # (N, NUM_HAND_ACTIONS) bool
     p_clear: torch.Tensor  # (N,) float
     sample_weights: torch.Tensor  # (N,) float — per-stage weighting
@@ -92,6 +96,8 @@ class DemoDataset:
     def slice(self, idx: torch.Tensor) -> DemoDataset:
         return DemoDataset(
             obs={k: v[idx] for k, v in self.obs.items()},
+            action_types=self.action_types[idx],
+            card_indices=self.card_indices[idx],
             actions=self.actions[idx],
             legal_masks=self.legal_masks[idx],
             p_clear=self.p_clear[idx],
@@ -132,6 +138,65 @@ def _reconstruct_legal_mask(global_context: np.ndarray, hand_mask: np.ndarray) -
     return legal_action_mask(hand_size, hands_left, discards_left)
 
 
+def _validate_index_label(
+    action_type: int,
+    card_indices: np.ndarray,
+    hand_mask: np.ndarray,
+    global_context: np.ndarray,
+    shard_path: Path,
+    example_index: int,
+) -> tuple[tuple[int, ...], bool]:
+    """Validate one B4 index-set label and report legacy flat-head support.
+
+    The v3 shard contract deliberately has no fixed action-width dependency:
+    its five index slots describe the engine action directly. The current
+    flat 436-action training path is retained only as a transition aid; it
+    cannot represent an index >= 8 and is marked unavailable for those rows
+    rather than dropping or remapping them.
+    """
+    raw_label = np.asarray(card_indices)
+    if not np.issubdtype(raw_label.dtype, np.integer):
+        raise ValueError(
+            f"{shard_path}: example {example_index} card_indices must have an integer dtype"
+        )
+    label = raw_label.astype(np.int64, copy=False)
+    if label.shape != (MAX_LABEL_CARDS,):
+        raise ValueError(
+            f"{shard_path}: example {example_index} card_indices shape {label.shape} "
+            f"!= ({MAX_LABEL_CARDS},)"
+        )
+    padding = label == LABEL_PAD_VALUE
+    if np.any(label < LABEL_PAD_VALUE) or (padding.any() and not padding[padding.argmax() :].all()):
+        raise ValueError(
+            f"{shard_path}: example {example_index} card_indices must use trailing -1 padding"
+        )
+    selected = tuple(int(index) for index in label[~padding])
+    if not 1 <= len(selected) <= MAX_LABEL_CARDS:
+        raise ValueError(
+            f"{shard_path}: example {example_index} card_indices must select 1-5 cards"
+        )
+    if tuple(sorted(selected)) != selected or len(set(selected)) != len(selected):
+        raise ValueError(
+            f"{shard_path}: example {example_index} card_indices must be unique and sorted"
+        )
+    if action_type not in (0, 1):
+        raise ValueError(
+            f"{shard_path}: example {example_index} has unknown action_type {action_type}"
+        )
+    if any(index >= len(hand_mask) or not hand_mask[index] for index in selected):
+        raise ValueError(
+            f"{shard_path}: example {example_index} card_indices outside its hand_mask"
+        )
+
+    hands_left = int(round(float(global_context[_GC_HANDS_LEFT_IDX]) * 10))
+    discards_left = int(round(float(global_context[_GC_DISCARDS_LEFT_IDX]) * 10))
+    if action_type == 0 and hands_left < 1:
+        raise ValueError(f"{shard_path}: example {example_index} PlayHand label is illegal")
+    if action_type == 1 and discards_left < 1:
+        raise ValueError(f"{shard_path}: example {example_index} Discard label is illegal")
+    return selected, max(selected) < MAX_HAND_CARDS
+
+
 def load_dataset(data_dirs: list[Path], stage_weights: dict[str, float]) -> DemoDataset:
     """Load and pool every shard from the given stage directories.
 
@@ -157,6 +222,8 @@ def load_dataset(data_dirs: list[Path], stage_weights: dict[str, float]) -> Demo
     hand_axis_keys = ("hand_cards", "hand_mask", "trigger_match")
     consumable_axis_keys = ("consumables", "consumable_mask")
     actions: list[np.ndarray] = []
+    action_types: list[np.ndarray] = []
+    card_indices: list[np.ndarray] = []
     legal_masks: list[np.ndarray] = []
     p_clear: list[np.ndarray] = []
     weights: list[np.ndarray] = []
@@ -182,20 +249,36 @@ def load_dataset(data_dirs: list[Path], stage_weights: dict[str, float]) -> Demo
                 elif key in consumable_axis_keys:
                     arr = _pad_entity_width(arr, MAX_CONSUMABLES_V2, shard_path, key)
                 obs_parts[key].append(arr)
-            shard_actions = np.array(
-                [
-                    mask_to_action(int(shard["action_type"][i]), shard["card_target_mask"][i])
-                    for i in range(n)
-                ],
-                dtype=np.int64,
-            )
+            shard_action_types = np.asarray(shard["action_type"], dtype=np.int64)
+            shard_card_indices = np.asarray(shard["card_indices"])
+            if shard_card_indices.shape != (n, MAX_LABEL_CARDS):
+                raise ValueError(
+                    f"{shard_path}: card_indices shape {shard_card_indices.shape} "
+                    f"!= ({n}, {MAX_LABEL_CARDS})"
+                )
+            selected_labels: list[tuple[int, ...]] = []
+            flat_compatible = np.zeros(n, dtype=bool)
+            for i in range(n):
+                selected, flat_compatible[i] = _validate_index_label(
+                    int(shard_action_types[i]),
+                    shard_card_indices[i],
+                    shard["hand_mask"][i],
+                    shard["global_context"][i],
+                    shard_path,
+                    i,
+                )
+                selected_labels.append(selected)
+            shard_actions = np.full(n, -1, dtype=np.int64)
+            for i, selected in enumerate(selected_labels):
+                if flat_compatible[i]:
+                    shard_actions[i] = combo_to_action(int(shard_action_types[i]), selected)
             shard_legal = np.stack(
                 [
                     _reconstruct_legal_mask(shard["global_context"][i], shard["hand_mask"][i])
                     for i in range(n)
                 ]
             )
-            illegal_labels = ~shard_legal[np.arange(n), shard_actions]
+            illegal_labels = flat_compatible & ~shard_legal[np.arange(n), shard_actions]
             if illegal_labels.any():
                 bad = shard["seed"][illegal_labels][:3]
                 raise ValueError(
@@ -203,6 +286,8 @@ def load_dataset(data_dirs: list[Path], stage_weights: dict[str, float]) -> Demo
                     f"their reconstructed masks (e.g. {bad}) -- dataset/code drift"
                 )
             actions.append(shard_actions)
+            action_types.append(shard_action_types)
+            card_indices.append(shard_card_indices)
             legal_masks.append(shard_legal)
             p_clear.append(shard["p_clear"])
             weights.append(np.full(n, stage_weight, dtype=np.float32))
@@ -221,6 +306,8 @@ def load_dataset(data_dirs: list[Path], stage_weights: dict[str, float]) -> Demo
     }
     return DemoDataset(
         obs=obs,
+        action_types=torch.as_tensor(np.concatenate(action_types)),
+        card_indices=torch.as_tensor(np.concatenate(card_indices)),
         actions=torch.as_tensor(np.concatenate(actions)),
         legal_masks=torch.as_tensor(np.concatenate(legal_masks)),
         p_clear=torch.as_tensor(np.concatenate(p_clear), dtype=torch.float32),
@@ -315,6 +402,11 @@ def train(
     metadata_extra: dict | None = None,
 ) -> Path:
     """Run BC training; returns the path of the saved checkpoint."""
+    if (dataset.actions < 0).any():
+        raise ValueError(
+            "dataset contains hand indices >= 8; the legacy flat-head BC trainer cannot "
+            "represent B4 labels. Train with the Candidate-B pointer decoder instead."
+        )
     device = torch.device(
         ("cuda" if torch.cuda.is_available() else "cpu") if device_str == "auto" else device_str
     )

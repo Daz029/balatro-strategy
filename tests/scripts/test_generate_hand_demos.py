@@ -17,7 +17,6 @@ import numpy as np
 import pytest
 from generate_hand_demos import (
     DEFAULT_COUNT_BANDS,
-    MAX_HAND_CARDS,
     MAX_JOKERS,
     STAGE2_JOKER_POOL,
     Example,
@@ -40,6 +39,8 @@ from jackdaw.env.hand_play_adapter import HandPlayConfig
 from jackdaw.env.hand_play_gym import MAX_CONSUMABLES_V2
 from jackdaw.env.observation import D_CONSUMABLE, D_HAND_CARD, D_HAND_GLOBAL
 
+HAND_WIDTH = 8
+
 
 def _cards(n: int) -> list:
     ranks = list(Rank)
@@ -47,7 +48,7 @@ def _cards(n: int) -> list:
     return [create_playing_card(suits[i % 4], ranks[i % len(ranks)]) for i in range(n)]
 
 
-def _example_extras() -> dict:
+def _example_extras(hand_width: int = HAND_WIDTH) -> dict:
     """The v2 arrays every Example carries. Synthetic-Example tests keep
     using tiny shapes for the float blocks they assert on; these just need
     to exist and round-trip."""
@@ -55,7 +56,7 @@ def _example_extras() -> dict:
         joker_ids=np.zeros(MAX_JOKERS, dtype=np.int64),
         copy_active=np.zeros(MAX_JOKERS, dtype=np.float32),
         copy_target_ids=np.zeros(MAX_JOKERS, dtype=np.int64),
-        trigger_match=np.zeros((MAX_HAND_CARDS, MAX_JOKERS, 2), dtype=bool),
+        trigger_match=np.zeros((hand_width, MAX_JOKERS, 2), dtype=bool),
         consumables=np.zeros((MAX_CONSUMABLES_V2, D_CONSUMABLE), dtype=np.float32),
         consumable_mask=np.zeros(MAX_CONSUMABLES_V2, dtype=bool),
     )
@@ -69,7 +70,11 @@ def _example_extras() -> dict:
 def test_acted_cards_for_play_action_is_hold_not_discard() -> None:
     played = _cards(3)
     choice = AnteClearChoice(
-        action="play", template_name=None, hold=played, discard=[], p_clear=1.0,
+        action="play",
+        template_name=None,
+        hold=played,
+        discard=[],
+        p_clear=1.0,
         immediate_value=10.0,
     )
     assert acted_cards_from_choice(choice) is played
@@ -79,15 +84,23 @@ def test_acted_cards_for_discard_action_is_discard_not_hold() -> None:
     kept = _cards(3)
     tossed = _cards(2)
     choice = AnteClearChoice(
-        action="discard", template_name="flush_Hearts", hold=kept, discard=tossed,
-        p_clear=0.8, immediate_value=5.0,
+        action="discard",
+        template_name="flush_Hearts",
+        hold=kept,
+        discard=tossed,
+        p_clear=0.8,
+        immediate_value=5.0,
     )
     assert acted_cards_from_choice(choice) is tossed
 
 
 def test_acted_cards_raises_on_unknown_action() -> None:
     choice = AnteClearChoice(
-        action="fold", template_name=None, hold=[], discard=[], p_clear=0.0,
+        action="fold",
+        template_name=None,
+        hold=[],
+        discard=[],
+        p_clear=0.0,
         immediate_value=0.0,
     )
     with pytest.raises(GenerationError):
@@ -138,24 +151,27 @@ def test_generate_one_example_shapes_and_valid_action() -> None:
 
     assert isinstance(example, Example)
     assert example.global_context.shape == (D_HAND_GLOBAL,)
-    assert example.hand_cards.shape == (MAX_HAND_CARDS, D_HAND_CARD)
-    assert example.hand_mask.shape == (MAX_HAND_CARDS,)
+    assert example.hand_cards.shape == (len(example.hand_mask), D_HAND_CARD)
+    assert example.hand_mask.shape == (len(example.hand_cards),)
     assert example.jokers.shape[0] == MAX_JOKERS
     assert example.joker_mask.shape == (MAX_JOKERS,)
     assert example.joker_ids.shape == (MAX_JOKERS,)
     assert example.copy_active.shape == (MAX_JOKERS,)
     assert example.copy_target_ids.shape == (MAX_JOKERS,)
-    assert example.trigger_match.shape == (MAX_HAND_CARDS, MAX_JOKERS, 2)
+    assert example.trigger_match.shape == (len(example.hand_cards), MAX_JOKERS, 2)
     assert example.consumables.shape == (MAX_CONSUMABLES_V2, D_CONSUMABLE)
     # Stages 1-4 inject no consumables; the block is real but empty here.
     assert example.consumable_mask.sum() == 0
-    assert example.card_target_mask.shape == (MAX_HAND_CARDS,)
+    assert example.card_indices.shape == (5,)
     assert example.action_type in (int(ActionType.PlayHand), int(ActionType.Discard))
     # No discards possible -> the solver must recommend playing.
     assert example.action_type == int(ActionType.PlayHand)
     # At least one card selected, and only within the real (unpadded) hand.
-    assert 1 <= example.card_target_mask.sum() <= 5
-    assert example.card_target_mask[example.hand_mask.sum() :].sum() == 0
+    selected = example.card_indices[example.card_indices >= 0]
+    assert 1 <= len(selected) <= 5
+    assert selected.tolist() == sorted(selected.tolist())
+    assert selected[-1] < len(example.hand_mask)
+    assert np.all(example.card_indices[len(selected) :] == -1)
 
 
 # ---------------------------------------------------------------------------
@@ -167,12 +183,12 @@ def test_write_shard_round_trip(tmp_path) -> None:
     examples = [
         Example(
             global_context=np.full(5, float(i), dtype=np.float32),
-            hand_cards=np.zeros((MAX_HAND_CARDS, 3), dtype=np.float32),
-            hand_mask=np.zeros(MAX_HAND_CARDS, dtype=bool),
+            hand_cards=np.zeros((HAND_WIDTH, 3), dtype=np.float32),
+            hand_mask=np.zeros(HAND_WIDTH, dtype=bool),
             jokers=np.zeros((MAX_JOKERS, 2), dtype=np.float32),
             joker_mask=np.zeros(MAX_JOKERS, dtype=bool),
             action_type=int(ActionType.PlayHand),
-            card_target_mask=np.zeros(MAX_HAND_CARDS, dtype=bool),
+            card_indices=np.array([0, -1, -1, -1, -1], dtype=np.int64),
             p_clear=0.5 + i,
             seed=f"SEED_{i}",
             **_example_extras(),
@@ -186,10 +202,35 @@ def test_write_shard_round_trip(tmp_path) -> None:
     assert loaded["global_context"].shape == (3, 5)
     assert loaded["p_clear"].tolist() == pytest.approx([0.5, 1.5, 2.5])
     assert list(loaded["seed"]) == ["SEED_0", "SEED_1", "SEED_2"]
-    assert loaded["schema_version"][0] == 2
-    assert loaded["trigger_match"].shape == (3, MAX_HAND_CARDS, MAX_JOKERS, 2)
+    assert loaded["schema_version"][0] == 3
+    assert loaded["trigger_match"].shape == (3, HAND_WIDTH, MAX_JOKERS, 2)
+    assert loaded["card_indices"].shape == (3, 5)
+    assert "card_target_mask" not in loaded.files
     assert loaded["joker_ids"].dtype == np.int64
     assert loaded["consumables"].shape == (3, MAX_CONSUMABLES_V2, D_CONSUMABLE)
+
+
+def test_write_shard_uses_its_widest_actual_hand(tmp_path) -> None:
+    def example_with_hand_width(width: int) -> Example:
+        return Example(
+            global_context=np.zeros(1, dtype=np.float32),
+            hand_cards=np.zeros((width, D_HAND_CARD), dtype=np.float32),
+            hand_mask=np.ones(width, dtype=bool),
+            jokers=np.zeros((MAX_JOKERS, 1), dtype=np.float32),
+            joker_mask=np.zeros(MAX_JOKERS, dtype=bool),
+            action_type=int(ActionType.PlayHand),
+            card_indices=np.array([8, -1, -1, -1, -1], dtype=np.int64),
+            p_clear=1.0,
+            seed=f"WIDE_{width}",
+            **_example_extras(width),
+        )
+
+    path = tmp_path / "wide_shard.npz"
+    write_shard(path, [example_with_hand_width(9), example_with_hand_width(11)])
+    loaded = np.load(path, allow_pickle=False)
+    assert loaded["hand_cards"].shape == (2, 11, D_HAND_CARD)
+    assert loaded["hand_mask"].sum(axis=1).tolist() == [9, 11]
+    assert loaded["trigger_match"].shape == (2, 11, MAX_JOKERS, 2)
 
 
 # ---------------------------------------------------------------------------
@@ -237,12 +278,12 @@ def test_worker_run_writes_shards_and_logs_failures(tmp_path, monkeypatch) -> No
             raise RuntimeError("simulated solver failure")
         return Example(
             global_context=np.zeros(1, dtype=np.float32),
-            hand_cards=np.zeros((MAX_HAND_CARDS, 1), dtype=np.float32),
-            hand_mask=np.zeros(MAX_HAND_CARDS, dtype=bool),
+            hand_cards=np.zeros((HAND_WIDTH, 1), dtype=np.float32),
+            hand_mask=np.zeros(HAND_WIDTH, dtype=bool),
             jokers=np.zeros((MAX_JOKERS, 1), dtype=np.float32),
             joker_mask=np.zeros(MAX_JOKERS, dtype=bool),
             action_type=int(ActionType.PlayHand),
-            card_target_mask=np.zeros(MAX_HAND_CARDS, dtype=bool),
+            card_indices=np.array([0, -1, -1, -1, -1], dtype=np.int64),
             p_clear=1.0,
             seed=seed,
             **_example_extras(),
@@ -350,12 +391,12 @@ def test_stage_presets_are_generatable() -> None:
 def _fake_example(seed: str) -> Example:
     return Example(
         global_context=np.zeros(1, dtype=np.float32),
-        hand_cards=np.zeros((MAX_HAND_CARDS, 1), dtype=np.float32),
-        hand_mask=np.zeros(MAX_HAND_CARDS, dtype=bool),
+        hand_cards=np.zeros((HAND_WIDTH, 1), dtype=np.float32),
+        hand_mask=np.zeros(HAND_WIDTH, dtype=bool),
         jokers=np.zeros((MAX_JOKERS, 1), dtype=np.float32),
         joker_mask=np.zeros(MAX_JOKERS, dtype=bool),
         action_type=int(ActionType.PlayHand),
-        card_target_mask=np.zeros(MAX_HAND_CARDS, dtype=bool),
+        card_indices=np.array([0, -1, -1, -1, -1], dtype=np.int64),
         p_clear=1.0,
         seed=seed,
         **_example_extras(),
@@ -404,9 +445,7 @@ def test_resume_ignores_seeds_outside_worker_range(tmp_path, monkeypatch) -> Non
 
     # Simulate an old shard for worker 0 holding an out-of-range index (50).
     out_dir.mkdir(parents=True)
-    write_shard(
-        out_dir / "worker_000_shard_00000.npz", [_fake_example("repart_test_00000050")]
-    )
+    write_shard(out_dir / "worker_000_shard_00000.npz", [_fake_example("repart_test_00000050")])
 
     from generate_hand_demos import _resume_point
 
@@ -422,7 +461,7 @@ def test_resume_ignores_seeds_outside_worker_range(tmp_path, monkeypatch) -> Non
 
 
 class TestValidateLabelExecutability:
-    """Tier 1 (canonical-mask) + tier 2 (real engine execution) guards."""
+    """Tier 1 (schema-native) + tier 2 (real engine execution) guards."""
 
     def _adapter(self, discards: tuple[int, int] = (1, 3)):
         from jackdaw.env.hand_play_adapter import HandPlayAdapter
@@ -450,23 +489,43 @@ class TestValidateLabelExecutability:
         validate_label_executability(adapter, ActionType.Discard, [0, 4])
         assert adapter.raw_state["current_round"]["discards_left"] == discards_before - 1
 
-    def test_six_card_discard_rejected_at_mask_tier(self) -> None:
+    def test_six_card_discard_rejected_at_schema_tier(self) -> None:
         from generate_hand_demos import GenerationError, validate_label_executability
 
         adapter = self._adapter(discards=(2, 3))
-        with pytest.raises(GenerationError, match="not a canonical action"):
+        with pytest.raises(GenerationError, match="1-5 cards"):
             validate_label_executability(adapter, ActionType.Discard, [0, 1, 2, 3, 4, 5])
 
     def test_discard_with_no_budget_rejected(self) -> None:
         from generate_hand_demos import GenerationError, validate_label_executability
 
         adapter = self._adapter(discards=(0, 0))
-        with pytest.raises(GenerationError, match="illegal"):
+        with pytest.raises(GenerationError, match="no discards"):
             validate_label_executability(adapter, ActionType.Discard, [0])
 
     def test_out_of_range_index_rejected(self) -> None:
         from generate_hand_demos import GenerationError, validate_label_executability
 
         adapter = self._adapter()
-        with pytest.raises(GenerationError, match="not a canonical action"):
+        with pytest.raises(GenerationError, match="outside actual hand length"):
             validate_label_executability(adapter, ActionType.PlayHand, [0, 9])
+
+    def test_big_hand_index_passes_tier_one_and_executes_through_engine(self) -> None:
+        from generate_hand_demos import validate_label_executability
+
+        from jackdaw.env.hand_play_adapter import HandPlayAdapter
+
+        adapter = HandPlayAdapter(
+            HandPlayConfig(
+                hands_range=(1, 1),
+                discards_range=(0, 0),
+                hand_size_delta_range=(4, 4),
+                hand_size_tail_prob=1.0,
+            )
+        )
+        adapter.reset("b_red", 1, "wide_label_validation")
+        assert len(adapter.raw_state["hand"]) > 8
+
+        hands_before = adapter.raw_state["current_round"]["hands_left"]
+        validate_label_executability(adapter, ActionType.PlayHand, [8])
+        assert adapter.raw_state["current_round"]["hands_left"] < hands_before

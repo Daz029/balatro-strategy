@@ -23,9 +23,9 @@ Design decided in a /grilling session (see CLAUDE.md open items):
     `{stage_dir}/worker_{id}_failures.jsonl` (seed + traceback) and skipped,
     not fatal to the whole run -- deterministic seeding makes a later
     retry-only-failures pass possible once the underlying bug is fixed.
-  - Card selection labels are stored as a multi-hot mask over the padded
-    hand width (matching `ActionMask.card_mask` in `action_space.py`), not
-    as raw variable-length index tuples.
+  - Card selection labels are stored as five ascending hand indices, padded
+    with -1.  They are deliberately independent of the observation width:
+    the Candidate-B decoder consumes this canonical set encoding directly.
 """
 
 from __future__ import annotations
@@ -51,10 +51,6 @@ if str(_REPO_ROOT) not in sys.path:
 
 from hand_solver import AnteClearChoice, DeckComposition, solve_hand_for_ante_clear  # noqa: E402
 
-from jackdaw.agents.hand_action_space import (  # noqa: E402
-    combo_to_action,
-    legal_action_mask,
-)
 from jackdaw.engine.actions import Discard as EngineDiscard  # noqa: E402
 from jackdaw.engine.actions import PlayHand as EnginePlayHand  # noqa: E402
 from jackdaw.engine.hand_eval import get_hand_eval_flags  # noqa: E402
@@ -70,27 +66,17 @@ from jackdaw.env.hand_play_gym import (  # noqa: E402
 )
 from jackdaw.env.observation import (  # noqa: E402
     D_CONSUMABLE,
-    D_HAND_CARD,
     D_JOKER,
 )
 
 # v2 = the h1 bump (B2 slice 4): 18-wide hand cards (+3 hand-potential),
 # 256-wide global context (+21), trigger-match matrix, joker center-key
 # ids, Blueprint/Brainstorm copy-resolution fields, and a REAL consumable
-# block. NOT FROZEN until B4 lands: B4 amends this same version in place
-# (index-set labels replace card_target_mask; actual-width hand blocks) --
-# do NOT generate v2 datasets before B4 is merged.
-SCHEMA_VERSION = 2
-# Demo write width for the hand block. Stays 8 even though the gym env's
-# observation is wider (hand_play_gym.MAX_HAND_CARDS_OBS=12, for The
-# Serpent's over-draw): generation is single-snapshot -- it labels reset
-# states only, whose hands never exceed 8 -- and labels must be encodable
-# in the 8-position canonical action space regardless. train_bc.py's loader
-# zero-pads shard hand blocks up to the observation width at load time
-# (semantically exact under masked pooling), so the invariant is
-# "write width <= MAX_HAND_CARDS_OBS", enforced there.
-MAX_HAND_CARDS = 8
+# block. B4's index-set labels make this schema incompatible with v2, so
+# it is versioned separately; do NOT mix pre-B4 v2 shards with these.
+SCHEMA_VERSION = 3
 MAX_JOKERS = 5
+MAX_LABEL_CARDS = 5
 BACK_KEY = "b_red"
 STAKE = 1
 
@@ -237,7 +223,7 @@ class Example:
     consumables: np.ndarray
     consumable_mask: np.ndarray
     action_type: int
-    card_target_mask: np.ndarray
+    card_indices: np.ndarray
     p_clear: float
     seed: str
 
@@ -305,9 +291,11 @@ def validate_label_executability(
     caught until BC training consumed the shards. Cost is negligible
     against the 2-12s solver call (~10us mask check + ~0.5ms engine step).
 
-    Tier 1: the label must map to a legal index in the canonical
-    Discrete(436) action space (`jackdaw/agents/hand_action_space.py`) --
-    the same check the BC loader repeats at training time.
+    Tier 1: schema-native validation. Indices must be a canonical ascending
+    set of 1--5 positions within this state's actual hand length, and the
+    action's hand/discard budget must remain. This intentionally does not
+    route through the old fixed-width Discrete(436) action space: doing so
+    silently rejected every label touching position 8 or later.
 
     Tier 2: actually execute the action through the real engine. This is
     DESTRUCTIVE to the adapter's state -- call it only after all
@@ -321,21 +309,23 @@ def validate_label_executability(
     """
     gs = adapter.raw_state
     cr = gs.get("current_round", {})
-    mask = legal_action_mask(
-        len(gs.get("hand", [])),
-        cr.get("hands_left", 0),
-        cr.get("discards_left", 0),
-    )
-    try:
-        action_index = combo_to_action(action_type, tuple(selected_indices))
-    except ValueError as exc:
-        raise GenerationError(f"label is not a canonical action: {exc}") from exc
-    if not mask[action_index]:
+    hand_size = len(gs.get("hand", []))
+    if action_type not in (ActionType.PlayHand, ActionType.Discard):
+        raise GenerationError(f"unknown action_type={action_type}")
+    if not 1 <= len(selected_indices) <= MAX_LABEL_CARDS:
+        raise GenerationError("label must select 1-5 cards")
+    if selected_indices != sorted(selected_indices) or len(set(selected_indices)) != len(
+        selected_indices
+    ):
+        raise GenerationError("label indices must be unique and sorted ascending")
+    if any(index < 0 or index >= hand_size for index in selected_indices):
         raise GenerationError(
-            f"label (action_type={action_type}, cards={selected_indices}) is illegal "
-            f"under the canonical action mask (hand={len(gs.get('hand', []))}, "
-            f"hands_left={cr.get('hands_left')}, discards_left={cr.get('discards_left')})"
+            f"label indices {selected_indices} outside actual hand length {hand_size}"
         )
+    if action_type == ActionType.PlayHand and cr.get("hands_left", 0) < 1:
+        raise GenerationError("PlayHand label is illegal with no hands left")
+    if action_type == ActionType.Discard and cr.get("discards_left", 0) < 1:
+        raise GenerationError("Discard label is illegal with no discards left")
 
     indices = tuple(selected_indices)
     engine_action = (
@@ -392,31 +382,25 @@ def generate_one_example(seed: str, config: HandPlayConfig) -> Example:
     )
 
     acted_cards = acted_cards_from_choice(choice)
-    selected_indices = indices_by_identity(acted_cards, hand)
-
-    card_target_mask = np.zeros(MAX_HAND_CARDS, dtype=bool)
-    for idx in selected_indices:
-        if idx >= MAX_HAND_CARDS:
-            raise GenerationError(f"hand index {idx} exceeds MAX_HAND_CARDS={MAX_HAND_CARDS}")
-        card_target_mask[idx] = True
+    selected_indices = sorted(indices_by_identity(acted_cards, hand))
 
     action_type = ActionType.PlayHand if choice.action == "play" else ActionType.Discard
 
     ent = encode_hand_state_v2(gs)
 
-    # Hand/joker overflow still RAISES here (single-snapshot reset states
-    # never exceed the write widths; a violation is a sampling bug). The
-    # consumable block TRUNCATES its tail instead: stages 1-4 inject no
+    # Hand rows deliberately stay actual-width. write_shard pads each shard
+    # only to its widest example, then the loader up-pads to the obs width.
+    # Joker overflow still raises; the consumable block truncates its tail:
+    # stages 1-4 inject no
     # consumables, but harvested full-run states (C2) can exceed any fixed
     # width via negative-edition copies (Perkeo) -- same policy as
     # build_observation_v2.
-    hand_padded, hand_mask = _pad_entities(ent["hand_cards"], MAX_HAND_CARDS, D_HAND_CARD)
     joker_padded, joker_mask = _pad_entities(ent["jokers"], MAX_JOKERS, D_JOKER)
     cons_padded, cons_mask = _pad_entities(
         ent["consumables"][:MAX_CONSUMABLES_V2], MAX_CONSUMABLES_V2, D_CONSUMABLE
     )
-    trigger = np.zeros((MAX_HAND_CARDS, MAX_JOKERS, 2), dtype=bool)
-    trigger_src = ent["trigger_match"][:MAX_HAND_CARDS, :MAX_JOKERS]
+    trigger = np.zeros((len(hand), MAX_JOKERS, 2), dtype=bool)
+    trigger_src = ent["trigger_match"][:, :MAX_JOKERS]
     trigger[: trigger_src.shape[0], : trigger_src.shape[1]] = trigger_src
 
     # Must come AFTER encoding: tier 2 executes the action on the real
@@ -425,8 +409,8 @@ def generate_one_example(seed: str, config: HandPlayConfig) -> Example:
 
     return Example(
         global_context=ent["global_context"],
-        hand_cards=hand_padded,
-        hand_mask=hand_mask,
+        hand_cards=ent["hand_cards"],
+        hand_mask=np.ones(len(hand), dtype=bool),
         jokers=joker_padded,
         joker_mask=joker_mask,
         joker_ids=_pad_1d(ent["joker_ids"], MAX_JOKERS, np.int64),
@@ -436,7 +420,11 @@ def generate_one_example(seed: str, config: HandPlayConfig) -> Example:
         consumables=cons_padded,
         consumable_mask=cons_mask,
         action_type=int(action_type),
-        card_target_mask=card_target_mask,
+        card_indices=np.pad(
+            np.asarray(selected_indices, dtype=np.int64),
+            (0, MAX_LABEL_CARDS - len(selected_indices)),
+            constant_values=-1,
+        ),
         p_clear=float(choice.p_clear),
         seed=seed,
     )
@@ -455,22 +443,29 @@ def write_shard(path: Path, examples: list[Example]) -> None:
     (in-blind consumable SELECTION itself stays at h2; see
     docs/pre-regen-handoff.md, B2 slice 4 rider).
     """
+    hand_width = max(example.hand_cards.shape[0] for example in examples)
+
+    def pad_hand_axis(arr: np.ndarray) -> np.ndarray:
+        padded = np.zeros((hand_width, *arr.shape[1:]), dtype=arr.dtype)
+        padded[: arr.shape[0]] = arr
+        return padded
+
     np.savez_compressed(
         path,
         schema_version=np.array([SCHEMA_VERSION]),
         global_context=np.stack([e.global_context for e in examples]),
-        hand_cards=np.stack([e.hand_cards for e in examples]),
-        hand_mask=np.stack([e.hand_mask for e in examples]),
+        hand_cards=np.stack([pad_hand_axis(e.hand_cards) for e in examples]),
+        hand_mask=np.stack([pad_hand_axis(e.hand_mask) for e in examples]),
         jokers=np.stack([e.jokers for e in examples]),
         joker_mask=np.stack([e.joker_mask for e in examples]),
         joker_ids=np.stack([e.joker_ids for e in examples]),
         copy_active=np.stack([e.copy_active for e in examples]),
         copy_target_ids=np.stack([e.copy_target_ids for e in examples]),
-        trigger_match=np.stack([e.trigger_match for e in examples]),
+        trigger_match=np.stack([pad_hand_axis(e.trigger_match) for e in examples]),
         consumables=np.stack([e.consumables for e in examples]),
         consumable_mask=np.stack([e.consumable_mask for e in examples]),
         action_type=np.array([e.action_type for e in examples], dtype=np.int64),
-        card_target_mask=np.stack([e.card_target_mask for e in examples]),
+        card_indices=np.stack([e.card_indices for e in examples]),
         p_clear=np.array([e.p_clear for e in examples], dtype=np.float32),
         seed=np.array([e.seed for e in examples]),
     )

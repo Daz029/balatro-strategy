@@ -16,6 +16,7 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from train_bc import (  # noqa: E402
+    EXPECTED_SCHEMA_VERSION,
     load_dataset,
     masked_smoothed_ce,
     split_train_val,
@@ -55,7 +56,7 @@ def _write_synthetic_shard(
     discards_left: int = 1,
     seed_prefix: str = "synth",
     start_idx: int = 0,
-    schema_version: int = 2,
+    schema_version: int = EXPECTED_SCHEMA_VERSION,
 ) -> None:
     """Emit a shard matching generate_hand_demos.write_shard's schema."""
     global_context = np.zeros((n, D_HAND_GLOBAL), dtype=np.float32)
@@ -68,11 +69,11 @@ def _write_synthetic_shard(
 
     hand_mask = np.ones((n, MAX_HAND_CARDS), dtype=bool)
     action_type = np.zeros(n, dtype=np.int64)
-    card_target_mask = np.zeros((n, MAX_HAND_CARDS), dtype=bool)
+    card_indices = np.full((n, 5), -1, dtype=np.int64)
     for i in range(n):
         action_type[i] = rng.integers(0, 2) if discards_left > 0 else 0
         k = int(rng.integers(1, 6))
-        card_target_mask[i, rng.choice(MAX_HAND_CARDS, size=k, replace=False)] = True
+        card_indices[i, :k] = np.sort(rng.choice(MAX_HAND_CARDS, size=k, replace=False))
 
     np.savez_compressed(
         path,
@@ -89,7 +90,7 @@ def _write_synthetic_shard(
         consumables=rng.normal(size=(n, MAX_CONSUMABLES_V2, D_CONSUMABLE)).astype(np.float32),
         consumable_mask=np.zeros((n, MAX_CONSUMABLES_V2), dtype=bool),
         action_type=action_type,
-        card_target_mask=card_target_mask,
+        card_indices=card_indices,
         p_clear=rng.uniform(0, 1, size=n).astype(np.float32),
         seed=np.array([f"{seed_prefix}_{start_idx + i:08d}" for i in range(n)]),
     )
@@ -121,6 +122,8 @@ class TestLoadDataset:
         assert ds.obs["consumables"].shape == (80, MAX_CONSUMABLES_V2, D_CONSUMABLE)
         assert ds.obs["joker_ids"].dtype == torch.int64
         assert ds.obs["copy_target_ids"].dtype == torch.int64
+        assert ds.action_types.shape == (80,)
+        assert ds.card_indices.shape == (80, 5)
         assert ds.legal_masks.shape == (80, NUM_HAND_ACTIONS)
         # Every label decodes to a 1-5 card combo and is legal.
         for i in range(0, 80, 7):
@@ -149,7 +152,7 @@ class TestLoadDataset:
             d / "worker_000_shard_00000.npz",
             4,
             rng=np.random.default_rng(4),
-            schema_version=1,
+            schema_version=2,
         )
         with pytest.raises(ValueError, match="schema_version"):
             load_dataset([d], {})
@@ -169,6 +172,18 @@ class TestLoadDataset:
         with pytest.raises(ValueError, match="illegal"):
             load_dataset([d], {})
 
+    def test_rejects_non_integer_card_indices(self, tmp_path):
+        d = tmp_path / "non_integer_label"
+        d.mkdir()
+        path = d / "worker_000_shard_00000.npz"
+        _write_synthetic_shard(path, 4, rng=np.random.default_rng(5))
+        data = dict(np.load(path))
+        data["card_indices"] = data["card_indices"].astype(np.float32)
+        data["card_indices"][0, 0] = 0.5
+        np.savez_compressed(path, **data)
+        with pytest.raises(ValueError, match="integer dtype"):
+            load_dataset([d], {})
+
     def test_missing_dir_raises(self, tmp_path):
         with pytest.raises(FileNotFoundError):
             load_dataset([tmp_path / "empty"], {})
@@ -186,9 +201,7 @@ class TestLoadDataset:
         data["hand_cards"] = np.concatenate(
             [data["hand_cards"], np.zeros((4, extra, D_HAND_CARD), np.float32)], axis=1
         )
-        data["hand_mask"] = np.concatenate(
-            [data["hand_mask"], np.zeros((4, extra), bool)], axis=1
-        )
+        data["hand_mask"] = np.concatenate([data["hand_mask"], np.zeros((4, extra), bool)], axis=1)
         np.savez_compressed(path, **data)
         with pytest.raises(ValueError, match="exceeds obs width"):
             load_dataset([d], {})

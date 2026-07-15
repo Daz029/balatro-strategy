@@ -148,4 +148,4 @@ class TestSolversRespectCap:
 
         preset = stage_presets()["stage1_no_jokers"]
         example = generate_one_example("stage1_no_jokers_00000000", preset.config)
-        assert int(example.card_target_mask.sum()) <= DISCARD_LIMIT
+        assert int((example.card_indices >= 0).sum()) <= DISCARD_LIMIT

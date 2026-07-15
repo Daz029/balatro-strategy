@@ -13,7 +13,8 @@ ante-play track), deliberately NOT reusing ``BalatroGymnasiumEnv``:
     with masked pooling an absent entity type contributes exactly nothing,
     so the dormant block costs nothing and freezes the observation space /
     checkpoint format across that merge. The hand block is wider than the
-    shards' (``MAX_HAND_CARDS_OBS`` = 12 vs 8) for The Serpent's over-draw
+    shards' actual width (up to ``MAX_HAND_CARDS_OBS`` = 40) for The
+    Serpent's over-draw
     and +hand-size effects; the BC loader zero-pads shard rows up to it
     (exact under masked pooling), so shards need no regeneration.
   - **Env-side optimal ordering**: the agent picks a card *subset*; when an
@@ -93,20 +94,11 @@ from jackdaw.env.trigger_match import (
 # hand-size cap, so the hand legitimately grows past 8 (and growth
 # compounds: each 1-card action nets +2). +hand-size effects (Turtle Bean,
 # Troubadour, Juggler, the Juggle tag, vouchers) push full-run hands to
-# 10-13 as well. 12 covers the realistic range; cards beyond row 12 are
-# TRUNCATED, not an error: the hand is engine-sorted descending and the
-# action space can only address positions 0-7, so dropped rows are the
-# lowest cards and unplayable anyway (the only cost is a sliver of
-# held-card-effect visibility in an extreme tail). Positions 8-11 are
-# visible-but-unplayable by construction -- a known systemic ceiling of the
-# 8-position action space, recorded as an open item in CLAUDE.md (decision
-# deferred to the h1 seam).
-#
-# BC demo shards keep writing 8-wide hand blocks (generation is
-# single-snapshot; reset hands never exceed 8) -- train_bc.py's loader
-# zero-pads them up to this width, which is semantically exact under masked
-# pooling. Widening this constant is therefore NOT a demo-schema change.
-MAX_HAND_CARDS_OBS = 12
+# 10-13 as well. Width 40 makes the observation ceiling deliberately
+# irrelevant to normal builds; a finite tail still truncates lowest-first.
+# Demo shards retain their actual (per-shard) hand width and train_bc.py
+# zero-pads them here, which is semantically exact under masked pooling.
+MAX_HAND_CARDS_OBS = 40
 
 MAX_JOKERS = 5
 MAX_CONSUMABLES = 2  # dormant this stage; reserved seam for the shop merge (v1)
