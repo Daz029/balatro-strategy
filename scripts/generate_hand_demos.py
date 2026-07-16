@@ -152,13 +152,21 @@ class StagePreset:
     total_examples: int
 
 
+# Flat hand-size tail for every stage preset (h1 regen config, user-locked
+# 2026-07-16): prob 0.1, delta uniform +1..+4 on top of whatever the injected
+# jokers produce (additive, so equivalent to bumping base hand size). Its job
+# is width-40 / Candidate-B decode-length coverage — the harvest can't supply
+# wide hands (see the circular-gate note in HandPlayConfig).
+_HAND_SIZE_TAIL = {"hand_size_tail_prob": 0.1, "hand_size_delta_range": (1, 4)}
+
+
 def stage_presets() -> dict[str, StagePreset]:
     """Named curriculum-stage presets (function, not constant, so the
     all-150 pool is only loaded when actually requested)."""
     return {
         # Pipeline/baseline validation: pure hand-strength play, no jokers.
         "stage1_no_jokers": StagePreset(
-            config=HandPlayConfig(),
+            config=HandPlayConfig(**_HAND_SIZE_TAIL),
             total_examples=2_000,
         ),
         # ~4000 x 3.2 avg jokers / 21 pool ~= 610 appearances per joker.
@@ -166,6 +174,7 @@ def stage_presets() -> dict[str, StagePreset]:
             config=HandPlayConfig(
                 joker_pool=STAGE2_JOKER_POOL,
                 joker_count_bands=DEFAULT_COUNT_BANDS,
+                **_HAND_SIZE_TAIL,
             ),
             total_examples=4_000,
         ),
@@ -176,6 +185,7 @@ def stage_presets() -> dict[str, StagePreset]:
             config=HandPlayConfig(
                 joker_pool=all_joker_keys(),
                 joker_count_bands=DEFAULT_COUNT_BANDS,
+                **_HAND_SIZE_TAIL,
             ),
             total_examples=20_000,
         ),
@@ -192,10 +202,32 @@ def stage_presets() -> dict[str, StagePreset]:
                 joker_pool=all_joker_keys(),
                 joker_count_bands=DEFAULT_COUNT_BANDS,
                 blind_stages=("Boss",),
+                **_HAND_SIZE_TAIL,
             ),
             total_examples=8_000,
         ),
     }
+
+
+def load_dollar_marginals(path: Path) -> dict[int, dict[int, int]]:
+    """Parse ``dollar_marginals_by_ante`` from a harvest ``reductions.json``
+    (or a bare ``{ante: {dollars: count}}`` mapping). JSON object keys arrive
+    as strings; empty per-ante histograms are dropped, and an entirely empty
+    table hard-fails rather than silently regenerating with the flat
+    placeholder the h1 config retires."""
+    with open(path, encoding="utf-8") as f:
+        raw = json.load(f)
+    table = raw.get("dollar_marginals_by_ante", raw) if isinstance(raw, dict) else raw
+    if not isinstance(table, dict):
+        raise ValueError(f"{path}: expected an ante -> dollars -> count mapping")
+    marginals = {
+        int(ante): {int(dollars): int(count) for dollars, count in hist.items()}
+        for ante, hist in table.items()
+        if hist
+    }
+    if not marginals:
+        raise ValueError(f"{path}: no non-empty dollar marginals")
+    return marginals
 
 
 class GenerationError(Exception):
@@ -651,6 +683,22 @@ def main() -> None:
     parser.add_argument("--hands-range", type=_parse_int_range, default=None)
     parser.add_argument("--discards-range", type=_parse_int_range, default=None)
     parser.add_argument("--dollars-range", type=_parse_int_range, default=None)
+    parser.add_argument(
+        "--dollar-marginals",
+        type=Path,
+        default=None,
+        help="harvest reductions.json (or bare ante->dollars->count mapping); "
+        "enables harvested-marginal money sampling with a flat tail "
+        "(the h1 stages 1-4 regen config)",
+    )
+    parser.add_argument(
+        "--dollar-tail-prob",
+        type=float,
+        default=None,
+        help="flat-tail probability when --dollar-marginals is set (config default 0.2)",
+    )
+    parser.add_argument("--hand-size-tail-prob", type=float, default=None)
+    parser.add_argument("--hand-size-delta-range", type=_parse_int_range, default=None)
     parser.add_argument("--blind-stages", default=None)
     parser.add_argument("--joker-pool", default=None, help="comma-separated joker keys")
     parser.add_argument("--joker-count-range", type=_parse_int_range, default=None)
@@ -677,6 +725,14 @@ def main() -> None:
         overrides["discards_range"] = args.discards_range
     if args.dollars_range is not None:
         overrides["dollars_range"] = args.dollars_range
+    if args.dollar_marginals is not None:
+        overrides["dollar_marginals"] = load_dollar_marginals(args.dollar_marginals)
+    if args.dollar_tail_prob is not None:
+        overrides["dollar_flat_tail_prob"] = args.dollar_tail_prob
+    if args.hand_size_tail_prob is not None:
+        overrides["hand_size_tail_prob"] = args.hand_size_tail_prob
+    if args.hand_size_delta_range is not None:
+        overrides["hand_size_delta_range"] = args.hand_size_delta_range
     if args.blind_stages is not None:
         overrides["blind_stages"] = tuple(args.blind_stages.split(","))
     if args.joker_pool is not None:

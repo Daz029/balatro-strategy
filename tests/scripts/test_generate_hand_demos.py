@@ -26,6 +26,7 @@ from generate_hand_demos import (
     all_joker_keys,
     generate_one_example,
     indices_by_identity,
+    load_dollar_marginals,
     partition_indices,
     stage_presets,
     write_shard,
@@ -529,3 +530,44 @@ class TestValidateLabelExecutability:
         hands_before = adapter.raw_state["current_round"]["hands_left"]
         validate_label_executability(adapter, ActionType.PlayHand, [8])
         assert adapter.raw_state["current_round"]["hands_left"] < hands_before
+
+
+# ---------------------------------------------------------------------------
+# h1 regen config wiring: dollar-marginal loading + preset hand-size tail
+# ---------------------------------------------------------------------------
+
+
+class TestRegenConfigWiring:
+    def test_load_dollar_marginals_reductions_format(self, tmp_path):
+        path = tmp_path / "reductions.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "dollar_marginals_by_ante": {"1": {"4": 2, "9": 1}, "2": {}},
+                    "hand_size_histogram": {"8": 100},
+                    "note": "x",
+                }
+            ),
+            encoding="utf-8",
+        )
+        marginals = load_dollar_marginals(path)
+        # string keys -> ints; the empty ante-2 histogram is dropped
+        assert marginals == {1: {4: 2, 9: 1}}
+
+    def test_load_dollar_marginals_bare_format(self, tmp_path):
+        path = tmp_path / "bare.json"
+        path.write_text(json.dumps({"3": {"0": 5}}), encoding="utf-8")
+        assert load_dollar_marginals(path) == {3: {0: 5}}
+
+    def test_load_dollar_marginals_empty_raises(self, tmp_path):
+        path = tmp_path / "empty.json"
+        path.write_text(json.dumps({"dollar_marginals_by_ante": {}}), encoding="utf-8")
+        with pytest.raises(ValueError):
+            load_dollar_marginals(path)
+
+    def test_stage_presets_carry_hand_size_tail(self):
+        """Every stage preset bakes in the user-locked flat hand-size tail
+        (prob 0.1, delta uniform +1..+4) — width-40 / Candidate-B coverage."""
+        for name, preset in stage_presets().items():
+            assert preset.config.hand_size_tail_prob == 0.1, name
+            assert preset.config.hand_size_delta_range == (1, 4), name

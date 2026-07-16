@@ -612,3 +612,66 @@ def test_hand_size_tail_adds_delta_when_triggered() -> None:
     gs = adapter.raw_state
     assert gs["hand_size"] == 10  # base 8 + modest 2-card flat tail
     assert len(gs["hand"]) == 10
+
+
+# ---------------------------------------------------------------------------
+# Harvested dollar marginals (h1 stages 1-4 regen config)
+# ---------------------------------------------------------------------------
+
+
+def test_dollar_marginals_none_uses_flat_range() -> None:
+    """No marginals = the original flat placeholder, untouched."""
+    cfg = HandPlayConfig(dollars_range=(20, 20), blind_stages=("Small",))
+    state = HandPlayAdapter(cfg).reset(BACK, STAKE, SEED)
+    assert state.dollars == 20
+
+
+def test_dollar_marginals_sample_from_ante_histogram() -> None:
+    cfg = HandPlayConfig(
+        ante_range=(3, 3),
+        dollar_marginals={3: {7: 5}},
+        dollar_flat_tail_prob=0.0,
+        blind_stages=("Small",),
+    )
+    adapter = HandPlayAdapter(cfg)
+    for i in range(5):
+        assert adapter.reset(BACK, STAKE, f"MARG_{i}").dollars == 7
+
+
+def test_dollar_marginals_nearest_ante_fallback() -> None:
+    """An unharvested ante uses the nearest harvested ante's histogram."""
+    cfg = HandPlayConfig(
+        ante_range=(8, 8),
+        dollar_marginals={1: {3: 1}, 4: {9: 1}},
+        dollar_flat_tail_prob=0.0,
+        blind_stages=("Small",),
+    )
+    assert HandPlayAdapter(cfg).reset(BACK, STAKE, SEED).dollars == 9
+
+
+def test_dollar_marginals_flat_tail() -> None:
+    """tail_prob=1.0 always takes the flat dollars_range path."""
+    cfg = HandPlayConfig(
+        ante_range=(1, 1),
+        dollars_range=(50, 50),
+        dollar_marginals={1: {7: 1}},
+        dollar_flat_tail_prob=1.0,
+        blind_stages=("Small",),
+    )
+    adapter = HandPlayAdapter(cfg)
+    for i in range(5):
+        assert adapter.reset(BACK, STAKE, f"TAIL_{i}").dollars == 50
+
+
+def test_dollar_marginals_weighted_and_deterministic() -> None:
+    cfg = HandPlayConfig(
+        ante_range=(1, 1),
+        dollar_marginals={1: {0: 1, 40: 9}},
+        dollar_flat_tail_prob=0.0,
+        blind_stages=("Small",),
+    )
+    values = [HandPlayAdapter(cfg).reset(BACK, STAKE, f"WEIGHT_{i}").dollars for i in range(40)]
+    assert set(values) <= {0, 40}
+    assert values.count(40) > values.count(0)  # 9:1 histogram weighting
+    again = [HandPlayAdapter(cfg).reset(BACK, STAKE, f"WEIGHT_{i}").dollars for i in range(40)]
+    assert values == again

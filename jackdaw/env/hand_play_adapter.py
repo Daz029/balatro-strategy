@@ -55,10 +55,11 @@ class HandPlayConfig:
     ante-correct if enabled (see :meth:`reset`), so widening ``blind_stages``
     to include ``"Boss"`` later is safe (used by the stage-4 boss preset).
 
-    ``dollars_range`` is sampled flat/uniform regardless of ante — this is a
-    stage-1/2 placeholder, not a claim that money is ante-independent in real
-    play. It's out of scope until the shop-agent's marginal-value-of-$1 curve
-    (see CLAUDE.md "Money/dollar handling") exists and gets fed in.
+    Money: when ``dollar_marginals`` is None, ``dollars_range`` is sampled
+    flat/uniform regardless of ante (the original stage-1/2 placeholder).
+    The h1 regen config replaces that with harvested per-ante dollar
+    marginals (see ``dollar_marginals`` below) plus a flat tail so BC still
+    sees off-distribution money states.
 
     Injected jokers are always base/no-edition, no-sticker (no Foil/Holo/
     Polychrome, no Eternal/Perishable/Rental) — a deliberate curriculum-stage
@@ -140,6 +141,19 @@ class HandPlayConfig:
     # so existing datasets/seeds are byte-identical.
     hand_size_delta_range: tuple[int, int] = (0, 0)
     hand_size_tail_prob: float = 0.0
+    # Harvested per-ante dollar marginals (the h1 regen config; CLAUDE.md
+    # "Stages 1-4 regen config"): ante -> {dollars: count} histograms, as in
+    # harvest_s0_rollouts.py's reductions.json (dollar_marginals_by_ante).
+    # When set, dollars are sampled from the sampled ante's histogram —
+    # except with probability ``dollar_flat_tail_prob``, which falls back to
+    # flat ``randint(*dollars_range)`` so BC still sees off-distribution
+    # money states. An ante with no histogram (s0 rarely survives past ante
+    # 4-5; stages sample 1-8) uses the NEAREST harvested ante — closer to the
+    # real "money grows with ante" shape than a flat fallback would be.
+    # ``None`` = the original flat placeholder, stream-identical to before
+    # this field existed (same single randint draw).
+    dollar_marginals: dict[int, dict[int, int]] | None = None
+    dollar_flat_tail_prob: float = 0.2
 
 
 # ---------------------------------------------------------------------------
@@ -329,6 +343,24 @@ def _randomize_boss_history(
         blind.only_hand = sampler.choice(all_types)
 
 
+def _sample_dollars(cfg: HandPlayConfig, ante: int, sampler: random.Random) -> int:
+    """Dollars at hand-turn entry: harvested per-ante marginal with a flat
+    tail when ``dollar_marginals`` is set, else the flat placeholder (see
+    the config docstring). Assumes non-empty histograms — the CLI loader
+    hard-fails on an empty table rather than silently falling back."""
+    if cfg.dollar_marginals is None:
+        return sampler.randint(*cfg.dollars_range)
+    if sampler.random() < cfg.dollar_flat_tail_prob:
+        return sampler.randint(*cfg.dollars_range)
+    marginals = cfg.dollar_marginals
+    # Exact ante when harvested (abs == 0 picks itself); otherwise nearest,
+    # ties toward the lower ante (sorted + stable min).
+    ante_key = min(sorted(marginals), key=lambda a: abs(a - ante))
+    hist = marginals[ante_key]
+    values = sorted(hist)
+    return sampler.choices(values, weights=[hist[v] for v in values], k=1)[0]
+
+
 class HandPlayAdapter:
     """GameAdapter that starts episodes mid-run, directly in hand-play.
 
@@ -400,7 +432,7 @@ class HandPlayAdapter:
 
         rr["hands"] = sampler.randint(*cfg.hands_range)
         rr["discards"] = sampler.randint(*cfg.discards_range)
-        gs["dollars"] = sampler.randint(*cfg.dollars_range)
+        gs["dollars"] = _sample_dollars(cfg, ante, sampler)
         gs["blind_on_deck"] = sampler.choice(cfg.blind_stages)
 
         # initialize_run() already picked a boss key for ante 1 (baked into
