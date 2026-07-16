@@ -214,8 +214,18 @@ Hard rules:
   the dataset; the legacy flat trainer rejects them explicitly until the
   Candidate-B pointer trainer consumes the index sequence. Tier 1 is
   schema-native and the pinned position-8 synthetic hand executes through
-  Tier 2. **C1–C2 — not started. B6 — SKIPPED, citing A3** (the conjunction failed on attribution; do not build it
+  Tier 2. **B6 — SKIPPED, citing A3** (the conjunction failed on attribution; do not build it
   without a NEW fingerprint showing teacher-mirroring over-discarding).
+- **C1 — DONE (2026-07-16**, branch `pre-regen-c1-c2-manifest-labeling`):
+  `scripts/select_harvest_manifest.py` + the checked-in
+  `manifests/h1_harvested.json` (7,891 records; det 5,891 / sampled 2,000;
+  realized det_frac 0.7465), 25 tests. Full record at the C1 spec below.
+- **C2 — DONE (2026-07-16**, same branch): `--manifest` mode in
+  `generate_hand_demos.py` + `scripts/harvest_restore.py`, 26 + 22 tests.
+  Found and repaired a real, SILENT capture skew (The Idol's uncached `id`);
+  the h1 regen must pass `--allow-sha-mismatch`. Full record at the C2 spec
+  below — read the COMPUTATION-vs-STORED-STATE rule there before assuming any
+  future engine fix is free for the harvest.
 
 ## Task specifications
 
@@ -623,6 +633,41 @@ size (the discard path runs at n<=8 too), so it must land before C2/regen.
   within a run; det:sampled ratio default 75:25 (tune from A2's readout); fixed RNG
   seed so the same inputs always emit the identical manifest.
 - The manifest is a versioned artifact — check it in (it's a few hundred KB).
+- **DONE 2026-07-16** (`scripts/select_harvest_manifest.py`,
+  `manifests/h1_harvested.json`, 25 tests). Metadata-only — no blob is
+  unpickled, so it has no engine dependency and runs in a second. Decisions
+  made while building:
+  - **Lives in `manifests/`, NOT `data/`** — `data/` is gitignored, and the
+    spec requires the manifest be checked in.
+  - **The caps are the BINDING constraint, not the 8k target** (readout, det
+    corpus): every (run, ante) bucket has >=3 records, so `per_ante_cap=3`
+    always binds, and `per_run_cap=8` binds only on runs reaching ante 3+.
+    Det supply is therefore 5,891 — 109 SHORT of its 6,000 target. Realized:
+    **7,891 records** (det 5,891 = its entire capped supply, sampled 2,000
+    thinned from 2,467), realized det_frac **0.7465**, 1,699 runs, 22% Boss.
+    The ≤8/run cap and the ~8k target were sized for each other.
+  - **Targets are CEILINGS, not quotas**: a short source is NOT backfilled from
+    the other. The 75:25 split is a deployed-distribution anchor, so topping det
+    up with sampled records would silently make the stage MORE sampled-heavy
+    than the decision that set the ratio. Pinned in tests.
+  - **The ante marginal is deliberately NOT flattened toward uniform**
+    (realized `1:4376, 2:2082, 3:1030, 4:299, 5:82, 6:18, 7:4`). Per CLAUDE.md
+    deep-ante coverage is stages 1-4's job and the harvest's is realism at the
+    antes s0 actually reaches; flattening would fight that division of labor and
+    the supply can't support it anyway (ante 7 has 20 records TOTAL). The caps
+    reshape the marginal from "turns spent per ante" toward "runs that reached
+    each ante" — the honest correlation-controlled view. Re-running C1 with a
+    different mix is a cheap query, which is the point of C1 being separate.
+  - **Round-robin DEEPEST-ante-first** when the run cap binds (3 antes x cap 3 =
+    9 candidates into 8 slots -> ante 1 loses the slot, not the scarce deep
+    ante). Within a bucket the draw is seeded-random, NOT a turn prefix (turn 0
+    states have full hands/discards budgets — a prefix would bias the stage).
+  - Records carry `run_seed` EXPLICITLY (it names `blobs/{run_seed}.pkl`, and
+    both seed prefixes contain underscores) and per-record `git_sha` (so C2's
+    skew check stays honest if a corpus ever mixes capture sessions). One
+    compact line per record keeps a 7,891-record artifact's diffs readable
+    (1.3MB). Determinism verified byte-identical on the REAL corpus, and
+    verified independent of metadata row order.
 
 ### C2 — snapshot-fed labeling front-end (`scripts/generate_hand_demos.py`)
 
@@ -638,6 +683,61 @@ size (the discard path runs at n<=8 too), so it must land before C2/regen.
   skip, per the existing design — but ALSO emit a summary count at end; if >2-3% of
   the manifest fails, stop and investigate rather than shipping a silently-thinned
   stage.
+- **DONE 2026-07-16** (`--manifest` mode in `generate_hand_demos.py`,
+  `scripts/harvest_restore.py`, 26 tests + 22 restore tests). Decisions and
+  findings while building:
+  - **ONE labeling path, enforced by a `HandTurnState` protocol**
+    (`raw_state` + `step`): stages 1-4 satisfy it with `HandPlayAdapter`,
+    stage 5 with `RestoredHarvestState` over a restored blob. `label_and_encode`
+    is written against the protocol, so harvested states flow through the
+    IDENTICAL solver / encoder / tier-1 / tier-2. A second labeling path would
+    be a label-divergence surface — the bug class this pipeline keeps hitting.
+  - **CAPTURE SKEW FOUND AND REPAIRED — The Idol** (full record in
+    `harvest_restore.py`). The corpus was captured at sha `57f1088` on the
+    9600X; that commit is not in this repo, so the sha check can only report
+    "differs", never diff it. The governing rule discovered here, worth
+    carrying forward: **an engine fix that changes COMPUTATION is inherited by
+    the harvest for free (a blob is re-scored by current code — e.g. the
+    `blueprint_compat` fix, B3 ordering, B5 prescreen, B7 ranking all apply
+    automatically); an engine fix that changes STORED STATE is not.** B2's
+    Idol fix is the latter: `reset_round_targets` now caches
+    `idol_card["id"]`, the handler matches on that id, and every pre-fix blob
+    carries `{rank, suit}` only — so a restored Idol state would be labeled
+    with a DEAD Idol, silently, on ~0.53% of hand records. The repair is EXACT,
+    not a patch: `id` is `base.id` and `rank` is `base.rank`, both read off the
+    same drawn card, and rank determines id via the engine's own `_RANK_ID`
+    (imported, not restated — a second copy of engine knowledge is the drift
+    class). Verified on real blobs: matching cards score 60 -> 120 (exactly
+    2.00x) after repair, and the `_RANK_ID` table is pinned against
+    `CardBase.from_card_key` so it cannot drift. Idempotent, so a future
+    re-harvest needs no change.
+  - **Shape guard, because a key-set diff CANNOT catch this bug class** (the
+    missing field lived inside a cached dict VALUE, not at a key boundary): any
+    unexpected `idol_card` shape hard-fails rather than defaulting. Everything
+    else was checked and matches — `mail_card` already carried its id,
+    ancient/castle are suit-only by design, `current_round`/`round_resets` key
+    sets and Card fields are identical, and an absent `consumable_usage_total`
+    genuinely means no consumable was used (365 of 2037 sampled blobs DO carry
+    it), so it is not drift.
+  - **The h1 regen must pass `--allow-sha-mismatch`** — the gate is fatal by
+    default and names the flag, so the skew decision is always explicit
+    (pitfall #7's "never silently proceed"). Accepting it logs loudly and the
+    decision is recorded in the stage's `manifest.json`.
+  - **Resume is by record-id MEMBERSHIP, not index-parsing**: a harvested seed
+    is a `record_id` whose trailing number is a TURN index, so the stage 1-4
+    `rsplit("_")` resume would silently resume at the wrong point.
+  - **Every failure is TAGGED by exception type, counted, and logged as it
+    happens** (worker prints to stderr with a running per-tag count; the job
+    prints an aggregate breakdown; `summarize_run` returns `errors_by_type`,
+    most-frequent first). A big count under ONE tag = a systematic fault, and
+    systematic faults eat a whole CLASS of states (the unusual ones the harvest
+    exists for) rather than a random sample. Untagged/corrupt failure rows
+    still count, so the tally can't under-report exactly when things are worst.
+  - `BlobStore` caches shards and workers sort their slice by `run_seed`, so
+    each run's shard is read ONCE (the manifest stays shuffled for cross-worker
+    load balance). `mc_seed` = `record_id` (not run seed — two records from one
+    run must not share MC draws). `num_workers` is recorded in the stage
+    manifest per pitfall #5.
 
 ## Pitfalls — read before coding
 
@@ -751,3 +851,66 @@ size (the discard path runs at n<=8 too), so it must land before C2/regen.
 - **C:** manifest checked in; a smoke labeling run (a few dozen manifest records
   end-to-end into a shard, loaded back by `train_bc.py`'s loader) passes before
   the full 9600X job is queued.
+  **STATUS 2026-07-16: C1 + C2 built and green** (branch
+  `pre-regen-c1-c2-manifest-labeling`). Manifest checked in
+  (`manifests/h1_harvested.json`, 7,891 records). The end-to-end
+  manifest-records -> labeled v3 shard path is pinned in
+  `tests/scripts/test_generate_hand_demos_harvest.py::TestEndToEnd`. REMAINING
+  before the 9600X job is queued: the wider smoke run (a few dozen records) and
+  loading its shard back through `train_bc.py`'s loader — the loader leg is the
+  one gate the test suite does not yet cover end-to-end.
+
+## BLOCKER — the regen costs ~17x its budget (2026-07-16)
+
+Do NOT queue the regen on the command below without reading
+`docs/bruteforce_speedup_and_kicker_design.md`. Measured: the full regen is
+**~2,400 CPU-h** against a budgeted ~140 (the `12s/example` figure predates all
+of phase B and is stale). Cost is `488 nodes x 218 subsets x 1.65ms score_hand`
+= 74% of runtime, and exponential in `discards_left` (d=4 is 653s/label).
+
+The 40x lever — enabling B5's prescreen at n=8, where it is currently gated off
+(`PRESCREEN_HAND_LIMIT = 8`, gate `n > 8`) — is **BLOCKED**: measured capture
+0.845, i.e. ~15.5% of labels would be WRONG, with regret up to 90% of the play's
+score, and it is **k-invariant** (identical at k=3/5/8/12), so the misses are
+GENERATOR-side. All 27/27 misses are 5-card plays with the wrong KICKERS,
+dominated by Raised Fist (lowest HELD card sets the mult) and Splash (kickers
+score). This is exactly B5's own "ACCEPTED RESIDUAL" (2/48, regret 0.0) — it did
+not stay small, it had only been measured on a sparse-joker distribution with the
+saturating recursive `p_clear`. B5's named lever (kicker VARIANTS, not k) is
+confirmed by the k-invariance.
+
+**Also live:** the n>8 prescreen IS in production for B1's 10% hand-size tail, so
+joker-dense big-hand labels are taking this kicker hit right now.
+
+Committed meanwhile: `get_x_same` O(n^2) -> O(n) (~1.15x, pure speedup, oracle-
+pinned). Micro-opts are not a plan (~1.2x more, shared-state risk).
+
+## Running the h1 regen (C2 command)
+
+The harvested stage, once the smoke run passes. `--allow-sha-mismatch` is
+REQUIRED and deliberate (see the C2 spec: corpus captured at 57f1088, skew
+analysed, The Idol repaired exactly on restore). Pass `--num-workers`
+EXPLICITLY — pitfall #5::
+
+    uv run python scripts/generate_hand_demos.py \
+        --manifest manifests/h1_harvested.json \
+        --blob-dir data/harvest_s0/blobs \
+        --output-dir data/hand_agent_demos_v3 \
+        --num-workers 12 \
+        --allow-sha-mismatch
+
+Writes `data/hand_agent_demos_v3/stage5_harvested/`. `data/` is gitignored, so
+the blob corpus (`data/harvest_s0/`, ~1700 shards) must be transferred to the
+9600X by hand; the manifest travels with the repo. Resume is safe (by
+record-id membership) as long as `--num-workers` is unchanged. The run stops
+rather than shipping a thinned stage if >3% of records fail; the per-tag
+breakdown in the error is the first thing to read if it does.
+
+**Pass `--shard-size 25`.** The 500 default EXCEEDS the per-worker range
+(8k/12 workers ~ 660; stage2's 4k/12 = 334), so workers never flush until they
+finish their whole range: progress is invisible and a kill loses every
+unflushed buffer. Observed live on the stage2 run — "2 completed shards" after
+8h meant 2 workers had FINISHED, not ~1000 examples done.
+
+Stages 1-4 regenerate separately, with their own presets + the harvested money
+marginals, into the same fresh output dir.

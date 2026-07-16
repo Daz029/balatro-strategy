@@ -147,24 +147,35 @@ def get_x_same(num: int, hand: list[Card]) -> list[list[Card]]:
 
     Returns groups ordered by rank descending (highest first).
     Each group contains exactly *num* cards.
+
+    Single-pass grouping, behaviourally identical to the Lua transcription it
+    replaces (pinned against it in
+    ``tests/engine/test_get_x_same_equivalence.py``). The original compared
+    every pair of cards, calling ``get_id()`` TWICE per comparison -- O(n^2)
+    ``get_id`` calls per invocation, and this runs 4x per ``score_hand``. At
+    ~108k ``score_hand`` calls in ONE labeled example that was ~14.1M
+    ``get_id`` calls (each doing a dict lookup for the Stone check), making
+    this function ~18% of solver runtime. Grouping in one pass calls
+    ``get_id`` once per card instead.
+
+    Equivalence rests on three details of the original:
+      - it walked ``i`` downward and OVERWROTE ``vals[card_id]``, so the
+        surviving group came from the lowest matching index and was therefore
+        in ascending index order -- which is just append order here;
+      - the output loop is descending rank id (14 -> 1);
+      - that loop spans 1..14 only, so Stone Cards (id -1) and base-less cards
+        (id 0) are grouped but never emitted.
     """
-    # vals[id] = list of cards with that id, only if count == num
-    vals: dict[int, list[Card]] = {}
+    groups: dict[int, list[Card]] = {}
+    for card in hand:
+        groups.setdefault(card.get_id(), []).append(card)
 
-    for i in range(len(hand) - 1, -1, -1):
-        curr = [hand[i]]
-        card_id = hand[i].get_id()
-        for j in range(len(hand)):
-            if hand[i].get_id() == hand[j].get_id() and i != j:
-                curr.append(hand[j])
-        if len(curr) == num:
-            vals[card_id] = curr
-
-    # Return in descending rank order
+    # Return in descending rank order (1..14 only -- see docstring).
     ret: list[list[Card]] = []
     for rank_id in range(14, 0, -1):
-        if rank_id in vals:
-            ret.append(vals[rank_id])
+        group = groups.get(rank_id)
+        if group is not None and len(group) == num:
+            ret.append(group)
     return ret
 
 
