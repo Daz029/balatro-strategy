@@ -32,12 +32,14 @@ from __future__ import annotations
 
 import json
 import multiprocessing
+import pickle
 import sys
 import time
 import traceback
+from collections import Counter
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import numpy as np
 
@@ -317,8 +319,49 @@ def indices_by_identity(cards: list, hand: list) -> list[int]:
         ) from exc
 
 
+class HandTurnState(Protocol):
+    """The minimal surface the solve/encode body needs from a hand-turn state.
+
+    Both sources satisfy it: `HandPlayAdapter` (stages 1-4, domain-randomized
+    sampling) and `RestoredHarvestState` (stage 5, a restored harvest blob).
+    Keeping the body written against this protocol rather than against
+    `HandPlayAdapter` is what lets harvested states flow through the EXACT same
+    solver, encoder and executability checks -- a second labeling path would be
+    a label-divergence surface, which is the bug class this pipeline keeps
+    getting bitten by.
+    """
+
+    @property
+    def raw_state(self) -> dict[str, Any]: ...
+
+    def step(self, action: Any) -> Any: ...
+
+
+class RestoredHarvestState:
+    """A harvested blob, restored, presented as a `HandTurnState`.
+
+    Deliberately thin: it exists only so `label_and_encode` can step the engine
+    for tier-2 validation the same way `HandPlayAdapter` does. Restoration and
+    capture-skew repair happen in `harvest_restore.restore_state` -- never
+    unpickle a harvest blob directly (see that module's docstring).
+    """
+
+    def __init__(self, gs: dict[str, Any]) -> None:
+        self._gs = gs
+
+    @property
+    def raw_state(self) -> dict[str, Any]:
+        return self._gs
+
+    def step(self, action: Any) -> dict[str, Any]:
+        from jackdaw.engine.game import step as engine_step
+
+        engine_step(self._gs, action)
+        return self._gs
+
+
 def validate_label_executability(
-    adapter: HandPlayAdapter,
+    state: HandTurnState,
     action_type: int,
     selected_indices: list[int],
 ) -> None:
@@ -344,7 +387,7 @@ def validate_label_executability(
     Raises `GenerationError` on any failure -- per the pipeline's design,
     the worker logs it to failures.jsonl and skips the example.
     """
-    gs = adapter.raw_state
+    gs = state.raw_state
     cr = gs.get("current_round", {})
     hand_size = len(gs.get("hand", []))
     if action_type not in (ActionType.PlayHand, ActionType.Discard):
@@ -371,7 +414,7 @@ def validate_label_executability(
         else EngineDiscard(card_indices=indices)
     )
     try:
-        adapter.step(engine_action)
+        state.step(engine_action)
     except Exception as exc:
         raise GenerationError(f"label failed engine execution: {exc}") from exc
 
@@ -384,7 +427,34 @@ def generate_one_example(seed: str, config: HandPlayConfig) -> Example:
     """
     adapter = HandPlayAdapter(config)
     adapter.reset(BACK_KEY, STAKE, seed)
-    gs = adapter.raw_state
+    return label_and_encode(adapter, seed)
+
+
+def generate_one_example_from_blob(blob: bytes, record_id: str) -> Example:
+    """Label one HARVESTED state (C2): restore the blob, then run the exact
+    same solve/encode body stages 1-4 use.
+
+    `record_id` doubles as the `mc_seed`, so a harvested label is byte-
+    reproducible across machines. It is the record id -- NOT the run seed --
+    because two records from one run must not share MC draws (pitfall #6).
+
+    Restoration goes through `harvest_restore.restore_state`, which repairs
+    known capture skew; unpickling the blob directly here would label states
+    under an engine bug that no longer exists.
+    """
+    from harvest_restore import restore_state
+
+    return label_and_encode(RestoredHarvestState(restore_state(blob)), record_id)
+
+
+def label_and_encode(state: HandTurnState, seed: str) -> Example:
+    """Solve, label and encode one hand-turn state, whatever produced it.
+
+    THE single labeling path: stages 1-4 reach it with a freshly sampled
+    `HandPlayAdapter` state, stage 5 with a restored harvest blob. `seed`
+    threads into the solver as `mc_seed` and is stored on the Example.
+    """
+    gs = state.raw_state
 
     hand: list = gs["hand"]
     jokers: list = gs["jokers"]
@@ -452,7 +522,7 @@ def generate_one_example(seed: str, config: HandPlayConfig) -> Example:
 
     # Must come AFTER encoding: tier 2 executes the action on the real
     # state, mutating it (the state is discarded after this function).
-    validate_label_executability(adapter, action_type, selected_indices)
+    validate_label_executability(state, action_type, selected_indices)
 
     return Example(
         global_context=ent["global_context"],
@@ -657,6 +727,315 @@ def run_generation_job(job: GenerationJobConfig) -> None:
         p.join()
 
 
+# ---------------------------------------------------------------------------
+# C2: snapshot-fed labeling front-end (the harvested BC stage)
+# ---------------------------------------------------------------------------
+#
+# Stages 1-4 SAMPLE synthetic states; this mode LABELS real ones. The states
+# come from the C1 manifest over the phase-1 harvest corpus, and everything
+# downstream of `gs` -- solver, encoder, both validation tiers, shard writer --
+# is shared with stages 1-4 by construction (see `label_and_encode`).
+
+HARVEST_STAGE_NAME = "stage5_harvested"
+
+# Stop-and-investigate threshold for the run's failure rate. A silently thinned
+# stage is worse than a loud stop: the whole point of the harvest is the states
+# it contains, and a systematic failure (a bad restore, a schema slip) would
+# preferentially eat exactly the unusual states worth having.
+DEFAULT_MAX_FAILURE_RATE = 0.03
+
+
+@dataclass
+class HarvestJobConfig:
+    manifest_path: Path
+    blob_dir: Path
+    output_dir: Path
+    num_workers: int
+    stage_name: str = HARVEST_STAGE_NAME
+    shard_size: int = 500
+    allow_sha_mismatch: bool = False
+    max_failure_rate: float = DEFAULT_MAX_FAILURE_RATE
+
+
+class BlobStore:
+    """Reads per-run blob shards (`blobs/{run_seed}.pkl`), caching recent ones.
+
+    One shard holds every record of one run, so labeling a worker's slice in
+    run order costs one read per run rather than one per record. Workers sort
+    their slice for exactly that reason (the manifest itself stays shuffled so
+    slow deep-ante states spread across workers).
+    """
+
+    def __init__(self, blob_dir: Path, cache_size: int = 2) -> None:
+        self._blob_dir = Path(blob_dir)
+        self._cache_size = max(1, cache_size)
+        self._cache: dict[str, dict[str, bytes]] = {}
+        self._order: list[str] = []
+
+    def _shard(self, run_seed: str) -> dict[str, bytes]:
+        if run_seed in self._cache:
+            return self._cache[run_seed]
+        path = self._blob_dir / f"{run_seed}.pkl"
+        if not path.exists():
+            raise GenerationError(f"blob shard missing for run {run_seed!r}: {path}")
+        with path.open("rb") as fh:
+            shard = pickle.load(fh)
+        self._cache[run_seed] = shard
+        self._order.append(run_seed)
+        while len(self._order) > self._cache_size:
+            self._cache.pop(self._order.pop(0), None)
+        return shard
+
+    def get(self, run_seed: str, record_id: str) -> bytes:
+        shard = self._shard(run_seed)
+        if record_id not in shard:
+            raise GenerationError(f"record {record_id!r} not in blob shard for {run_seed!r}")
+        return shard[record_id]
+
+
+def load_selection_manifest(path: Path) -> dict[str, Any]:
+    """Load a C1 manifest, rejecting a shape this labeler doesn't understand."""
+    with open(path, encoding="utf-8") as fh:
+        manifest = json.load(fh)
+    if manifest.get("manifest_version") != 1:
+        raise GenerationError(
+            f"{path}: unsupported manifest_version {manifest.get('manifest_version')!r}"
+        )
+    records = manifest.get("records")
+    if not records:
+        raise GenerationError(f"{path}: manifest has no records")
+    return manifest
+
+
+def check_corpus_sha(records: list[dict[str, Any]], *, allow_mismatch: bool) -> dict[str, Any]:
+    """Compare each record's capture sha against the current checkout (pitfall #7).
+
+    Blobs are pickles of live engine objects, so an engine change between
+    capture and labeling can break restoration -- or, worse, restore fine while
+    behaviour has drifted. This gate exists so that decision is always EXPLICIT:
+    re-harvest, or accept and document. It never silently proceeds.
+
+    Known and accepted for the h1 regen: `data/harvest_s0` was captured at
+    57f1088 on the 9600X (a commit that isn't in this repo, so the mismatch
+    cannot be diffed here -- only reported). The skew was analysed and the one
+    behaviour-affecting difference, The Idol's uncached `id`, is repaired
+    exactly on restore; see `harvest_restore.py`. So the h1 regen is expected to
+    pass `--allow-sha-mismatch`.
+    """
+    from harvest_s0_rollouts import git_sha  # lazy: parent process only
+
+    current = git_sha()
+    counts = Counter(str(r.get("git_sha", "unknown")) for r in records)
+    mismatched = {sha: n for sha, n in counts.items() if sha != current}
+    report = {
+        "current_sha": current,
+        "record_shas": dict(sorted(counts.items())),
+        "n_mismatched": sum(mismatched.values()),
+        "allowed": allow_mismatch,
+    }
+    if not mismatched:
+        return report
+
+    detail = ", ".join(f"{sha[:10]} x{n}" for sha, n in sorted(mismatched.items()))
+    if not allow_mismatch:
+        raise GenerationError(
+            f"{sum(mismatched.values())}/{len(records)} records were captured at a "
+            f"different engine sha than this checkout ({current[:10]}): {detail}. "
+            "Blobs are pickles of live engine objects, so labeling them here may be "
+            "wrong in ways that load cleanly. Re-harvest, or pass "
+            "--allow-sha-mismatch to accept the skew explicitly."
+        )
+    print(
+        f"[c2] WARNING: engine-version skew ACCEPTED via --allow-sha-mismatch. "
+        f"checkout={current[:10]} corpus={detail}. Known skew (The Idol's uncached "
+        f"id) is repaired on restore; see harvest_restore.py."
+    )
+    return report
+
+
+def _completed_record_ids(output_dir: Path, worker_id: int) -> tuple[set[str], int]:
+    """Which records this worker already wrote, and its next shard index.
+
+    Resume is by record-id MEMBERSHIP, not by parsing an index out of the seed
+    the way the stage 1-4 path does: a harvested seed is a `record_id` whose
+    trailing number is a turn index, so index-parsing would silently resume at
+    the wrong place.
+    """
+    done: set[str] = set()
+    shard_paths = sorted(output_dir.glob(f"worker_{worker_id:03d}_shard_*.npz"))
+    for shard_path in shard_paths:
+        done.update(str(seed) for seed in np.load(shard_path)["seed"])
+    return done, len(shard_paths)
+
+
+def _harvest_worker_run(
+    worker_id: int,
+    records: list[dict[str, Any]],
+    blob_dir: Path,
+    output_dir: Path,
+    shard_size: int,
+) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    failures_path = output_dir / f"worker_{worker_id:03d}_failures.jsonl"
+
+    done, shard_idx = _completed_record_ids(output_dir, worker_id)
+    store = BlobStore(blob_dir)
+    todo = [r for r in records if str(r["record_id"]) not in done]
+    # Blob locality: one shard read per run instead of one per record.
+    todo.sort(key=lambda r: (str(r["run_seed"]), str(r["record_id"])))
+
+    error_counts: Counter = Counter()
+    buffer: list[Example] = []
+
+    def flush() -> None:
+        nonlocal shard_idx
+        if not buffer:
+            return
+        write_shard(output_dir / f"worker_{worker_id:03d}_shard_{shard_idx:05d}.npz", buffer)
+        shard_idx += 1
+        buffer.clear()
+
+    with open(failures_path, "a", encoding="utf-8") as failures_file:
+        for record in todo:
+            record_id = str(record["record_id"])
+            try:
+                blob = store.get(str(record["run_seed"]), record_id)
+                example = generate_one_example_from_blob(blob, record_id)
+            except Exception as exc:  # noqa: BLE001 -- one bad record must not kill the worker
+                # Tag every failure by kind and surface it as it happens.
+                # A skipped record is invisible otherwise, and the failures
+                # that matter here are SYSTEMATIC (a bad restore, a schema
+                # slip): those eat a whole class of states, so the tag
+                # breakdown is what distinguishes "a few odd hands" from
+                # "the harvest is quietly broken".
+                error_type = type(exc).__name__
+                error_counts[error_type] += 1
+                failures_file.write(
+                    json.dumps(
+                        {
+                            "seed": record_id,
+                            "run_seed": record.get("run_seed"),
+                            "error_type": error_type,
+                            "error": str(exc),
+                            "traceback": traceback.format_exc(),
+                        }
+                    )
+                    + "\n"
+                )
+                failures_file.flush()
+                print(
+                    f"[c2][worker {worker_id:03d}] FAILED {record_id}: {error_type}: {exc} "
+                    f"(this worker: {error_counts[error_type]}x {error_type}, "
+                    f"{sum(error_counts.values())}/{len(todo)} failed)",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                continue
+            buffer.append(example)
+            if len(buffer) >= shard_size:
+                flush()
+        flush()
+
+
+def summarize_run(output_dir: Path, n_requested: int) -> dict[str, Any]:
+    """Count what actually landed, so a thinned stage can't ship unnoticed.
+
+    `errors_by_type` is the diagnostic that matters: a handful of assorted
+    failures is noise, but a large count under ONE tag means a systematic
+    fault, and systematic faults eat a whole CLASS of states (exactly the
+    unusual ones the harvest exists for) rather than a random sample.
+    """
+    n_written = 0
+    for shard_path in sorted(output_dir.glob("worker_*_shard_*.npz")):
+        n_written += len(np.load(shard_path)["seed"])
+
+    n_failed = 0
+    errors_by_type: Counter = Counter()
+    for failures_path in sorted(output_dir.glob("worker_*_failures.jsonl")):
+        with open(failures_path, encoding="utf-8") as fh:
+            for line in fh:
+                if not line.strip():
+                    continue
+                n_failed += 1
+                try:
+                    errors_by_type[str(json.loads(line).get("error_type", "unknown"))] += 1
+                except json.JSONDecodeError:
+                    errors_by_type["unparseable_failure_row"] += 1
+
+    return {
+        "n_requested": n_requested,
+        "n_written": n_written,
+        "n_failed": n_failed,
+        "failure_rate": round(n_failed / n_requested, 4) if n_requested else 0.0,
+        "errors_by_type": dict(sorted(errors_by_type.items(), key=lambda kv: (-kv[1], kv[0]))),
+    }
+
+
+def run_harvest_job(job: HarvestJobConfig) -> dict[str, Any]:
+    """Label the C1 manifest's records into a shard stage (C2's entry point)."""
+    manifest = load_selection_manifest(job.manifest_path)
+    records: list[dict[str, Any]] = manifest["records"]
+    sha_report = check_corpus_sha(records, allow_mismatch=job.allow_sha_mismatch)
+
+    job.output_dir.mkdir(parents=True, exist_ok=True)
+    # num_workers is RECORDED, not just used: resume partitioning is fixed by
+    # (record list, num_workers), and the 2026-07-05 incident was a transferred
+    # partial run silently re-partitioning under a different default (925
+    # duplicated + 321 missing examples).
+    job_manifest = {
+        "stage_name": job.stage_name,
+        "schema_version": SCHEMA_VERSION,
+        "source": "harvested",
+        "selection_manifest": job.manifest_path.as_posix(),
+        "selection_manifest_params": manifest.get("params"),
+        "blob_dir": job.blob_dir.as_posix(),
+        "n_records": len(records),
+        "num_workers": job.num_workers,
+        "shard_size": job.shard_size,
+        "engine_sha": sha_report,
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    with open(job.output_dir / "manifest.json", "w", encoding="utf-8") as fh:
+        json.dump(job_manifest, fh, indent=2)
+
+    processes = []
+    for worker_id, (start_idx, end_idx) in enumerate(
+        partition_indices(len(records), job.num_workers)
+    ):
+        p = multiprocessing.Process(
+            target=_harvest_worker_run,
+            args=(
+                worker_id,
+                records[start_idx:end_idx],
+                job.blob_dir,
+                job.output_dir,
+                job.shard_size,
+            ),
+        )
+        p.start()
+        processes.append(p)
+    for p in processes:
+        p.join()
+
+    summary = summarize_run(job.output_dir, len(records))
+    if summary["n_failed"]:
+        breakdown = ", ".join(f"{n}x {tag}" for tag, n in summary["errors_by_type"].items())
+        print(
+            f"[c2] {summary['n_failed']}/{summary['n_requested']} records failed "
+            f"({summary['failure_rate']:.2%}): {breakdown}. Details in "
+            f"{job.output_dir}/worker_*_failures.jsonl"
+        )
+    if summary["failure_rate"] > job.max_failure_rate:
+        breakdown = ", ".join(f"{n}x {tag}" for tag, n in summary["errors_by_type"].items())
+        raise GenerationError(
+            f"{summary['n_failed']}/{summary['n_requested']} records failed "
+            f"({summary['failure_rate']:.1%} > {job.max_failure_rate:.1%}): {breakdown}. "
+            "Stage may be systematically thinned -- inspect worker_*_failures.jsonl "
+            "before consuming it."
+        )
+    return summary
+
+
 def _parse_int_range(spec: str) -> tuple[int, int]:
     lo, hi = spec.split(",")
     return (int(lo), int(hi))
@@ -671,6 +1050,36 @@ def main() -> None:
         choices=sorted(stage_presets()),
         help="Use a named curriculum-stage preset (config + example count). "
         "Explicit flags below override individual preset fields.",
+    )
+    harvest = parser.add_argument_group(
+        "harvested stage (C2)",
+        "Label real mid-run states selected by a C1 manifest instead of sampling "
+        "domain-randomized ones. --manifest switches the script into this mode; the "
+        "stage-preset/config flags do not apply to it.",
+    )
+    harvest.add_argument(
+        "--manifest",
+        type=Path,
+        default=None,
+        help="C1 selection manifest (e.g. manifests/h1_harvested.json)",
+    )
+    harvest.add_argument(
+        "--blob-dir",
+        type=Path,
+        default=Path("data/harvest_s0/blobs"),
+        help="per-run blob shards from the phase-1 harvest",
+    )
+    harvest.add_argument(
+        "--allow-sha-mismatch",
+        action="store_true",
+        help="accept records captured at a different engine sha (logs loudly). "
+        "Required for the h1 corpus -- see check_corpus_sha.",
+    )
+    harvest.add_argument(
+        "--max-failure-rate",
+        type=float,
+        default=DEFAULT_MAX_FAILURE_RATE,
+        help="fail the run rather than ship a silently thinned stage",
     )
     parser.add_argument("--stage-name", help="Dataset/seed-prefix name; defaults to --stage")
     parser.add_argument("--total-examples", type=int, help="Required unless --stage is given")
@@ -703,6 +1112,23 @@ def main() -> None:
     parser.add_argument("--joker-pool", default=None, help="comma-separated joker keys")
     parser.add_argument("--joker-count-range", type=_parse_int_range, default=None)
     args = parser.parse_args()
+
+    if args.manifest is not None:
+        stage_name = args.stage_name or HARVEST_STAGE_NAME
+        summary = run_harvest_job(
+            HarvestJobConfig(
+                manifest_path=args.manifest,
+                blob_dir=args.blob_dir,
+                output_dir=args.output_dir / stage_name,
+                num_workers=args.num_workers,
+                stage_name=stage_name,
+                shard_size=args.shard_size,
+                allow_sha_mismatch=args.allow_sha_mismatch,
+                max_failure_rate=args.max_failure_rate,
+            )
+        )
+        print(f"[c2] {json.dumps(summary)}")
+        return
 
     if args.stage:
         preset = stage_presets()[args.stage]

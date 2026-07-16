@@ -622,7 +622,46 @@ forces a second regen.
     negligible tail cost, not a correctness gate. Verification: ruff-clean (no
     new errors), 168 solver/generation tests pass incl. `generate_hand_demos` on
     the gated default.
-  Next: C1 after all B gates are complete (B7 now resolved).
+  ### C1 + C2 BUILT (2026-07-16, branch `pre-regen-c1-c2-manifest-labeling`)
+  All B gates complete, so the C phase ran. C1
+  (`scripts/select_harvest_manifest.py`) selects which harvested records get
+  labeled and emits the checked-in `manifests/h1_harvested.json`; C2
+  (`--manifest` mode in `generate_hand_demos.py` +
+  `scripts/harvest_restore.py`) labels them into `stage5_harvested` v3 shards.
+  Full records in `docs/pre-regen-handoff.md`. The load-bearing findings:
+  - **C1 realized 7,891 records, and the CAPS — not the 8k target — bind.**
+    Every (run,ante) bucket has >=3 records so `per_ante_cap=3` always binds;
+    det supply is 5,891 (109 SHORT of its 6,000 target), sampled thins
+    2,467 -> 2,000. Realized det_frac 0.7465 ~ the 75:25 anchor anyway. Targets
+    are CEILINGS: a short source is NOT backfilled from the other (that would
+    silently shift the anchor). The ante marginal is deliberately NOT flattened
+    — deep-ante coverage is stages 1-4's job, the harvest's is realism at the
+    antes s0 reaches, and ante 7 has 20 records total. Manifest lives in
+    `manifests/` because `data/` is gitignored.
+  - **CAPTURE SKEW IS REAL — and the rule generalizes.** The corpus was
+    captured at sha `57f1088` on the 9600X (a commit not in this repo, so the
+    check can only report "differs", never diff it). **An engine fix that
+    changes COMPUTATION is inherited by the harvest for free — a blob is
+    re-scored by current code (blueprint_compat, B3 ordering, B5 prescreen, B7
+    ranking all apply automatically). An engine fix that changes STORED STATE
+    is NOT: the blob's stale cache wins, because fidelity to the capture is
+    what preserves the old bug.** B2's Idol fix is the latter — it added
+    `idol_card["id"]` to the round-start cache that the handler matches on, so
+    every pre-fix blob would label The Idol as DEAD (~0.53% of hand records,
+    silently). Repaired EXACTLY on restore (`id` is a pure function of the
+    stored `rank` via the engine's own `_RANK_ID`, so nothing was lost, only
+    uncached); verified on real blobs at exactly 2.00x, `_RANK_ID` pinned
+    against `CardBase.from_card_key`. Grep for this class whenever a fix lands
+    between capture and labeling. A key-set diff CANNOT catch it (the field
+    hides inside a cached dict value) — the shape guard is what covers it.
+  - **The h1 regen must pass `--allow-sha-mismatch`** (fatal by default;
+    pitfall #7's "never silently proceed"). Every failure is tagged by
+    exception type, counted and logged (a big count under ONE tag = a
+    systematic fault eating a whole CLASS of states); >3% failure stops the run
+    rather than shipping a thinned stage.
+  Next: the wider smoke run + loading a harvested shard back through
+  `train_bc.py`'s loader (the one C-phase gate not yet covered end-to-end),
+  then the regen itself on the 9600X.
 
 ### h1 architecture — Candidate B COMMITTED (autoregressive pointer head)
 
