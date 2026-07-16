@@ -527,6 +527,39 @@ class DiscardChoice:
 PRESCREEN_HAND_LIMIT = 8
 PRESCREEN_TOP_K = 5
 
+# --- B7 discard-shortlist depth gating (locked 2026-07-16) ------------------
+# The joker/held-aware discard ranker (B7) ranks by `p_reach * cheap_value`,
+# where `cheap_value` scores ONE idealized completion -- an EV of the peak hit,
+# not P(clear). It is therefore threshold-blind and occasionally over-ranks a
+# high-ceiling completion, dropping a higher-CONVERSION discard past the top-k
+# cut. The faithful-MC top_k sweep (data/discard_ranking_sweep.json) showed
+# every such regression lives exactly at that cut: widening the box to 6
+# re-includes the dropped discard and heals the hard cases. But solve cost
+# scales ~(k/4)^discards_left, so a flat 6 roughly doubles the whole regen
+# wall (flat 8 ~4x) with multi-minute stragglers on deep big-hand states. The
+# regressors all live at SHALLOW depth (discards_left 1-2), where the wide box
+# is cheap, so we widen there and keep 4 on deep chains to cap the (k/4)^3
+# tail. See CLAUDE.md "B7 discard-shortlist DEPTH-GATED WIDENING" for the full
+# rationale + worked example (seed DISCARD_RANK_VAL_00000247, Shoot the Moon).
+DISCARD_TOPK_WIDE = 6
+DISCARD_TOPK_NARROW = 4
+DISCARD_TOPK_WIDE_MAX_DISCARDS = 2
+
+
+def _discard_shortlist_k(discards_left: int) -> int:
+    """Production discard-shortlist width for a node with `discards_left`
+    discards remaining: `DISCARD_TOPK_WIDE` on shallow chains
+    (`discards_left <= DISCARD_TOPK_WIDE_MAX_DISCARDS`), else
+    `DISCARD_TOPK_NARROW`. Callers that pass an explicit `top_k` bypass this
+    gate entirely (fixed box) -- that path is for the B7 validation harness,
+    the top_k sweep, and the existence-proof tests, which need a k held
+    constant across old-vs-new comparisons; production label generation leaves
+    `top_k=None` and gets the gate."""
+    if discards_left <= DISCARD_TOPK_WIDE_MAX_DISCARDS:
+        return DISCARD_TOPK_WIDE
+    return DISCARD_TOPK_NARROW
+
+
 # Realized hand types that count as an in-hand rank line for the pair pin
 # (see prescreen_play_candidates): complete now, zero draw risk.
 _RANK_LINE_TYPES = frozenset(
@@ -1308,7 +1341,7 @@ def solve_hand_turn(
     *,
     four_fingers: bool = False,
     shortcut: bool = False,
-    top_k: int = 4,
+    top_k: int | None = None,
     hand_size: int | None = None,
     joker_aware: bool = True,
 ) -> AnteClearChoice:
@@ -1327,6 +1360,13 @@ def solve_hand_turn(
     shrinking deck as the discard chain progresses -- a documented
     simplification, since within one hand-turn the deck only changes by a
     handful of cards.
+
+    `top_k` sizes the discard shortlist. `None` (production) uses the
+    depth-gate `_discard_shortlist_k`: width 6 while `discards_left <= 2`,
+    width 4 deeper -- widening only the shallow chains where B7's
+    boundary regressions live, keeping the narrow box on deep chains to cap
+    the `(k/4)^discards_left` cost tail. An explicit int forces a fixed box
+    at every node (validation harness / sweep / existence-proof tests).
 
     `joker_aware` selects the discard-shortlist ranker (B7): the default
     True is production (joker/held-aware `rank_templates_cheaply`); False
@@ -1367,9 +1407,13 @@ def solve_hand_turn(
     if discards_left <= 0:
         return best
 
+    # top_k=None (production) -> depth-gated width; an explicit int is a fixed
+    # box (validation/tests). Re-evaluated per node off THIS node's
+    # discards_left, so a chain widens as it approaches its leaf.
+    effective_top_k = top_k if top_k is not None else _discard_shortlist_k(discards_left)
     candidates = rank_templates_cheaply(
         hand, deck, hand_levels, blind, rng,
-        four_fingers=four_fingers, shortcut=shortcut, top_k=top_k,
+        four_fingers=four_fingers, shortcut=shortcut, top_k=effective_top_k,
         jokers=jokers, game_state=game_state, blind_chips=blind_chips,
         joker_aware=joker_aware,
     )
@@ -1440,7 +1484,7 @@ def solve_hand_for_ante_clear(
     *,
     four_fingers: bool = False,
     shortcut: bool = False,
-    top_k: int = 4,
+    top_k: int | None = None,
     mc_seed: str | None = None,
 ) -> AnteClearChoice:
     """Top-level entry point: computes the future-hand distribution once
@@ -1451,6 +1495,10 @@ def solve_hand_for_ante_clear(
     Pass `mc_seed` (e.g. the episode seed) whenever the output becomes a
     training label -- it makes the future-hand MC draws, and therefore
     p_clear, reproducible.
+
+    `top_k` defaults to `None` = the production discard-shortlist depth gate
+    (6 at `discards_left <= 2`, 4 deeper; see `_discard_shortlist_k` and
+    `solve_hand_turn`). Pass an explicit int only to force a fixed box.
     """
     if mc_seed is not None:
         # `prob_clear_given_future`'s tiny LCG carries state across calls
