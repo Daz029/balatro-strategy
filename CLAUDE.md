@@ -294,6 +294,18 @@ build — all s0-independent] -> harvest pass -> labels -> regen -> BC -> PPO ->
   (dollars at hand-turn entry, stratified by ante), with a ~20% flat tail so BC still
   sees off-distribution money states — retires the flat/uniform placeholder AND the
   server-log calibration dependency.
+  WIRED 2026-07-16 (was designed-but-unbuilt — the reductions artifact existed with no
+  consumer): `dollar_marginals` + `dollar_flat_tail_prob` (default 0.2) in
+  `HandPlayConfig`, sampled per-ante with nearest-harvested-ante fallback (the harvest
+  covers antes 1-7 only; marginals include NEGATIVE dollars — Credit Card debt states);
+  `--dollar-marginals data/harvest_s0/reductions.json` on `generate_hand_demos.py`
+  (data/ is gitignored — copy reductions.json to the regen machine by hand). The B1
+  flat hand-size tail is user-locked (2026-07-16) at prob 0.1, delta uniform +1..+4
+  (additive after add_to_deck passives, so equivalent to bumping base hand size) and
+  baked into ALL FOUR stage presets. `--dollar-tail-prob` / `--hand-size-tail-prob` /
+  `--hand-size-delta-range` CLI overrides exist. Regen output goes to a FRESH dir
+  (`data/hand_agent_demos_v3/`), keeping the h0-era pool intact per the
+  pre_discard_cap backup pattern.
 
 ### Rollout / harvest pass — LAID OUT (2026-07-12), not yet built
 
