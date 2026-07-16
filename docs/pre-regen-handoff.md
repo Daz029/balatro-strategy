@@ -595,6 +595,25 @@ size (the discard path runs at n<=8 too), so it must land before C2/regen.
   headline numbers = disagreement rate, `frac_helped` above floor, and
   `n_regressions_below_floor` (must be 0). Do not read the tiny smoke as the
   gate.
+- **RESOLVED 2026-07-16 — KEEP B7 + depth-gate the shortlist (branch
+  `b7-topk-depth-gate` off main).** The 200-state gate was net-positive but
+  NOT clean (25 helped / 9 regressed at `top_k=4`,
+  `data/discard_ranking_validation.json`). A top_k sweep
+  (`scripts/validate_discard_ranking_sweep.py`, k=4/6/8/12/64,
+  `data/discard_ranking_sweep.json`) showed every regression lives at the
+  rank-k cut: widening to 6 heals ~all hard cases (9->6 regressions), k=64 =>
+  0 disagreements (no-op sanity check passes). Fix: production discard
+  `top_k` is now depth-gated — **6 at `discards_left <= 2`, 4 at
+  `discards_left >= 3`** (`_discard_shortlist_k`; `solve_hand_turn` /
+  `solve_hand_for_ante_clear` take `top_k=None` = gate, explicit int = fixed
+  box for the harness/tests; `generate_hand_demos` uses the default). Gated
+  because solve cost scales `(k/4)^discards_left` (flat-6 ~2x the regen wall,
+  flat-8 ~4x, with multi-minute deep-hand stragglers); the regressors all sit
+  at shallow depth where the wide box is cheap, so keeping 4 at d_left>=3 caps
+  the tail (~1.7x blended). Label-semantics change => still a pre-regen lock.
+  Full reasoning + worked example (seed 247, Shoot the Moon) in CLAUDE.md
+  "B7 discard-shortlist DEPTH-GATED WIDENING". Verified: ruff-clean, 168
+  solver/generation tests green.
 
 ### C1 — selection script → manifest (new, small)
 

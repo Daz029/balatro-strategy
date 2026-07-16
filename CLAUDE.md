@@ -561,7 +561,55 @@ forces a second regen.
   Verification: Ruff + 64 generator/solver/env B4 tests pass in the native
   WSL environment; the torch-dependent `test_train_bc.py` loader suite is
   pending a native CPU Torch install.
-  Next: B7 validation run, then C1 after all B gates are complete.
+  ### B7 discard-shortlist DEPTH-GATED WIDENING (validated + locked 2026-07-16,
+  branch `b7-topk-depth-gate` off main)
+  The faithful-MC old-vs-new gate (`scripts/validate_discard_ranking.py`, 200
+  stage3 states, n_samples=80, `data/discard_ranking_validation.json`) came back
+  NET-POSITIVE but not clean: 25 helped / 9 regressed at the production discard
+  `top_k=4`. The follow-up top_k SWEEP (`scripts/validate_discard_ranking_sweep.py`,
+  k=4/6/8/12/64, `data/discard_ranking_sweep.json`) localized EVERY regression to
+  the rank-k truncation boundary: widening the shortlist to 6 heals ~all the hard
+  cases (regressions 9->6; 3 of the 4 uniform-worse seeds clear), and k=64 =>
+  0 disagreements (B7 is a provable no-op once the box covers all templates).
+  DECISION: KEEP B7 and DEPTH-GATE the shortlist width rather than flat-bump —
+  `top_k=6` at `discards_left <= 2`, `top_k=4` at `discards_left >= 3`
+  (`_discard_shortlist_k` in hand_solver.py). `solve_hand_turn` /
+  `solve_hand_for_ante_clear` take `top_k=None` = the gate; an explicit int is a
+  fixed box for the validation harness / sweep / existence-proof tests;
+  `generate_hand_demos` uses the default, so the regen inherits the gate. This is
+  a LABEL-SEMANTICS change (a bigger box can move the argmax at shallow-discard
+  nodes) => pre-regen lock, lands before C2.
+  - ERROR MODE it targets: B7 ranks discard branches by `p_reach x cheap_value`,
+    and `cheap_value` scores ONE idealized completion — an EV of the PEAK hit,
+    NOT P(clear). It is threshold-blind, so it over-ranks a high-ceiling
+    completion and can drop a higher-CONVERSION discard past the top-4 cut, where
+    the exact valuation never sees it. Same single-idealized-hit limitation the
+    harness docstring flags; it bites only on the DISCARD side (a redraw
+    distribution exists) — the play-side prescreen B5 is exact because the cards
+    are already in hand, so B5's clean result is NOT evidence for B7.
+  - EXAMPLE (seed DISCARD_RANK_VAL_00000247): hand `Ad Qh Qd Js 9c 9d 5s 2s`,
+    jokers incl. Shoot the Moon (+mult per Queen HELD). At top_k=4 B7 dropped
+    `discard{Js 9c 9d 5s 2s}` (keeps BOTH Queens — faithfully best at every goal,
+    P(clear) 0.45/0.34/0.21/0.075) for a one-Queen line with a flashier single
+    completion (uniform -0.175). The two-Queen discard sits at rank 5, so widening
+    to 6 re-includes it and the loss vanishes.
+  - WHY GATED, not flat-6: solve cost scales ~`(k/4)^discards_left` (measured:
+    d_left=1 x1.3@6/x2.0@8; d_left=2 x2.2@6/x4.0@8; d_left=3 model ~x3.4@6/x8@8;
+    d_left=0 unaffected). discards_left is ~uniform over {0,1,2,3} in the regen,
+    so a FLAT 6 ~doubles the whole regen wall (flat 8 ~4x) with multi-minute
+    stragglers on deep big-hand states (one measured state 61s -> 257s at k=8).
+    The regressors ALL live at shallow depth (d_left 1-2; seed 247 is d_left=1)
+    where the wide box is cheap, so the gate keeps 4 at d_left>=3 to cap the
+    `(k/4)^3` tail: blended ~1.7x the regen (vs flat-6 ~2.0x) and a bounded
+    per-example worst case.
+  - STAKES: low. The residual boundary regressions are the PPO-correctable class
+    (real reward is P(clear); the mis-ranked discard is a legal single-step
+    action; the A3 verdict "training problem not labels" stands) — PPO makes
+    gated-B7 and jokerless converge, so this is a cleaner BC STARTING prior at
+    negligible tail cost, not a correctness gate. Verification: ruff-clean (no
+    new errors), 168 solver/generation tests pass incl. `generate_hand_demos` on
+    the gated default.
+  Next: C1 after all B gates are complete (B7 now resolved).
 
 ### h1 architecture — Candidate B COMMITTED (autoregressive pointer head)
 
