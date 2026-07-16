@@ -860,6 +860,31 @@ size (the discard path runs at n<=8 too), so it must land before C2/regen.
   loading its shard back through `train_bc.py`'s loader — the loader leg is the
   one gate the test suite does not yet cover end-to-end.
 
+## BLOCKER — the regen costs ~17x its budget (2026-07-16)
+
+Do NOT queue the regen on the command below without reading
+`docs/bruteforce_speedup_and_kicker_design.md`. Measured: the full regen is
+**~2,400 CPU-h** against a budgeted ~140 (the `12s/example` figure predates all
+of phase B and is stale). Cost is `488 nodes x 218 subsets x 1.65ms score_hand`
+= 74% of runtime, and exponential in `discards_left` (d=4 is 653s/label).
+
+The 40x lever — enabling B5's prescreen at n=8, where it is currently gated off
+(`PRESCREEN_HAND_LIMIT = 8`, gate `n > 8`) — is **BLOCKED**: measured capture
+0.845, i.e. ~15.5% of labels would be WRONG, with regret up to 90% of the play's
+score, and it is **k-invariant** (identical at k=3/5/8/12), so the misses are
+GENERATOR-side. All 27/27 misses are 5-card plays with the wrong KICKERS,
+dominated by Raised Fist (lowest HELD card sets the mult) and Splash (kickers
+score). This is exactly B5's own "ACCEPTED RESIDUAL" (2/48, regret 0.0) — it did
+not stay small, it had only been measured on a sparse-joker distribution with the
+saturating recursive `p_clear`. B5's named lever (kicker VARIANTS, not k) is
+confirmed by the k-invariance.
+
+**Also live:** the n>8 prescreen IS in production for B1's 10% hand-size tail, so
+joker-dense big-hand labels are taking this kicker hit right now.
+
+Committed meanwhile: `get_x_same` O(n^2) -> O(n) (~1.15x, pure speedup, oracle-
+pinned). Micro-opts are not a plan (~1.2x more, shared-state risk).
+
 ## Running the h1 regen (C2 command)
 
 The harvested stage, once the smoke run passes. `--allow-sha-mismatch` is
@@ -880,6 +905,12 @@ the blob corpus (`data/harvest_s0/`, ~1700 shards) must be transferred to the
 record-id membership) as long as `--num-workers` is unchanged. The run stops
 rather than shipping a thinned stage if >3% of records fail; the per-tag
 breakdown in the error is the first thing to read if it does.
+
+**Pass `--shard-size 25`.** The 500 default EXCEEDS the per-worker range
+(8k/12 workers ~ 660; stage2's 4k/12 = 334), so workers never flush until they
+finish their whole range: progress is invisible and a kill loses every
+unflushed buffer. Observed live on the stage2 run — "2 completed shards" after
+8h meant 2 workers had FINISHED, not ~1000 examples done.
 
 Stages 1-4 regenerate separately, with their own presets + the harvested money
 marginals, into the same fresh output dir.
