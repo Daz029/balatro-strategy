@@ -559,8 +559,9 @@ forces a second regen.
   hand-mask bounds, and action budgets. The legacy flat BC trainer rejects
   wide labels explicitly pending Candidate B, rather than dropping them.
   Verification: Ruff + 64 generator/solver/env B4 tests pass in the native
-  WSL environment; the torch-dependent `test_train_bc.py` loader suite is
-  pending a native CPU Torch install.
+  WSL environment; the torch-dependent `test_train_bc.py` loader suite
+  passed natively 2026-07-16 (13 tests, Torch 2.10.0+cpu) — B4 verification
+  fully closed.
   ### B7 discard-shortlist DEPTH-GATED WIDENING (validated + locked 2026-07-16,
   branch `b7-topk-depth-gate` off main)
   The faithful-MC old-vs-new gate (`scripts/validate_discard_ranking.py`, 200
