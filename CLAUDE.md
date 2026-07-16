@@ -662,6 +662,101 @@ forces a second regen.
   Next: the wider smoke run + loading a harvested shard back through
   `train_bc.py`'s loader (the one C-phase gate not yet covered end-to-end),
   then the regen itself on the 9600X.
+  ### Kicker variants + prescreen-at-n=8 — GRILLED AND LOCKED (2026-07-16)
+  Decision record for `docs/bruteforce_speedup_and_kicker_design.md` (findings
+  doc; measurements live there — the 17x budget overrun, the 0.845 capture /
+  90% max-regret n=8 verdict, the 27/27 kicker attribution). This is a NEW
+  pre-regen item ("K"): a LABEL-SEMANTICS change that gates the remaining
+  regen stages. Not yet built.
+  - **One path, gated**: kicker fix lands -> gate passes -> delete
+    `PRESCREEN_HAND_LIMIT` entirely (every hand size screened uniformly —
+    kills the n<=8/n>8 seam that let B5's residual hide). Gate fails ->
+    rescan/classify surviving misses (the stage2 oracle below supplies the
+    table), add a hypothesis, re-measure; endgame if classifiable structure
+    runs out = keep brute force at n=8 (eat the multi-day run) + accept the
+    n>8 tail bias.
+  - **The gate, TWO arms, both required**: (1) root arm — score-capture-by-
+    VALUE >= 95% and regret within ~1.33x the MC-reseed noise floor, on
+    stage2 density, at n=8 AND the 9-12 tail (B1 knob), plus a stage3/4
+    sample for copy-joker coverage; completed brute-force stage2 folds in as
+    a ~4k-state FREE oracle (a stored PlayHand label IS the 218-way argmax —
+    §3's free-oracle note — so capture costs k+1 evals/state). (2) full-solve
+    arm (BUILD IT — currently sketched only): wrap `best_immediate_play`
+    inside ~10 real solves so every node at true depth is measured (~5k
+    nodes, ~25 min); same node-level bar, depth-stratified; root-action
+    agreement as smoke readout only. Root-only gating REJECTED (measures the
+    prescreen where it fires least — 1 of ~488 nodes, none post-discard; and
+    deep misses are DIRECTIONAL: undervalued future hands tilt labels toward
+    playing now, compounding the documented play-only MC bias). Passing both
+    arms is also what licenses B7's validated sweep to carry over unchanged
+    (its numbers were measured with brute force inside the recursion).
+  - **The fix is GENERATION-ONLY — `_ranking_score` untouched** ("change the
+    ranking criteria" REJECTED: `_ranking_score` is a real joker/held-aware
+    `score_hand` call that already values kickers correctly when given them;
+    27/27 misses had the right line — generation starved the candidate set,
+    ranking judged what it was given; and touching it forces B7 revalidation
+    for zero benefit). `_kicker_pad` becomes a hypothesis-gated variant
+    emitter: a variant = the GREEDY argmax completion of a line under ONE
+    hypothesis about where kicker value lives — (1) inert/nominal-best
+    (current behavior, kept), (2) scored-value (chips + enhancement +
+    scored-channel candidacy bits), emitted ONLY when the Splash flag is set
+    (Splash is class-3 all-zero in the trigger matrix BY DESIGN — the flag
+    must come from `get_hand_eval_flags`, and without Splash kickers never
+    score so the variant is pure waste), (3) held-value (retain held-channel
+    matches — Baron/Shoot the Moon/Mime — and held enhancements like steel;
+    pad with the cards least valuable held), (4) play-away-lowest (provably
+    exact for Raised Fist's min term; the matrix's raised-fist bit marks the
+    CURRENT minimum — wrong rule for the counterfactual choice). NO
+    magnitudes anywhere: the key's only job is presence-in-set; the exact
+    evaluator arbitrates (that is why "raw derivation" is safe). Presence
+    gates read RESOLVED joker identities only (engine copy-resolution path,
+    B2) — `blueprint_compat` (Splash is on the 29-incompat list) comes free;
+    the emitter never inspects raw keys. Dedupe collapses variants on plain
+    boards, so the budget is adaptive, not 3x flat. Accepted-and-measured
+    residuals: mixed-hypothesis optima (Raised Fist + a steel 2) and class-3
+    set-level jokers (Blackboard held-purity, Flower Pot under Splash) — they
+    earn a hypothesis only if the rescan shows them.
+  - **Family key REDEFINED to `(hand_type, line-card identity set)`** via a
+    splash-agnostic hand-type scan of the played 5 (no joker scoring), NOT
+    `score_hand`'s `scoring_cards`: under Splash every played card scores, so
+    kicker variants of one line get distinct scoring sets = distinct families
+    and would crowd `family_best` — pitfall #13 recreated by the fix on
+    exactly the boards it targets. Key must keep the card SET (hand type
+    alone would collapse a pair of Kings with a pair of 3s) and must not
+    choke on base-less Stone cards (existing fallback path).
+  - **Variants RIDE**: `top_k` counts LINES; every surviving line carries all
+    its variants into the exact pass (~15 candidates vs 218 — the doc's
+    budget math), which arbitrates with the full ordering search.
+    Cheap-arbitration-is-final REJECTED: it silently demotes kicker choice to
+    the fixed-order ranking tier (Photograph/Hanging Chad class), the same
+    contract erosion that hid B5's residual.
+  - **Discard side: measure-first, NO code change** (its completions are
+    idealized draws — kicker variants there are hypotheses about hypothetical
+    cards). Rerun `validate_discard_ranking_sweep.py` on STAGE2-CONFIG
+    density (B7 validated on stage3 states — the same density lesson).
+    TRIPWIRE: regret above the same noise-floor-scaled bar, or the
+    directional signature (dropping discards whose value lives in
+    kickers/held cards), pulls variant extension into discard completions
+    forward WITH B7 revalidation costed in. Narrowing the B7 depth-gate k to
+    fund variants REJECTED (re-opens the measured rank-truncation boundary —
+    un-pays for B7).
+  - **Data disposition**: the in-flight brute-force stage2 (~10h wall,
+    validating the doc's median-not-mean health warning almost exactly) is
+    KEPT — brute labels are strictly better; provenance (stage2 =
+    brute-exact, other stages = prescreened) recorded at the writer. Its
+    ~10% hand-size-tail examples (~400, identifiable by shard hand width >8)
+    carry the LIVE n>8 kicker bug -> relabel post-fix. No other stage starts
+    before the fix + gate. Amdahl honesty: the 218->~15 cut is ~5-6x overall
+    (node count is discard-driven, untouched), not 17x — it hits the
+    100-200 CPU-h budget only because the live run shows the mean projections
+    were outlier-dominated. Fallbacks (cut stage2's 4k, re-query C1's d=4
+    stratum) OFF THE TABLE pending the timing histogram harvested from the
+    live run's worker logs (n=4k, free — replaces the ~100-example timing
+    study). `--shard-size 25` on every relaunch (doc §7).
+  - **Build order**: K1 emitter + family key + riders -> K2 harness arms
+    (full-solve arm + stage2-oracle fold-in) -> K3 gate runs (n=8 + tail +
+    stage3/4 copy sample) -> delete the limit -> K4 stage2 tail relabel +
+    discard-side density measurement -> regen (stages 1,3,4 + C2 stage5).
 
 ### h1 architecture — Candidate B COMMITTED (autoregressive pointer head)
 

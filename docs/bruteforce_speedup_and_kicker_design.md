@@ -1,12 +1,14 @@
 # Brute-force speedup & kicker design
 
-**Status:** findings only — NOT a spec, NOT a decision record. This document
-exists to be taken into a spec + grilling session later. Everything below is
-measured; the design questions at the end are deliberately left open.
+**Status:** GRILLED AND LOCKED 2026-07-16 — the decision record lives in
+CLAUDE.md ("Kicker variants + prescreen-at-n=8"). The §6 questions below are
+all RESOLVED there; this document remains the measurement record (§1-§5, §7-§8
+stay authoritative for the numbers). Not yet built — K1-K4 build order in the
+decision record.
 
-**Audience:** whoever specs the fix. Read "Ruled out" before proposing anything —
+**Audience:** whoever builds the fix. Read "Ruled out" before proposing anything —
 four plausible hypotheses died to data in the session that produced this, and
-re-litigating them wastes the grill.
+re-litigating them wastes time.
 
 ---
 
