@@ -678,6 +678,14 @@ forces a second regen.
   uninformed. One decision point per blind, no chain — the exploration-trap argument
   doesn't apply. The original deferral rationale is fully expired (tags wired and
   in-game verified; the partner is h1, not noisy h0).
+- **Joker rows -> 15 at s1 kickoff** (DECIDED 2026-07-16; full record at the
+  `MAX_JOKER_ROWS` open item): obs joker block widens 8 -> 15 (weight-preserving —
+  masked-pool trunk is row-count-agnostic; needs only an `--init-from` load shim plus
+  the byte-identical-outputs check on <=8-joker states) and SellJoker slots 8-14 append
+  as seven cold head rows at [687,694), right after SkipBlind — same append-only
+  mechanism. 15 matches `MAX_JOKERS_V2`. The positional invariant "SellJoker slot k
+  targets obs joker row k" now spans the split blocks — pin the k -> action-index
+  mapping in tests.
 - **Reservoir persistence** (BUILD BEFORE s0 KICKOFF — the one pre-s0 code change):
   DONE 2026-07-07 (branch `worktree-shop-reservoir-persistence`). Root cause confirmed:
   `train_shop_ppo.py` built the reservoir fresh per invocation and only the model saved,
@@ -1265,7 +1273,8 @@ replace it.
       the next item — SUPERSEDES the earlier "widens to 8 at the h1 seam" plan on this and
       the line above: the hand v2 block is `MAX_JOKERS_V2=15`, not 8; 8 is the SHOP row count).
 - [ ] KNOWN OBS/ACTION LIMITATION — shop joker cap `MAX_JOKER_ROWS=8` (decision record
-      2026-07-15; the hand-side counterpart was FIXED — v1 `MAX_JOKERS=5` frozen, v2
+      2026-07-15; DECIDED 2026-07-16: fix BOTH halves at s1 KICKOFF, and neither is a
+      retrain — see the DECIDED block below; the hand-side counterpart was FIXED — v1 `MAX_JOKERS=5` frozen, v2
       `MAX_JOKERS_V2=15`, expand-not-truncate + dual counter, branch
       `worktree-joker-cap-15`): the shop obs joker block clips physical jokers past 8
       (`shop_obs.py:177` `gs["jokers"][:MAX_JOKER_ROWS]`), so s0 is blind to jokers 9+ on
@@ -1297,9 +1306,40 @@ replace it.
       - **C. Widen obs + SellJoker -> 15**: full parity, but breaks s0 obs AND action head,
         plus the append-only contract (in-place shift) or a non-contiguous SellJoker append;
         full s0 retrain. Most invasive.
-      Gating fact: whether s0 is already frozen for this bootstrap iteration (break =
-      expensive) or being retrained regardless (B/C become cheap). Decide at the shop-merge /
-      s1 seam, not before.
+      DECIDED 2026-07-16 (supersedes the "Gating fact" framing, A's recommendation, and
+      the B/C cost labels above, both of which were WRONG about "retrain"): do BOTH
+      halves at s1 kickoff — full C-level parity at B-level cost, no retrain:
+      - **Obs widen 8 -> 15 is WEIGHT-PRESERVING, not a retrain**: the shop trunk is
+        `masked_pool` over shared per-row encoders (verified in `shop_policy.py` — no
+        flatten, no positional parameters), so widening a masked padded block is
+        semantically exact (the `MAX_HAND_CARDS_OBS` 8->12 argument verbatim: zero rows
+        past the mask contribute exactly nothing). What breaks is only SB3's obs-space
+        equality check at `--init-from` — fixed by a load shim (rebuild the policy with
+        the widened space, `load_state_dict` the a4_v4 params; the
+        `load_bc_weights_into_policy` precedent), not by retraining. Verification gate:
+        old vs widened model must produce byte-identical outputs on <=8-joker states.
+      - **SellJoker rows 9-15 = SEVEN non-contiguous cold head rows appended at
+        [687,694)** (right after SkipBlind at 686) — exactly the SkipBlind mechanism:
+        append-only contract preserved, pinned offsets untouched, cold rows learned
+        during s1's PPO (which runs anyway — new partner, new shaping). Cost = the
+        split SellJoker layout ([446,454) + [687,694)) plus a mapping shim in the mask
+        builder and action decode. The split is TEMPORARY by the project's own plan:
+        consolidate when Candidate B subsumes the flat head at the in-blind merge.
+        Invariant #1 above generalizes, not breaks: "SellJoker slot k targets obs joker
+        row k" now spans both blocks (k<8 -> 446+k, k>=8 -> 687+(k-8)) — pin the full
+        mapping in tests, since the two constants stop being equal-by-inspection.
+      - **Why s1 exactly**: >8-joker states only become strategy-relevant when the hand
+        partner can exploit wide/negative builds — which is exactly what h1 + Candidate
+        B deliver. Pre-s1 the clip is second-order (h0.5 can't cash those builds in;
+        partner noise dominates their value estimates). Later than s1 means s1 trains
+        blind to rows 9+ under the first partner that makes them worth buying, and
+        s1's values are what h2/s2 inherit. a4_v4 stays final and untouched; nothing in
+        the C1/C2 -> regen -> h1 chain reads the shop obs schema.
+      - **Riders**: (a) 15 is chosen to MATCH `MAX_JOKERS_V2=15` — hand and shop must
+        agree on which states are fully observable (divergence here is the solver/env-
+        divergence bug class applied to obs). (b) The reservoir survives untouched:
+        snapshots are engine blobs re-encoded at load, zero migration — one more reason
+        the s1 seam is cheap.
 - [ ] KNOWN ACTION-SPACE CEILING — 8-position combo enumeration vs big hands (decision
       record 2026-07-06; DECIDED 2026-07-07: Candidate B COMMITTED, build at the h1
       seam — see the "h1 / s1 seam" section and the RESOLVED note below): the canonical
