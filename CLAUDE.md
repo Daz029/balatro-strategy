@@ -1058,6 +1058,54 @@ forces a second regen.
       spec's measure-first rule (its completions are idealized draws, so a
       seating hypothesis there is a hypothesis about hypothetical cards),
       documented at the site with the sweep as its tripwire.
+  - **K4 — SEVENTH bug: the empty-discard phantom, discard LOWER-bound clamp**
+    (2026-07-18, `<pending>`; surfaced by the stage2 relabel). A legal
+    discard is 1-5 cards. The solver derives a discard as a template
+    COMPLEMENT (`hand - hold`), NOT a move from the legal action space, so it
+    can leave BOTH ends of the engine's `1..5` range: the 6-8 card upper end
+    (fixed long ago by `cap_discard`) AND the ZERO lower end — never
+    enforced until now. A Shortcut-widened straight window (or FF-shortened,
+    or an 8-card single-suit flush) swallows the WHOLE hand -> `discard=[]`,
+    `still_needed=0`: an illegal "discard nothing". Clamp = `if not discard:
+    continue` in BOTH `rank_templates_cheaply` and `solve_discard_decision`,
+    the exact counterpart to `cap_discard`'s upper clamp.
+    - **Why it went unseen until K3** (same activation story as the wild
+      half of Bug C): the phantom is a made straight, so it needs DETECTION
+      to score high. Pre-`03e288d` (jokers=None) Shortcut never detected ->
+      the completed straight scored as High Card -> the phantom ranked LOW
+      in the cheap shortlist AND had low p_clear, so it neither floated to
+      the front nor won. The engine fix simultaneously floated it to
+      cheap-rank 0 (a complete hand scores highest) and inflated its p_clear
+      to the winning tier. That is why the 2026-07-16 brute run had 0
+      failures across 4000.
+    - **It won via a TIE-BREAK, which is the load-bearing detail**: the
+      phantom p_clear only TIED the best real discard (measured: 00001300
+      empty 0.4442 vs executable straight_6-9 0.4445; 00002997 both 1.0),
+      but selection is strict `>` and the phantom is processed FIRST
+      (cheap-rank 0), so it set `best` and the tying real discards could not
+      displace it. So the fix does NOT suppress a favorable-discard signal —
+      the chain genuinely favored discarding on these boards; pruning the
+      illegal spelling routes the label to the LEGAL discard at the same
+      p_clear (verified: both seeds now label an executable 3-card discard).
+      Placed BEFORE scoring so the freed shortlist slot goes to a real
+      candidate rather than being wasted.
+    - **No shard ever held a "discard nothing" label**: the tier-1
+      executability check catches it (that IS how it surfaced —
+      GenerationError, 2 seeds), routing it to failures.jsonl, never a row.
+      Verified: 0/7998 rows across the brute corpus + the relabel output
+      have a zero-card label. The residual it DOES leave is legal-but-
+      STARVED labels (the phantom took a slot, then lost to play-now) — no
+      failure flags those, so the stage2 relabel is being RE-RUN with the
+      clamp; only FF/Shortcut hands are affected, so the clean 2555 are
+      untouched.
+    - **LABEL-SEMANTICS change — every stage regenerates with it.** stage3/4
+      regen (in progress on the 9700X) inherits it automatically (it lives
+      in hand_solver.py); the stage2 relabel re-runs. Discriminating
+      regression in `test_hand_solver_discard_cap.py::TestDiscardLowerBound`
+      (fails pre-clamp `assert 0 >= 1`). The stage2 discard-density SWEEP
+      that just completed was measured PRE-clamp — the clamp removes illegal
+      candidates from both arms symmetrically, so expected movement is
+      small, but confirm against the numbers before trusting it.
 
 ### h1 architecture — Candidate B COMMITTED (autoregressive pointer head)
 

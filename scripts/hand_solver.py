@@ -1532,6 +1532,17 @@ def solve_discard_decision(
         discard, kept = cap_discard(discard)  # engine caps a discard at 5 cards
         draws = len(discard)  # cards redrawn = cards discarded (hand size held constant)
 
+        # A legal discard is 1-5 cards. `cap_discard` clamps the UPPER bound;
+        # this clamps the LOWER. The discard here is a template COMPLEMENT
+        # (hand minus the matching `hold`), not a move chosen from the legal
+        # action space, so a template matching the WHOLE hand yields discard=[]
+        # -- "discard nothing", which the engine cannot execute. That is the
+        # same "solver proposes an action the engine can't run" class as the
+        # 6-8 card discard `cap_discard` was added for, just the other bound.
+        # See `rank_templates_cheaply` for the full root-cause note.
+        if not discard:
+            continue
+
         if still_needed == 0:
             # already completed -- this degenerates to "play now" on this
             # subset, evaluate directly (no probability discount needed)
@@ -1801,6 +1812,44 @@ def rank_templates_cheaply(
         still_needed = max(0, template.needed - len(hold))
         discard, kept = cap_discard(discard)
         draws = len(discard)
+
+        # LOWER-BOUND CLAMP on the discard (K3, 2026-07-18). A legal discard
+        # is 1-5 cards; `cap_discard` enforces <=5, this enforces >=1. The
+        # discard is a template COMPLEMENT (hand minus `hold`), not a move
+        # picked from the legal action space, so a template that matches the
+        # WHOLE hand yields discard=[] -- an illegal "discard nothing". This
+        # is the mirror of the 6-8 card discard bug `cap_discard` was added
+        # for: the solver derives discards as `hand - hold` with no size
+        # bound, so it can leave BOTH ends of the engine's 1..5 range.
+        #
+        # It fires on a Shortcut-widened straight window (or FF-shortened,
+        # or an 8-card single-suit flush) that swallows every card:
+        # still_needed=0, nothing left to throw. Two facts make this a prune,
+        # not a value call:
+        #   1. "Discard nothing" is ILLEGAL -- reached the executability
+        #      check as GenerationError on 2 stage2 relabel seeds
+        #      (00001300 FF+Shortcut, 00002997 Jolly+Shortcut).
+        #   2. It is a PHANTOM of a real discard: it keeps all cards and
+        #      recurses at discards_left-1, and a real discard toward the
+        #      same completion reaches the identical continuation one discard
+        #      cheaper, so it TIES the phantom's p_clear (measured: 00001300
+        #      empty branch 0.4442 vs executable straight_6-9 0.4445;
+        #      00002997 both 1.0). Pruning routes the label to that real
+        #      discard -- the chain here genuinely favors discarding and the
+        #      fix surfaces the LEGAL spelling, it does not suppress it.
+        # Placed before scoring so the freed shortlist slot goes to a real
+        # candidate; without that, the phantom -- cheap-rank 0, since a
+        # complete hand scores highest -- both starves a real discard AND
+        # wins the p_clear tie by being first under the strict `>` selection.
+        #
+        # LATENT UNTIL K3: score_hand got jokers=None (03e288d), so Shortcut
+        # never DETECTED -> the completed straight scored as High Card ->
+        # low cheap rank AND low p_clear, so the phantom neither floated to
+        # the front nor won. The engine fix simultaneously floated it and
+        # inflated its p_clear; that is why the 2026-07-16 brute run had 0
+        # failures across 4000.
+        if not discard:
+            continue
 
         if still_needed == 0:
             p_reach = 1.0

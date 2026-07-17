@@ -17,11 +17,12 @@ from hand_solver import (
     cap_discard,
     rank_templates_cheaply,
     solve_discard_decision,
+    solve_hand_for_ante_clear,
 )
 
 from jackdaw.engine.blind import Blind
 from jackdaw.engine.card import Card
-from jackdaw.engine.card_factory import create_playing_card
+from jackdaw.engine.card_factory import create_joker, create_playing_card
 from jackdaw.engine.data.enums import Rank, Suit
 from jackdaw.engine.hand_levels import HandLevels
 from jackdaw.engine.rng import PseudoRandom
@@ -149,3 +150,90 @@ class TestSolversRespectCap:
         preset = stage_presets()["stage1_no_jokers"]
         example = generate_one_example("stage1_no_jokers_00000000", preset.config)
         assert int((example.card_indices >= 0).sum()) <= DISCARD_LIMIT
+
+
+def _shortcut_full_hand_straight() -> list[Card]:
+    """8 distinct-rank cards a Shortcut-widened straight window swallows
+    WHOLE, so the straight template's complement (the discard) is EMPTY.
+
+    Reproduces the board behind stage2 relabel seed 00002997
+    (14S 12C 10C 8H 7H 6S 4S 3S). Under Shortcut the gap-tolerant window
+    matches every rank present, `construct_hold` holds all 8, and the
+    derived discard is []. Without the lower-bound clamp the solver emits a
+    "discard nothing" action -- the mirror of the 6-8 card discard this
+    module's cap fixes.
+    """
+    return [
+        _card(Suit.SPADES, Rank.ACE),
+        _card(Suit.CLUBS, Rank.QUEEN),
+        _card(Suit.CLUBS, Rank.TEN),
+        _card(Suit.HEARTS, Rank.EIGHT),
+        _card(Suit.HEARTS, Rank.SEVEN),
+        _card(Suit.SPADES, Rank.SIX),
+        _card(Suit.SPADES, Rank.FOUR),
+        _card(Suit.SPADES, Rank.THREE),
+    ]
+
+
+class TestDiscardLowerBound:
+    """A legal discard is 1-5 cards. `cap_discard` clamps the upper bound;
+    these pin the lower one (>=1), the counterpart bug fixed at K3."""
+
+    def test_no_empty_discard_candidate_under_shortcut(self):
+        hand = _shortcut_full_hand_straight()
+        deck = _full_deck_minus(hand)
+        candidates = rank_templates_cheaply(
+            hand,
+            deck,
+            HandLevels(),
+            Blind.create("bl_small", ante=1),
+            PseudoRandom("lb1"),
+            shortcut=True,
+            top_k=8,
+            jokers=[create_joker("j_shortcut")],
+        )
+        # discard is field 3 of each candidate tuple
+        for cand in candidates:
+            assert len(cand[3]) >= 1, "a discard candidate must discard >=1 card"
+
+    def test_solve_discard_decision_never_empty_under_shortcut(self):
+        hand = _shortcut_full_hand_straight()
+        deck = _full_deck_minus(hand)
+        choice = solve_discard_decision(
+            hand,
+            [create_joker("j_shortcut")],
+            HandLevels(),
+            Blind.create("bl_small", ante=1),
+            PseudoRandom("lb2"),
+            deck,
+            discards_left=3,
+            shortcut=True,
+        )
+        if choice.action == "discard":
+            assert 1 <= len(choice.discard) <= DISCARD_LIMIT
+
+    @pytest.mark.slow
+    def test_ante_clear_label_is_executable_under_shortcut(self):
+        """End to end: a made-shortcut-straight full hand must never label a
+        zero-card discard. The completed hand scores high under Shortcut
+        (post the score_hand jokers fix), which is exactly what floated the
+        empty phantom to the top of the shortlist and won it the strict-`>`
+        tie -- so this only bites with detection working."""
+        hand = _shortcut_full_hand_straight()
+        deck = _full_deck_minus(hand)
+        blind = Blind.create("bl_small", ante=1)
+        choice = solve_hand_for_ante_clear(
+            hand,
+            [create_joker("j_shortcut")],
+            HandLevels(),
+            blind,
+            PseudoRandom("lb3"),
+            deck,
+            chips_needed=getattr(blind, "chips", 300),
+            hands_left=1,
+            discards_left=3,
+            shortcut=True,
+            mc_seed="lb3",
+        )
+        if choice.action == "discard":
+            assert 1 <= len(choice.discard) <= DISCARD_LIMIT
