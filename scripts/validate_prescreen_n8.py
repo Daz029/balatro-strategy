@@ -196,6 +196,78 @@ def _index_set(subset: list, hand: list) -> frozenset[int]:
     return frozenset(by_id[id(c)] for c in subset)
 
 
+_SUIT_SHORT = {"Diamonds": "D", "Hearts": "H", "Spades": "S", "Clubs": "C"}
+
+
+def describe_card(card: Any) -> str:
+    """Compact render carrying every attribute a kicker hypothesis reads:
+    rank/suit (Lusty/Greedy/Even Steven), enhancement (Steel/Gold/Glass),
+    edition (Polychrome -- K1 correction 1), seal. A Stone card has no
+    `base`, hence the guard."""
+    base = getattr(card, "base", None)
+    if base is None:
+        core = "Stone"
+    else:
+        rank = str(base.rank.value)
+        core = (rank if len(rank) <= 2 else rank[0]) + _SUIT_SHORT.get(
+            str(base.suit.value), "?"
+        )
+    tags = []
+    effect = (card.ability or {}).get("effect") if hasattr(card, "ability") else None
+    if effect and effect not in ("Base",):
+        tags.append(str(effect))
+    if getattr(card, "edition", None):
+        tags.append(str(card.edition))
+    if getattr(card, "seal", None):
+        tags.append(f"{card.seal} seal")
+    if getattr(card, "debuff", False):
+        tags.append("DEBUFFED")
+    return core + (f"[{'+'.join(tags)}]" if tags else "")
+
+
+def describe_miss(
+    gs: dict[str, Any],
+    seed: str,
+    rec: dict[str, Any],
+    k: int,
+) -> dict[str, Any]:
+    """Everything needed to CLASSIFY a surviving prescreen miss by hypothesis
+    (CLAUDE.md's K3 fail-path "rescan/classify surviving misses"): the board,
+    the line truth picked, the line the box settled for, and the delta.
+
+    Jokers are rendered RESOLVED-agnostic here (raw center keys): the copy
+    chain matters for gating, but for reading a miss you want to see that a
+    Blueprint is present at all.
+    """
+    hand = gs["hand"]
+    flags = get_hand_eval_flags(gs["jokers"])
+    by_k = rec["by_k"][k]
+    truth_idx = sorted(rec["truth_indices"])
+    box_idx = sorted(by_k.get("box_best_indices") or [])
+    return {
+        "seed": seed,
+        "k": k,
+        "regret": round(by_k["regret"], 2),
+        "rel_regret": round(by_k["rel_regret"], 4),
+        "truth_total": round(rec["truth_total"], 2),
+        "hand": [describe_card(c) for c in hand],
+        "jokers": [j.center_key for j in gs["jokers"]],
+        "joker_editions": [str(getattr(j, "edition", None)) for j in gs["jokers"]],
+        "four_fingers": bool(flags.get("four_fingers")),
+        "shortcut": bool(flags.get("shortcut")),
+        "splash": any(j.center_key == "j_splash" for j in gs["jokers"]),
+        "truth_indices": truth_idx,
+        "truth_cards": [describe_card(hand[i]) for i in truth_idx],
+        "box_best_indices": box_idx,
+        "box_best_cards": [describe_card(hand[i]) for i in box_idx],
+        "discards_left": rec.get("discards_left"),
+        "hands_left": int(gs["current_round"].get("hands_left", 0)),
+        "chips_needed": max(
+            0, (getattr(gs["blind"], "chips", 0) or 0) - gs.get("chips", 0)
+        ),
+    }
+
+
 def _value_of(subset: list, args: dict[str, Any]) -> float:
     hand = args["hand"]
     ids = {id(c) for c in subset}
@@ -272,6 +344,7 @@ def measure_state(
     n_subsets = sum(math.comb(n, size) for size in range(1, min(5, n) + 1))
     out: dict[str, Any] = {
         "truth_total": truth_total,
+        "truth_indices": sorted(truth_ids),
         "hand_size": n,
         "n_subsets": n_subsets,  # the brute baseline: 218 at n=8, C(n,1..5) above
         "by_k": {},
@@ -279,7 +352,14 @@ def measure_state(
     for k in ks:
         box = _box_at_k(args, k)
         box_id_sets = [_index_set(c, hand) for c in box]
-        best_in_box = max((_value_of(c, args) for c in box), default=0.0)
+        # argmax (not just max): a miss is only classifiable if you can see
+        # WHICH line the box settled for versus what truth played.
+        box_best_cards: list = []
+        best_in_box = 0.0
+        for cand in box:
+            v = _value_of(cand, args)
+            if not box_best_cards or v > best_in_box:
+                box_best_cards, best_in_box = list(cand), v
         regret = max(0.0, truth_total - best_in_box)
         out["by_k"][k] = {
             # STRICT: the box holds the argmax SET itself. Systematically
@@ -296,6 +376,9 @@ def measure_state(
             "regret": regret,
             "rel_regret": regret / truth_total if truth_total > 0 else 0.0,
             "box_size": len(box),
+            "box_best_indices": sorted(_index_set(box_best_cards, hand))
+            if box_best_cards
+            else [],
         }
     return out
 
@@ -412,9 +495,23 @@ def main() -> None:
         default=None,
         help="comma center keys; brute arm keeps only states owning >=1 of them",
     )
+    parser.add_argument(
+        "--dump-miss-k",
+        type=int,
+        default=None,
+        help="dump the full board of every state MISSED at this k (default: the "
+        "production PRESCREEN_TOP_K) into report['misses'] -- the input to "
+        "CLAUDE.md's K3 'rescan/classify surviving misses' path",
+    )
     args = parser.parse_args()
 
     ks = [int(k) for k in args.ks.split(",")]
+    dump_k = args.dump_miss_k if args.dump_miss_k is not None else PRESCREEN_TOP_K
+    if dump_k not in ks:
+        # Silently dumping nothing because the k wasn't measured is the
+        # quiet-failure class this harness exists to avoid.
+        raise SystemExit(f"--dump-miss-k {dump_k} not in --ks {ks}")
+    misses: list[dict[str, Any]] = []
     hand_sizes = {int(s) for s in args.hand_sizes.split(",")}
     require_jokers = (
         {k.strip() for k in args.require_jokers.split(",")} if args.require_jokers else None
@@ -458,6 +555,8 @@ def main() -> None:
             rec = measure_state(gs, ks, truth)
             rec["discards_left"] = int(gs["current_round"].get("discards_left", 0))
             rec["n_jokers"] = len(gs["jokers"])
+            if not rec["by_k"][dump_k]["captured_by_value"]:
+                misses.append({"arm": "shard", **describe_miss(gs, row["seed"], rec, dump_k)})
             shard_records.append(rec)
             if (i + 1) % 25 == 0:
                 print(
@@ -490,6 +589,8 @@ def main() -> None:
         rec = measure_state(gs, ks, None)
         rec["discards_left"] = int(gs["current_round"].get("discards_left", 0))
         rec["n_jokers"] = len(gs["jokers"])
+        if not rec["by_k"][dump_k]["captured_by_value"]:
+            misses.append({"arm": "brute", **describe_miss(gs, seed, rec, dump_k)})
         brute_records.append(rec)
         if len(brute_records) % 25 == 0:
             print(
@@ -510,7 +611,9 @@ def main() -> None:
             "require_jokers": sorted(require_jokers) if require_jokers else None,
             "n_brute_checked": n_checked,
             "prescreen_top_k_default": PRESCREEN_TOP_K,
+            "dump_miss_k": dump_k,
         },
+        "misses": sorted(misses, key=lambda m: -m["rel_regret"]),
         "shard_arm": {
             "note": "free oracle (label == brute-force argmax); BIASED: finished-first "
             "workers, play-labeled roots only, n==8 only"
@@ -533,7 +636,12 @@ def main() -> None:
     }
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(report, indent=2), encoding="utf-8")
-    print(json.dumps({k: v for k, v in report.items() if k != "params"}, indent=2))
+    print(f"dumped {len(misses)} miss boards at k={dump_k} -> {args.out}")
+    print(
+        json.dumps(
+            {k: v for k, v in report.items() if k not in ("params", "misses")}, indent=2
+        )
+    )
 
 
 if __name__ == "__main__":
