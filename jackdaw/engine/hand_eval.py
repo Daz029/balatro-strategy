@@ -459,6 +459,8 @@ class HandEvalResult:
 def evaluate_hand(
     played_cards: list[Card],
     jokers: list[Card] | None = None,
+    *,
+    flags: dict[str, bool] | None = None,
 ) -> HandEvalResult:
     """Complete hand evaluation pipeline.
 
@@ -480,11 +482,18 @@ def evaluate_hand(
         played_cards: Cards the player chose to play (1-5 cards).
         jokers: Active joker cards (for modifier flag extraction).
             Pass ``None`` or ``[]`` if no jokers.
+        flags: Pre-computed ``get_hand_eval_flags`` output, overriding
+            extraction from *jokers*. For callers that own jokers but want
+            their SCORING effects excluded while keeping hand DETECTION
+            honest (``score_hand_base``) -- detection and effects are
+            separate axes: a Four Fingers owner's 4-card straight is a
+            Straight even when priced jokerlessly. None = derive from
+            *jokers*.
     """
     from jackdaw.engine.data.hands import HAND_ORDER
 
     joker_list = jokers or []
-    flags = get_hand_eval_flags(joker_list)
+    flags = flags if flags is not None else get_hand_eval_flags(joker_list)
 
     # Detection flags for evaluate_poker_hand (only 3 of 5 flags apply)
     results = evaluate_poker_hand(

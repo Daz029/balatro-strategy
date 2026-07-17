@@ -189,15 +189,25 @@ def score_hand_base(
 
     Implements Phases 1-4, 6-8, 12 of the scoring pipeline from
     ``state_events.lua:571-1065``.
+
+    `joker_flags` -- `get_hand_eval_flags(jokers)` from a caller that owns
+    jokers but wants their SCORING effects excluded. Hand DETECTION is a
+    separate axis from joker effects: a Four Fingers owner's 4-card
+    straight really is a Straight even when pricing it jokerlessly, so a
+    caller ranking such lines must pass this or it will price them as High
+    Card and rank them below junk. None = no modifiers (the honest default
+    for a genuinely jokerless board).
+
+    Was previously accepted and DISCARDED (`_ = joker_flags`, "reserved for
+    future joker flag passing"), which made the signature a lie.
     """
     from jackdaw.engine.hand_eval import evaluate_hand
 
-    _ = joker_flags  # reserved for future joker flag passing
     dollars = 0
     breakdown: list[str] = []
 
     # === Phase 1-2: Hand detection ===
-    eval_result = evaluate_hand(played_cards, jokers=None)
+    eval_result = evaluate_hand(played_cards, jokers=None, flags=joker_flags)
     hand_type = eval_result.detected_hand
     scoring_cards = eval_result.scoring_cards
     poker_hands = eval_result.poker_hands
@@ -451,7 +461,15 @@ def score_hand(
     )
 
     # === Phase 1-2: Hand detection ===
-    eval_result = evaluate_hand(played_cards, jokers=None)
+    # `jokers`, NOT None: evaluate_hand derives every hand-DETECTION flag
+    # (four_fingers / shortcut / smeared / splash) from this list. Passing
+    # None here -- a copy-paste carryover from score_hand_base, which is
+    # jokerless BY DESIGN -- left Four Fingers, Shortcut and Smeared Joker
+    # completely inert in the real pipeline (in-game, env, and every solver
+    # label) while their hand_eval unit tests passed. Debuffed jokers are
+    # excluded inside get_hand_eval_flags (find_joker semantics), so the
+    # raw list is the correct argument.
+    eval_result = evaluate_hand(played_cards, jokers=jokers)
     hand_type = eval_result.detected_hand
     scoring_cards = eval_result.scoring_cards
     poker_hands = eval_result.poker_hands
@@ -511,6 +529,14 @@ def score_hand(
         hand_levels.level_up(hand_type, amount=-1)
 
     # === Phase 3c: Splash — all played cards score ===
+    # REDUNDANT since Phase 1-2 started passing `jokers` to evaluate_hand
+    # (which applies the same augmentation from the same flag), but kept:
+    # both produce exactly `played_cards` in played order, so this is an
+    # idempotent restatement rather than a double-apply, and it is the only
+    # Splash path that survived the jokers=None bug -- i.e. the behaviour
+    # every existing Splash test and the K1 kicker fixtures were written
+    # against. Pinned by TestHandEvalFlagsIntegration::
+    # test_splash_still_scores_all_played_cards.
     splash_active = any(
         getattr(j, "center_key", None) == "j_splash" and not getattr(j, "debuff", False)
         for j in jokers
