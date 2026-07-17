@@ -843,7 +843,9 @@ forces a second regen.
     sampler included). 7 new tests in
     `tests/scripts/test_validate_prescreen_fullsolve.py`; prescreen +
     kicker suites still green (56 total); ruff clean on all touched files.
-  - **K3 IN PROGRESS 2026-07-17** (branch `kicker-variants-k1`). The gate
+  - **K3 IN PROGRESS 2026-07-17** (branch `engine-hand-eval-flags-fix`, off
+    `kicker-variants-k1`@593f57c — the K3 fixes are NOT on the K1/K2 branch).
+    The gate
     RAN, and its first arm found FOUR bugs — three of them label-corrupting
     and one of them engine-wide. No gate verdict is claimed yet: every arm
     measured before `7ce81e7` is STALE and re-running. Numbers below are
