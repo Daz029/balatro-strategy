@@ -38,6 +38,14 @@ def _fixtures() -> tuple[HandLevels, Blind, PseudoRandom]:
     return HandLevels(), Blind.create("bl_small", ante=1), PseudoRandom("kicker")
 
 
+# Hypothesis 5 (type-upgrade) reads the detection flags. These per-hypothesis
+# tests isolate hypotheses 1-4, whose keys are flag-independent, so they pass
+# the all-false dict. `_kicker_variants` takes it as a REQUIRED argument on
+# purpose: an empty default would let a real call site silently claim "no
+# Four Fingers / Shortcut / Smeared" and mislabel the board.
+_NO_FLAGS: dict[str, bool] = {"four_fingers": False, "shortcut": False, "smeared": False}
+
+
 def _enhanced(suit: Suit, rank: Rank, enhancement: str) -> Card:
     """Enhancement via the engine's own `set_ability`, so held-channel
     config (h_x_mult / h_dollars) actually populates. Poking `center_key`
@@ -213,7 +221,7 @@ class TestHypotheses:
         counts = {id(c): (0, 0) for c in hand}
         line = [c for c in hand if c.base.suit == Suit.HEARTS.value][:3]
         gates = hand_solver._KickerGates(False, False, True)
-        variants = hand_solver._kicker_variants(line, hand, gates, counts)
+        variants = hand_solver._kicker_variants(line, hand, gates, counts, _NO_FLAGS)
         line_ids = {id(c) for c in line}
         kickers = [c for c in variants[-1] if id(c) not in line_ids]
         junk_ids = sorted(
@@ -267,9 +275,13 @@ class TestHypotheses:
             if c.base.suit == Suit.HEARTS.value and c.base.id != 13
         ][:3]
         gates = hand_solver._KickerGates(False, True, False)
-        variants = hand_solver._kicker_variants(line, hand, gates, counts)
+        variants = hand_solver._kicker_variants(line, hand, gates, counts, _NO_FLAGS)
         line_ids = {id(c) for c in line}
-        kickers = [c for c in variants[-1] if id(c) not in line_ids]
+        # variants == [nominal-best, held-value, type-upgrade] under these
+        # gates. Index 1, NOT [-1]: hypothesis 5 is ungated and appends
+        # after every gated one, so [-1] silently stopped being the
+        # held-value variant this test is about.
+        kickers = [c for c in variants[1] if id(c) not in line_ids]
         assert all(c.base.id != 13 for c in kickers), (
             "held-value variant must not spend Baron's Kings as kickers"
         )
@@ -282,8 +294,8 @@ class TestHypotheses:
         all_on = hand_solver._KickerGates(True, True, True)
         off = hand_solver._KickerGates(False, False, False)
         assert (
-            hand_solver._kicker_variants(line, hand, all_on, counts)[0]
-            == hand_solver._kicker_variants(line, hand, off, counts)[0]
+            hand_solver._kicker_variants(line, hand, all_on, counts, _NO_FLAGS)[0]
+            == hand_solver._kicker_variants(line, hand, off, counts, _NO_FLAGS)[0]
         )
 
     def test_variants_dedupe_by_card_identity(self):
@@ -291,7 +303,7 @@ class TestHypotheses:
         counts = {id(c): (0, 0) for c in hand}
         line = [c for c in hand if c.base.suit == Suit.HEARTS.value][:3]
         all_on = hand_solver._KickerGates(True, True, True)
-        variants = hand_solver._kicker_variants(line, hand, all_on, counts)
+        variants = hand_solver._kicker_variants(line, hand, all_on, counts, _NO_FLAGS)
         keys = [frozenset(id(c) for c in v) for v in variants]
         assert len(keys) == len(set(keys))
 
@@ -300,7 +312,7 @@ class TestHypotheses:
         counts = {id(c): (0, 0) for c in hand}
         line = [c for c in hand if c.base.suit == Suit.HEARTS.value][:5]
         all_on = hand_solver._KickerGates(True, True, True)
-        assert hand_solver._kicker_variants(line, hand, all_on, counts) == [line]
+        assert hand_solver._kicker_variants(line, hand, all_on, counts, _NO_FLAGS) == [line]
 
 
 class TestFamilyKey:
@@ -410,6 +422,77 @@ def _trips_plus_kicker_bait_hand() -> list[Card]:
     ]
 
 
+def _ff_straight_flush_bait_hand() -> list[Card]:
+    """9 cards (so the prescreen path fires) reproducing K3 arm-C miss
+    stage3_full_00001545. Four hearts Q-7-5-4 are a flush under Four
+    Fingers; 7-6-5-4 is a straight under it too, and the 6 is a CLUB. So the
+    winning 5 are the union of a flush template's cards and a straight
+    template's -- no single predicate proposes that set, and no per-card
+    kicker key ranks the club 6 above the King.
+    """
+    return [
+        create_playing_card(Suit.CLUBS, Rank.KING),
+        create_playing_card(Suit.HEARTS, Rank.QUEEN),
+        create_playing_card(Suit.HEARTS, Rank.SEVEN),
+        create_playing_card(Suit.CLUBS, Rank.SIX),
+        create_playing_card(Suit.DIAMONDS, Rank.SIX),
+        create_playing_card(Suit.HEARTS, Rank.FIVE),
+        create_playing_card(Suit.HEARTS, Rank.FOUR),
+        create_playing_card(Suit.CLUBS, Rank.THREE),
+        create_playing_card(Suit.SPADES, Rank.TWO),
+    ]
+
+
+def _smeared_flush_bait_hand() -> list[Card]:
+    """9 cards reproducing K3 arm-C miss stage3_full_00003496. Under Smeared
+    the five black cards Q(C) 9(S) 8(S) 3(C) 2(C) are a Flush; the raw-suit
+    templates see only 3 clubs and 2 spades and offer two pair instead.
+    """
+    return [
+        create_playing_card(Suit.HEARTS, Rank.KING),
+        create_playing_card(Suit.CLUBS, Rank.QUEEN),
+        create_playing_card(Suit.DIAMONDS, Rank.QUEEN),
+        create_playing_card(Suit.SPADES, Rank.NINE),
+        create_playing_card(Suit.SPADES, Rank.EIGHT),
+        create_playing_card(Suit.DIAMONDS, Rank.EIGHT),
+        create_playing_card(Suit.CLUBS, Rank.THREE),
+        create_playing_card(Suit.CLUBS, Rank.TWO),
+        create_playing_card(Suit.HEARTS, Rank.SEVEN),
+    ]
+
+
+def _wild_flush_bait_hand() -> list[Card]:
+    """9 cards where the only 5-card flush needs the WILD card to stand in
+    as a spade. No joker required -- Wild is a card enhancement, so this
+    board was mislabeled long before the detection-flag bug existed.
+
+    Making this board DISCRIMINATE took two goes, and the reason is worth
+    keeping. The line is 4 natural spades, so exactly one pad slot decides
+    the flush -- and `_keep_priority` is `(enhanced, nominal)`, which ranks
+    ANY enhanced card top. A wild that is the pool's best keep-priority card
+    therefore gets padded in by nominal-best for the wrong reason, and the
+    test passes on broken code (draft 1: a wild 9H was the highest card;
+    draft 2: a wild 2H still won on the `enhanced` bit). The Glass ACE
+    outranks the wild 2 on the same key, so nominal-best takes the Ace and
+    only a suit predicate that actually asks the engine finds the flush.
+    """
+    wild = create_playing_card(Suit.HEARTS, Rank.TWO)
+    wild.set_ability("m_wild")
+    decoy = create_playing_card(Suit.DIAMONDS, Rank.ACE)
+    decoy.set_ability("m_glass")
+    return [
+        create_playing_card(Suit.SPADES, Rank.KING),
+        create_playing_card(Suit.SPADES, Rank.QUEEN),
+        create_playing_card(Suit.SPADES, Rank.JACK),
+        create_playing_card(Suit.SPADES, Rank.FOUR),
+        wild,
+        decoy,
+        create_playing_card(Suit.DIAMONDS, Rank.KING),
+        create_playing_card(Suit.CLUBS, Rank.SEVEN),
+        create_playing_card(Suit.HEARTS, Rank.SIX),
+    ]
+
+
 class TestRegressionAgainstBruteForce:
     """The tests that actually catch the bug: each one FAILS on pre-K1 code
     with the regret recorded in its docstring, measured on this branch.
@@ -444,6 +527,69 @@ class TestRegressionAgainstBruteForce:
         hand_levels, blind, rng = _fixtures()
         _, result = best_immediate_play(hand, jokers, hand_levels, blind, rng)
         assert result.total == _brute_force_best(hand, jokers)
+
+    def test_type_upgrading_kicker_four_fingers_straight_flush(self):
+        """Hypothesis 5. Under Four Fingers the flush needs 4 hearts and the
+        straight needs 4 of 7-6-5-4, and vanilla lets those be DIFFERENT
+        cards -- so padding the 4-card heart flush with the 6 of CLUBS makes
+        a Straight Flush.
+
+        Every other hypothesis sorts the pool by a per-card key and so ranks
+        the club 6 below the King; only a hypothesis that asks "what does
+        this pad make the HAND" can see it. From the K3 arm-C miss
+        stage3_full_00001545: regret 892, 73.4% of the play's value, the
+        largest single miss in the arm.
+        """
+        hand = _ff_straight_flush_bait_hand()
+        jokers = [create_joker("j_four_fingers")]
+        hand_levels, blind, rng = _fixtures()
+        subset, result = best_immediate_play(hand, jokers, hand_levels, blind, rng)
+        assert result.total == _brute_force_best(hand, jokers)
+        # The point is specifically that an off-suit card is played as the pad.
+        assert any(c.base.suit != Suit.HEARTS.value for c in subset)
+
+    def test_smeared_flush_is_proposable(self):
+        """Bug C. Smeared merges Hearts=Diamonds / Spades=Clubs for flush
+        purposes, so `QC 9S 8S 3C 2C` is a Flush. The flush templates
+        compared raw suit identity, so no template could ever gather that
+        set and the solver offered two pair instead.
+
+        From the K3 arm-C miss stage3_full_00003496: regret 200, 37.3%.
+        Invisible before the engine fix (03e288d) because Smeared was inert.
+        """
+        hand = _smeared_flush_bait_hand()
+        jokers = [create_joker("j_smeared")]
+        hand_levels, blind, rng = _fixtures()
+        _, result = best_immediate_play(hand, jokers, hand_levels, blind, rng)
+        assert result.total == _brute_force_best(hand, jokers)
+
+    def test_wild_card_counts_toward_every_flush(self):
+        """The third rule the old suit-identity predicate got wrong, and the
+        one that was NEVER flag-gated -- a Wild Card counts as every suit for
+        flush purposes, so it completes a 4-spade flush. Independent of the
+        engine fix; it was simply always broken.
+        """
+        hand = _wild_flush_bait_hand()
+        hand_levels, blind, rng = _fixtures()
+        _, result = best_immediate_play(hand, [], hand_levels, blind, rng)
+        assert result.total == _brute_force_best(hand, [])
+
+    def test_type_upgrade_variant_never_repeats_a_card(self):
+        """The greedy loop removes its pick by `id(c) != id(best)`. Written
+        with `is not`, it compares two large ints by OBJECT identity -- never
+        equal, so nothing is removed and the same card is emitted five times
+        (caught in review; the box contained ['8S','8D','8D','8D','8D']).
+        A duplicated card is not a legal play, so this must stay pinned.
+        """
+        hand = _ff_straight_flush_bait_hand()
+        jokers = [create_joker("j_four_fingers")]
+        flags = get_hand_eval_flags(jokers)
+        views = hand_solver._resolved_joker_views(jokers)
+        counts = hand_solver._card_channel_counts(hand, views, {}, flags)
+        gates = hand_solver._kicker_gates(hand, views, flags, counts)
+        line = hand[:2]
+        for variant in hand_solver._kicker_variants(line, hand, gates, counts, flags):
+            assert len({id(c) for c in variant}) == len(variant), variant
 
     def test_plain_board_unchanged(self):
         """The other side of the contract: with every gate shut, K1 must not

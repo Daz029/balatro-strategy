@@ -55,6 +55,7 @@ from dataclasses import dataclass, field
 from math import comb
 
 from jackdaw.engine.card import Card
+from jackdaw.engine.data.hands import HAND_ORDER
 from jackdaw.engine.hand_eval import get_best_hand, get_hand_eval_flags
 from jackdaw.engine.hand_levels import HandLevels
 from jackdaw.engine.play_ordering import (
@@ -248,26 +249,68 @@ def _card_suit(c: Card) -> str | None:
     return c.base.suit if c.base is not None else None
 
 
+def _suit_is_red(suit) -> bool:
+    return (suit.value if hasattr(suit, "value") else suit) in ("Hearts", "Diamonds")
+
+
+def _flush_match(c, suit: str, smeared: bool) -> bool:
+    """Does `c` count toward a `suit` flush?
+
+    Delegates to the ENGINE's own `Card.is_suit(flush_calc=True)`, which
+    owns three rules this module must not re-derive: Stone cards never
+    count, WILD cards count as EVERY suit, and Smeared merges
+    Hearts=Diamonds / Spades=Clubs. The old predicate here was a bare
+    `_card_suit(c) == s`, which got all three wrong -- wild and smeared
+    flushes were structurally unproposable (measured: stage3_full_00003496,
+    truth `QC 9S 8S 3C 2C` is a Flush under Smeared and the solver could
+    only offer two pair, 200 chips of regret).
+
+    `_FakeCard` (the DeckComposition membership probe) has no `is_suit`, so
+    it falls back to suit identity. That is the honest answer there and not
+    a shortcut: deck composition tracks (rank, suit) ONLY, so it cannot
+    represent enhancements at all -- a wild card sitting in the deck is
+    invisible to it either way. The fallback therefore UNDERCOUNTS wild
+    draws, which is the safe direction (a real wild in the deck can only
+    raise p_reach, never lower it).
+    """
+    engine_is_suit = getattr(c, "is_suit", None)
+    if engine_is_suit is not None:
+        return engine_is_suit(suit, flush_calc=True, smeared=smeared)
+    cs = _card_suit(c)
+    if cs is None:
+        return False
+    if smeared:
+        return _suit_is_red(cs) == _suit_is_red(suit)
+    return cs == suit
+
+
 def build_templates(
     hand: list[Card],
     *,
     four_fingers: bool = False,
     shortcut: bool = False,
+    smeared: bool = False,
 ) -> list[Template]:
-    """Fixed, joker-agnostic template set. `four_fingers` / `shortcut` should
-    be derived from the live joker list before calling (both loosen size/gap
-    requirements for straights & flushes) -- pass them in rather than
-    re-deriving joker knowledge here.
+    """Fixed, joker-agnostic template set. `four_fingers` / `shortcut` /
+    `smeared` should be derived from the live joker list before calling (all
+    three loosen size/gap/suit requirements for straights & flushes) -- pass
+    them in rather than re-deriving joker knowledge here.
     """
     templates: list[Template] = []
     flush_need = 4 if four_fingers else 5
 
-    # --- flush-by-suit (4 templates) ---
-    for suit in SUITS:
+    # --- flush-by-suit ---
+    # Smeared collapses the four suits into TWO colour groups, so emitting
+    # all four would just be the same two templates twice: identical
+    # predicates, identical holds, doubling the box for nothing (and
+    # crowding `family_best`, pitfall #13). One representative per group.
+    flush_suits = ["Spades", "Hearts"] if smeared else SUITS
+    for suit in flush_suits:
+        name = f"flush_{'black' if suit == 'Spades' else 'red'}" if smeared else f"flush_{suit}"
         templates.append(
             Template(
-                name=f"flush_{suit}",
-                predicate=lambda c, s=suit: _card_suit(c) == s,
+                name=name,
+                predicate=lambda c, s=suit, sm=smeared: _flush_match(c, s, sm),
                 needed=flush_need,
             )
         )
@@ -857,11 +900,83 @@ def _raised_fist_key(card: Card) -> tuple[int, int]:
     return (1 if stone else 0, card.get_id())
 
 
+_HAND_TYPE_RANK: dict[str, int] = {
+    (ht.value if hasattr(ht, "value") else ht): len(HAND_ORDER) - i
+    for i, ht in enumerate(HAND_ORDER)
+}
+
+
+def _hand_type_rank(name) -> int:
+    """Higher = better. Unknown / "NULL" ranks below every real type."""
+    return _HAND_TYPE_RANK.get(name.value if hasattr(name, "value") else name, 0)
+
+
+def _type_upgrade_completion(
+    line: list[Card],
+    pool: list[Card],
+    need: int,
+    flags: dict[str, bool],
+) -> list[Card]:
+    """Greedy completion maximizing the DETECTED HAND TYPE, ties broken by
+    `_keep_priority`.
+
+    Hypothesis 5, and the only one that is not about what a kicker is worth
+    AS A CARD: the pad can change what the hand IS. The other four sort the
+    pool by a per-card key, so a pad that upgrades the hand type is
+    invisible to all of them.
+
+    The motivating miss (stage3_full_00001545, Four Fingers): the line is
+    the 4-card heart flush `QH 7H 5H 4H`, and padding with `6C` -- a CLUB,
+    which nominal-best ranks below `KC` and every other hypothesis ignores
+    -- makes it a STRAIGHT FLUSH, because under Four Fingers the flush
+    needs 4 hearts and the straight needs 4 of 7-6-5-4 and vanilla lets
+    those be different cards. 892 chips of regret, the largest single miss
+    in the arm.
+
+    NOT Four-Fingers-specific, so it is ungated: padding trips with a pair
+    makes a Full House, and nominal-best takes the two highest cards
+    instead. Templates cannot cover these because the winning set is the
+    UNION of two templates' cards -- no single predicate proposes it.
+
+    Presence only, per the section header: this ranks hand TYPES, never
+    magnitudes, and the exact evaluator still arbitrates. Detection is the
+    engine's own `get_best_hand` scan (as `_line_family` uses), so Splash
+    is ignored here and copy/compat rules come free.
+    """
+    cur = list(line)
+    remaining = list(pool)
+    for _ in range(need):
+        best_key: tuple | None = None
+        best_card: Card | None = None
+        for candidate in remaining:
+            hand_type, _, _ = get_best_hand(
+                cur + [candidate],
+                four_fingers=flags.get("four_fingers", False),
+                shortcut=flags.get("shortcut", False),
+                smeared=flags.get("smeared", False),
+            )
+            key = (_hand_type_rank(hand_type),) + _keep_priority(candidate)
+            if best_key is None or key > best_key:
+                best_key, best_card = key, candidate
+        if best_card is None:
+            break
+        cur.append(best_card)
+        # id() compared with `!=`, never `is not` (two large ints are
+        # separate objects, so `is not` is always True and the pick is
+        # never removed -- the greedy loop then re-picks it and emits the
+        # same card 5 times), and never list.remove (Card equality is
+        # value-based, so an Erratic deck's duplicate would drop the wrong
+        # copy -- the bug class of best_immediate_play's `held` filter).
+        remaining = [c for c in remaining if id(c) != id(best_card)]
+    return cur
+
+
 def _kicker_variants(
     line: list[Card],
     hand: list[Card],
     gates: _KickerGates,
     counts: dict[int, tuple[int, int]],
+    flags: dict[str, bool],
 ) -> list[list[Card]]:
     """Completions of `line` to 5 cards, one per live hypothesis about
     where kicker value lives (see the section header). Deduped by card-
@@ -876,6 +991,9 @@ def _kicker_variants(
          Moon/Mime, Steel/Gold), i.e. pad with the cards LEAST valuable
          held.
       4. play-away-lowest -- exact for Raised Fist's min term.
+      5. type-upgrade -- the pad card can change the detected hand type
+         (FF straight flush, trips + pair -> full house); ungated, since
+         no board makes it structurally impossible.
     """
     if len(line) >= 5:
         return [line]
@@ -895,6 +1013,7 @@ def _kicker_variants(
         variants.append(_complete(_held_kicker_key(counts), best_first=False))
     if gates.play_away_lowest:
         variants.append(_complete(_raised_fist_key, best_first=False))
+    variants.append(_type_upgrade_completion(line, pool, need, flags))
 
     seen: set[frozenset[int]] = set()
     unique: list[list[Card]] = []
@@ -941,6 +1060,7 @@ def prescreen_play_candidates(
     *,
     four_fingers: bool = False,
     shortcut: bool = False,
+    smeared: bool = False,
     top_k: int = PRESCREEN_TOP_K,
     game_state: dict | None = None,
     blind_chips: int = 0,
@@ -1008,14 +1128,16 @@ def prescreen_play_candidates(
     has already computed it); it sources the Splash gate and the family
     scan's smeared handling. None = compute it here.
     """
-    templates = build_templates(hand, four_fingers=four_fingers, shortcut=shortcut)
+    templates = build_templates(
+        hand, four_fingers=four_fingers, shortcut=shortcut, smeared=smeared
+    )
     flags = eval_flags if eval_flags is not None else get_hand_eval_flags(jokers)
     views = _resolved_joker_views(jokers)
     counts = _card_channel_counts(hand, views, game_state, flags)
     gates = _kicker_gates(hand, views, flags, counts)
 
     def _variants(cards: list[Card]) -> list[list[Card]]:
-        return _kicker_variants(cards, hand, gates, counts)
+        return _kicker_variants(cards, hand, gates, counts, flags)
 
     raw: list[list[Card]] = []
     for template in templates:
@@ -1147,6 +1269,7 @@ def best_immediate_play(
             rng,
             four_fingers=flags["four_fingers"],
             shortcut=flags["shortcut"],
+            smeared=flags["smeared"],
             top_k=prescreen_top_k if prescreen_top_k is not None else PRESCREEN_TOP_K,
             game_state=game_state,
             blind_chips=blind_chips,
@@ -1193,6 +1316,7 @@ def solve_discard_decision(
     *,
     four_fingers: bool = False,
     shortcut: bool = False,
+    smeared: bool = False,
 ) -> DiscardChoice:
     """One-step decision: compare playing now vs. discarding toward each
     template. Does NOT recurse across multiple discards left (see
@@ -1215,7 +1339,9 @@ def solve_discard_decision(
     if discards_left <= 0:
         return best_choice
 
-    templates = build_templates(hand, four_fingers=four_fingers, shortcut=shortcut)
+    templates = build_templates(
+        hand, four_fingers=four_fingers, shortcut=shortcut, smeared=smeared
+    )
 
     for template in templates:
         hold, discard = construct_hold(hand, template)
@@ -1448,6 +1574,7 @@ def rank_templates_cheaply(
     *,
     four_fingers: bool = False,
     shortcut: bool = False,
+    smeared: bool = False,
     top_k: int = 4,
     jokers: list[Card] | None = None,
     game_state: dict | None = None,
@@ -1482,7 +1609,9 @@ def rank_templates_cheaply(
     """
     from jackdaw.engine.scoring import score_hand_base
 
-    templates = build_templates(hand, four_fingers=four_fingers, shortcut=shortcut)
+    templates = build_templates(
+        hand, four_fingers=four_fingers, shortcut=shortcut, smeared=smeared
+    )
     scored: list[tuple[Template, list[Card], list[Card], list[Card], float, float, int]] = []
 
     for template in templates:
@@ -1682,6 +1811,7 @@ def solve_hand_turn(
     *,
     four_fingers: bool = False,
     shortcut: bool = False,
+    smeared: bool = False,
     top_k: int | None = None,
     hand_size: int | None = None,
     joker_aware: bool = True,
@@ -1754,7 +1884,7 @@ def solve_hand_turn(
     effective_top_k = top_k if top_k is not None else _discard_shortlist_k(discards_left)
     candidates = rank_templates_cheaply(
         hand, deck, hand_levels, blind, rng,
-        four_fingers=four_fingers, shortcut=shortcut, top_k=effective_top_k,
+        four_fingers=four_fingers, shortcut=shortcut, smeared=smeared, top_k=effective_top_k,
         jokers=jokers, game_state=game_state, blind_chips=blind_chips,
         joker_aware=joker_aware,
     )
@@ -1771,7 +1901,8 @@ def solve_hand_turn(
             hit_choice = solve_hand_turn(
                 hit_hand, jokers, hand_levels, blind, rng, hit_deck, chips_needed,
                 hands_left, discards_left - 1, future_samples, game_state, blind_chips,
-                four_fingers=four_fingers, shortcut=shortcut, top_k=top_k, hand_size=hand_size,
+                four_fingers=four_fingers, shortcut=shortcut, smeared=smeared, top_k=top_k,
+                hand_size=hand_size,
                 joker_aware=joker_aware,
             )
             p_clear = hit_choice.p_clear
@@ -1782,7 +1913,8 @@ def solve_hand_turn(
             hit_choice = solve_hand_turn(
                 hit_hand, jokers, hand_levels, blind, rng, hit_deck, chips_needed,
                 hands_left, discards_left - 1, future_samples, game_state, blind_chips,
-                four_fingers=four_fingers, shortcut=shortcut, top_k=top_k, hand_size=hand_size,
+                four_fingers=four_fingers, shortcut=shortcut, smeared=smeared, top_k=top_k,
+                hand_size=hand_size,
                 joker_aware=joker_aware,
             )
 
@@ -1792,7 +1924,8 @@ def solve_hand_turn(
             miss_choice = solve_hand_turn(
                 miss_hand, jokers, hand_levels, blind, rng, miss_deck, chips_needed,
                 hands_left, discards_left - 1, future_samples, game_state, blind_chips,
-                four_fingers=four_fingers, shortcut=shortcut, top_k=top_k, hand_size=hand_size,
+                four_fingers=four_fingers, shortcut=shortcut, smeared=smeared, top_k=top_k,
+                hand_size=hand_size,
                 joker_aware=joker_aware,
             )
             p_clear = p_reach * hit_choice.p_clear + (1 - p_reach) * miss_choice.p_clear
@@ -1825,6 +1958,7 @@ def solve_hand_for_ante_clear(
     *,
     four_fingers: bool = False,
     shortcut: bool = False,
+    smeared: bool = False,
     top_k: int | None = None,
     mc_seed: str | None = None,
 ) -> AnteClearChoice:
@@ -1862,7 +1996,7 @@ def solve_hand_for_ante_clear(
     return solve_hand_turn(
         hand, jokers, hand_levels, blind, rng, deck, chips_needed, hands_left, discards_left,
         future_samples, game_state, blind_chips,
-        four_fingers=four_fingers, shortcut=shortcut, top_k=top_k,
+        four_fingers=four_fingers, shortcut=shortcut, smeared=smeared, top_k=top_k,
     )
 
 

@@ -485,6 +485,7 @@ def label_and_encode(state: HandTurnState, seed: str) -> Example:
         blind_chips=blind_chips,
         four_fingers=flags["four_fingers"],
         shortcut=flags["shortcut"],
+        smeared=flags["smeared"],
         mc_seed=seed,  # makes the future-hand MC draws (and p_clear) reproducible
     )
 
