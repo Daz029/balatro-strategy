@@ -702,6 +702,46 @@ class TestHandEvalFlagsIntegration:
         assert len(both.scoring_cards) == 4
         assert both.total > self._score(played, [ff]).total
 
+    def test_four_fingers_does_not_truncate_a_longer_shortcut_straight(self):
+        """Four Fingers must ADD the 4-card straight, never REPLACE the
+        5-card one -- the engine-side analogue of solver bug a60dbbf, where
+        `build_templates` emitted only 4-length windows under FF and made a
+        natural 5-card straight structurally unproposable.
+
+        10-9-8-6-4 mixes both step kinds (10-9 and 9-8 adjacent, 8-6 and
+        6-4 gapped), so it is a Straight only under Shortcut, and it is 5
+        long, so Four Fingers is not needed to detect it -- FF's only
+        possible contribution here is DAMAGE. It must stay a 5-card
+        Straight scoring all five, beating the 4-card line FF does enable
+        (10-8-6-4). Measured: 268 vs 232.
+        """
+        mixed = [
+            _card("Clubs", "10"),
+            _card("Diamonds", "9"),
+            _card("Diamonds", "8"),
+            _card("Hearts", "6"),
+            _card("Spades", "4"),
+        ]
+        four = [
+            _card("Clubs", "10"),
+            _card("Diamonds", "8"),
+            _card("Hearts", "6"),
+            _card("Spades", "4"),
+        ]
+        ff = _joker("j_four_fingers")
+        sc = _joker("j_shortcut")
+
+        # Shortcut alone already sees it; FF must not take it away.
+        assert self._score(mixed, [sc]).hand_type == "Straight"
+        with_ff = self._score(mixed, [ff, sc])
+        assert with_ff.hand_type == "Straight"
+        assert len(with_ff.scoring_cards) == 5
+
+        shorter = self._score(four, [ff, sc])
+        assert shorter.hand_type == "Straight"
+        assert len(shorter.scoring_cards) == 4
+        assert with_ff.total > shorter.total
+
     def test_splash_composes_with_four_fingers(self):
         """Splash's two application sites must agree once a SECOND flag is
         live on the same board.
