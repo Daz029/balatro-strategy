@@ -4,7 +4,7 @@ TRUE depth, measured inside real solves.
 WHY ROOT-ONLY GATING IS REJECTED (CLAUDE.md "Kicker variants +
 prescreen-at-n=8"): the root harness (`validate_prescreen_n8.py`) measures
 the prescreen where it fires LEAST -- one node of ~488 per solve, and none
-of them post-discard. Once `PRESCREEN_HAND_LIMIT` is deleted the prescreen
+of them post-discard. With `PRESCREEN_HAND_LIMIT` deleted (K3) the prescreen
 fires at EVERY `best_immediate_play` call: every recursion node (including
 deep inside discard branches, on post-discard/redraw hands -- a different,
 more conditioned distribution where per-node errors could compound) and
@@ -23,9 +23,11 @@ recursive and MC calls route through the wrappers):
     the prescreen fast-clone everything they touch, and nothing here calls
     `prob_clear_given_future`, so the module LCG is untouched -- pinned by
     test). Then, per node, computes the prescreen box at each k and scores
-    capture-by-value / regret against truth. At n <= PRESCREEN_HAND_LIMIT
-    the original call IS the brute force, so truth is free; above it, truth
-    is an explicit C(n,1..5) enumeration (the original would have
+    capture-by-value / regret against truth. Truth is ALWAYS an explicit
+    C(n,1..5) enumeration: post-K3 the original call prescreens at every hand
+    size, so its result IS the box under test and reusing it as truth would
+    score the box against itself (the free-oracle shortcut died with the
+    limit; the original would have
     prescreened -- see `validate_prescreen_n8._brute_argmax`'s rationale).
   * `solve_hand_turn` -- maintains a `discards_left` stack so every node
     knows its true depth.
@@ -36,10 +38,9 @@ recursive and MC calls route through the wrappers):
     regret on order-sensitive boards).
 
 ROOT-ACTION AGREEMENT is a smoke readout ONLY (never the gate): after the
-instrumented brute solve, each k re-solves the same state with
-`PRESCREEN_HAND_LIMIT` patched to 0 and `PRESCREEN_TOP_K` to k -- the exact
-post-K3 production configuration, prescreen firing at every node INCLUDING
-the MC sampler -- and compares the root choice and p_clear.
+instrumented solve, each k re-solves the same state with `PRESCREEN_TOP_K`
+patched to k -- the prescreen already fires at every node INCLUDING the MC
+sampler post-K3 -- and compares the root choice and p_clear.
 
 Cost: a stage2 solve is ~200s+ (the recursion), measurement adds ~15 exact
 evals + one prescreen ranking per node per k. ~10 solves is tens of minutes
@@ -209,25 +210,25 @@ class PrescreenNodeProbe:
         result: Any,
     ) -> None:
         n = len(hand)
-        if n <= hand_solver.PRESCREEN_HAND_LIMIT:
-            # The original call brute-forced every subset: its own argmax IS
-            # the truth, already paid for.
-            truth_total = float(result.total)
-            truth_ids = frozenset(id(c) for c in subset)
-        else:
-            # The original call PRESCREENED -- enumerate explicitly, under
-            # the node's own search_orderings tier.
-            truth_total, truth_ids = None, None
-            for size in range(1, min(5, n) + 1):
-                for combo in itertools.combinations(hand, size):
-                    total = self._value(
-                        list(combo), hand, jokers, hand_levels, blind, rng,
-                        game_state, blind_chips, search_orderings,
-                    )
-                    if truth_total is None or total > truth_total:
-                        truth_total = total
-                        truth_ids = frozenset(id(c) for c in combo)
-            assert truth_total is not None and truth_ids is not None
+        # ALWAYS enumerate explicitly. The free-oracle shortcut (reuse the
+        # original call's own argmax as truth) died with
+        # PRESCREEN_HAND_LIMIT: `best_immediate_play` now prescreens at every
+        # hand size, so `result` IS the box under test and reusing it would
+        # score the box against itself -- regret identically 0, at every n.
+        # Enumerated under the node's own search_orderings tier so truth and
+        # box are valued on the same footing.
+        truth_total, truth_ids = None, None
+        for size in range(1, min(5, n) + 1):
+            for combo in itertools.combinations(hand, size):
+                total = self._value(
+                    list(combo), hand, jokers, hand_levels, blind, rng,
+                    game_state, blind_chips, search_orderings,
+                )
+                if truth_total is None or total > truth_total:
+                    truth_total = total
+                    truth_ids = frozenset(id(c) for c in combo)
+        assert truth_total is not None and truth_ids is not None
+        del subset, result  # the box under test, never the truth
 
         flags = get_hand_eval_flags(jokers)
         by_k: dict[int, dict[str, Any]] = {}
@@ -319,18 +320,16 @@ def _choice_key(choice: Any, hand: list) -> dict[str, Any]:
 
 
 def run_smoke_solve(gs: dict[str, Any], mc_seed: str, k: int) -> Any:
-    """Re-solve with the prescreen forced at EVERY hand size -- the post-K3
-    production configuration (limit deleted, box width k). Prescreen fires
-    at every recursion node AND inside the MC future-hand sampler, so the
-    p_clear delta vs the brute solve is the true end-to-end label shift."""
-    old_limit = hand_solver.PRESCREEN_HAND_LIMIT
+    """Re-solve at box width k. Post-K3 the prescreen fires at every hand
+    size by default (PRESCREEN_HAND_LIMIT deleted), so only k is patched --
+    the old `limit = 0` patch is now a no-op. Prescreen runs at every
+    recursion node AND inside the MC future-hand sampler, so the p_clear
+    delta vs the brute solve is the true end-to-end label shift."""
     old_k = hand_solver.PRESCREEN_TOP_K
-    hand_solver.PRESCREEN_HAND_LIMIT = 0
     hand_solver.PRESCREEN_TOP_K = k
     try:
         return _solve(gs, mc_seed)
     finally:
-        hand_solver.PRESCREEN_HAND_LIMIT = old_limit
         hand_solver.PRESCREEN_TOP_K = old_k
 
 

@@ -593,7 +593,35 @@ class DiscardChoice:
 # lever if it ever matters: kicker VARIANTS per combination (per-suit /
 # per-enhancement alternatives), not k. Full report:
 # data/prescreen_validation.json.
-PRESCREEN_HAND_LIMIT = 8
+#
+# PRESCREEN_HAND_LIMIT DELETED (K3, 2026-07-17). Every hand size is now
+# screened uniformly. The old `n > 8` seam existed because the prescreen was
+# only trusted on big hands, but it was also where B5's residual hid: n=8
+# kept brute-forcing, so the box was never measured there and the kicker bug
+# went unseen until the n=8 harness was pointed at it (0.845 capture, misses
+# up to 90% of a play's value). One path, measured everywhere.
+#
+# Licensed by K3's gate, both arms: root arm capture-by-value 0.980 at n=8
+# (stage2 brute, k-invariant), 0.980 on the stage3 copy-joker sample, 0.950
+# on the 9-12 tail; full-solve arm 0.9808 node-level at true depth (d0 0.981,
+# d1 0.997, d2/d3 1.000), root-action agreement 1.0. Bar was >=0.95.
+#
+# ACCEPTED RESIDUALS (user call 2026-07-17), all PPO-correctable in the
+# documented sense -- the real reward is P(clear) and a mis-ranked play is a
+# legal single-step action (the A3 "training problem, not labels" precedent):
+#   - ~5% of states, mean regret ~22 chips on the tail, one coherent family:
+#     class-3 SET-LEVEL jokers (Jolly/Droll/Blackboard/Square), where no
+#     honest per-card bit exists by taxonomy design, plus Four Fingers.
+#   - The tail's aggregate 0.950 is carried by n=9/n=12; n=10 (0.939) and
+#     n=11 (0.935) are individually below the bar.
+#   - The full-solve arm's `mc` stratum sits at 0.925 (160 nodes, mean regret
+#     44) -- future-hand samples valued at the coarse search_orderings=False
+#     tier. It feeds p_clear VALUES (the critic's warm start), not just
+#     actions; PPO retrains the critic on real returns.
+#   - "PPO corrects it" is a claim about the END of fine-tuning: BC teaches
+#     the prior and the KL leash holds the policy near it early, so a line BC
+#     never proposes may go unsampled for a while. The leash provably decays
+#     to zero.
 PRESCREEN_TOP_K = 5
 
 # --- B7 discard-shortlist depth gating (locked 2026-07-16) ------------------
@@ -1402,39 +1430,38 @@ def best_immediate_play(
     search_orderings: bool = True,
     prescreen_top_k: int | None = None,
 ) -> tuple[list[Card], ScoreResult]:
-    """No discards being considered -- brute force over all non-empty
-    subsets of size <=5 (cheap: C(8,5)=56 worst case). Above
-    PRESCREEN_HAND_LIMIT cards, brute force is replaced by exact evaluation
-    of the prescreened template-derived candidates only (see
-    `prescreen_play_candidates`); `prescreen_top_k` overrides the module
-    default k there (None = PRESCREEN_TOP_K).
+    """No discards being considered. Exact evaluation of the prescreened
+    template-derived candidates (see `prescreen_play_candidates`);
+    `prescreen_top_k` overrides the module default k there
+    (None = PRESCREEN_TOP_K).
+
+    The prescreen runs at EVERY hand size (K3, 2026-07-17): the old
+    `n > PRESCREEN_HAND_LIMIT` seam is deleted, so the label is uniformly
+    "exact among prescreened candidates" rather than "brute at n<=8, screened
+    above". That seam was where B5's residual hid -- n=8 brute-forcing meant
+    the box was never measured there. Gate + accepted residuals: see the
+    PRESCREEN_TOP_K block.
 
     `search_orderings` -- see `evaluate_value`; forwarded per subset."""
     best_subset: list[Card] | None = None
     best_result: ScoreResult | None = None
-    n = len(hand)
 
-    if n > PRESCREEN_HAND_LIMIT:
-        flags = get_hand_eval_flags(jokers)
-        candidates = prescreen_play_candidates(
-            hand,
-            jokers,
-            hand_levels,
-            blind,
-            rng,
-            four_fingers=flags["four_fingers"],
-            shortcut=flags["shortcut"],
-            smeared=flags["smeared"],
-            top_k=prescreen_top_k if prescreen_top_k is not None else PRESCREEN_TOP_K,
-            game_state=game_state,
-            blind_chips=blind_chips,
-            eval_flags=flags,
-        )
-        subset_pools: list = [candidates]
-    else:
-        subset_pools = [
-            itertools.combinations(hand, size) for size in range(1, min(5, n) + 1)
-        ]
+    flags = get_hand_eval_flags(jokers)
+    candidates = prescreen_play_candidates(
+        hand,
+        jokers,
+        hand_levels,
+        blind,
+        rng,
+        four_fingers=flags["four_fingers"],
+        shortcut=flags["shortcut"],
+        smeared=flags["smeared"],
+        top_k=prescreen_top_k if prescreen_top_k is not None else PRESCREEN_TOP_K,
+        game_state=game_state,
+        blind_chips=blind_chips,
+        eval_flags=flags,
+    )
+    subset_pools: list = [candidates]
 
     for pool in subset_pools:
         for combo in pool:

@@ -13,8 +13,9 @@ load-bearing and pinned here:
     flagged) -- the whole point of the full-solve arm over root-only
     measurement.
 
-Plus the free-oracle shortcut (at n <= PRESCREEN_HAND_LIMIT the original
-call's own result IS the brute-force truth) and clean install/uninstall.
+Plus INDEPENDENT TRUTH (post-K3 the original call prescreens at every hand
+size, so its result is the BOX -- truth must be enumerated separately or the
+box is scored against itself) and clean install/uninstall.
 """
 
 from __future__ import annotations
@@ -114,25 +115,39 @@ class TestDepthAttribution:
                 assert 0 < row["box_size"] < 218
 
 
-class TestFreeOracle:
-    def test_truth_is_the_original_result_at_n8(self):
-        # At n <= PRESCREEN_HAND_LIMIT the original call brute-forces, so
-        # the probe must reuse its result as truth (no re-enumeration).
+class TestIndependentTruth:
+    def test_truth_is_enumerated_not_taken_from_the_call(self):
+        """Post-K3 (PRESCREEN_HAND_LIMIT deleted) `best_immediate_play`
+        PRESCREENS at every hand size, so its result is the BOX UNDER TEST.
+        Truth must come from the probe's own C(n,1..5) enumeration -- reusing
+        the call's result would score the box against itself and report
+        regret identically 0 at every n, silently turning the arm into a
+        no-op. This previously WAS the free-oracle shortcut and was correct
+        while n<=8 brute-forced.
+
+        Truth is an argmax over every subset, so it can never be beaten by
+        the box, which searches a subset of the same space under the same
+        valuation.
+        """
         hand = _hand()
         hl, blind, rng = HandLevels(), Blind.create("bl_small", ante=1), PseudoRandom("fs2")
         probe = PrescreenNodeProbe(ks=[4])
         with probe:
-            subset, result = hand_solver.best_immediate_play(hand, [], hl, blind, rng)
+            _subset, result = hand_solver.best_immediate_play(hand, [], hl, blind, rng)
         assert len(probe.records) == 1
         rec = probe.records[0]
-        assert rec["truth_total"] == float(result.total)
+        assert rec["truth_total"] >= float(result.total) - 1e-6
         assert rec["depth"] == "bare"  # no solve_hand_turn frame on the stack
 
 
 class TestBruteArgmaxHelper:
-    def test_matches_best_immediate_play_at_n8(self):
-        # The n8 harness's explicit enumeration must be byte-identical to
-        # best_immediate_play's n<=8 branch (same order, same tie rule).
+    def test_is_an_upper_bound_on_best_immediate_play(self):
+        # Was "byte-identical to best_immediate_play's n<=8 branch" -- that
+        # branch is GONE (K3 deleted PRESCREEN_HAND_LIMIT), so bip now
+        # returns the prescreened box's best at every n. The surviving
+        # invariant: the harness's explicit enumeration is an argmax over the
+        # whole space, so it upper-bounds the box and their difference IS the
+        # regret the arm reports.
         hand = _hand()
         gs = {
             "hand": hand,
@@ -147,14 +162,23 @@ class TestBruteArgmaxHelper:
             hand, [], args["hand_levels"], args["blind"], args["rng"],
             args["game_state"], args["blind_chips"],
         )
+        assert total >= float(bip_result.total) - 1e-6
+        # On this plain board the box is expected to reach the argmax VALUE;
+        # if this ever fails it is a real prescreen miss, not a harness bug.
         assert total == float(bip_result.total)
-        assert [id(c) for c in subset] == [id(c) for c in bip_subset]
+        # Subset IDENTITY is deliberately NOT pinned. The old test compared
+        # them because both sides were the same brute enumeration; now they
+        # are different searches that tie. This board is High Card, where
+        # only the top card scores, so [A] and [A,x,x,x,x] are worth exactly
+        # the same -- brute enumerates sizes ascending and takes the 1-card
+        # play, the box returns a 5-card one. Capture is measured BY VALUE
+        # throughout for exactly this reason (the argmax is not unique).
+        assert len(bip_subset) >= 1
 
 
 class TestSmokeSolve:
     def test_forced_prescreen_solve_restores_globals(self):
         hand = _hand()
-        old_limit = hand_solver.PRESCREEN_HAND_LIMIT
         old_k = hand_solver.PRESCREEN_TOP_K
         gs = {
             "hand": hand,
@@ -169,5 +193,4 @@ class TestSmokeSolve:
         gs["blind"].chips = 300
         choice = run_smoke_solve(gs, "smoke_test", k=4)
         assert choice.action in ("play", "discard")
-        assert hand_solver.PRESCREEN_HAND_LIMIT == old_limit
         assert hand_solver.PRESCREEN_TOP_K == old_k

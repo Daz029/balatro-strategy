@@ -1,12 +1,13 @@
 """Tests for the big-hand play prescreen (B5).
 
 `best_immediate_play` is C(n,5) exact evaluations per call -- fine at n=8
-(56), prohibitive at the width-40 obs cap. Above PRESCREEN_HAND_LIMIT it
-evaluates only the top-k template-derived candidates from
-`prescreen_play_candidates`, selected family-diverse (handoff pitfall #13:
-naive top-k returns k variants of one dominant line). These tests pin:
+(56), prohibitive at the width-40 obs cap. It evaluates only the top-k
+template-derived candidates from `prescreen_play_candidates`, selected
+family-diverse (handoff pitfall #13: naive top-k returns k variants of one
+dominant line). K3 deleted PRESCREEN_HAND_LIMIT, so this happens at EVERY
+hand size. These tests pin:
 
-  - the n<=8 path is byte-identical brute force (prescreen never consulted);
+  - the prescreen runs at every hand size and still finds the brute answer;
   - the prescreen finds the same best play as full brute force on
     constructed big hands where the answer is unambiguous;
   - family diversity (a dominant flush cannot crowd out a rank line);
@@ -22,7 +23,6 @@ import itertools
 
 import hand_solver
 from hand_solver import (
-    PRESCREEN_HAND_LIMIT,
     best_immediate_play,
     evaluate_value,
     prescreen_play_candidates,
@@ -96,14 +96,25 @@ def _quads_and_flush_hand() -> list[Card]:
 
 
 class TestPathSelection:
-    def test_at_limit_prescreen_never_consulted(self, monkeypatch):
-        def boom(*args, **kwargs):
-            raise AssertionError("prescreen must not run at n <= PRESCREEN_HAND_LIMIT")
+    def test_small_hands_are_prescreened_too(self, monkeypatch):
+        """PRESCREEN_HAND_LIMIT is DELETED (K3): one path at every hand size.
+        The old test asserted the opposite -- that the prescreen must never
+        run at n <= 8 -- and that seam is exactly where B5's residual hid,
+        since a brute-forcing n=8 meant the box was never measured there.
 
-        monkeypatch.setattr(hand_solver, "prescreen_play_candidates", boom)
-        hand = _flush_plus_junk_hand()[:PRESCREEN_HAND_LIMIT]
+        The box must still find the brute-force answer on this board.
+        """
+        calls = []
+        real = hand_solver.prescreen_play_candidates
+        monkeypatch.setattr(
+            hand_solver,
+            "prescreen_play_candidates",
+            lambda *a, **kw: (calls.append(1), real(*a, **kw))[1],
+        )
+        hand = _flush_plus_junk_hand()[:8]
         hand_levels, blind, rng = _fixtures()
         subset, result = best_immediate_play(hand, [], hand_levels, blind, rng)
+        assert calls, "prescreen must run at every hand size now"
         assert 1 <= len(subset) <= 5
         assert result.total == _brute_force_best(hand, [])
 
