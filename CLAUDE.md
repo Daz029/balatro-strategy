@@ -929,14 +929,32 @@ forces a second regen.
          or wild flushes. Cost note: the harness is ~25 min on a
          DISAGREEING state and ~0.05s on an agreeing one, so 200 states is
          a 9600X job, not a local one.
-      3. **The in-flight stage2 brute corpus is CORRUPT and must not be
-         kept**: ~29% of it owns j_four_fingers / j_shortcut / j_smeared
-         (measured via shard `joker_ids`), and those labels were produced
-         with the jokers inert. Selective relabel is sound — the engine fix
-         is provably a no-op without those three (flags all-false == the
-         old `jokers=None` path) — but Bug C's wild-card half is NOT so
-         gated, so a wild-card flush board is mislabeled with no joker
-         present at all. Wholesale regen is the safe call.
+      3. **The stage2 brute corpus is 36.1% corrupt — SURGERY, not
+         wholesale regen** (CORRECTED 2026-07-17 at K4; the original call
+         here was "wholesale regen is the safe call" and it was WRONG).
+         The reasoning that produced it — "Bug C's wild-card half is not
+         joker-gated, so no query can find the corrupt rows" — is sound in
+         general and simply does not apply to stage2: its 21-joker pool has
+         **no Smeared**, and a `b_red` deck deals **no enhanced cards at
+         all** (60 states sampled, every card `c_base`), so Bug C cannot
+         fire on this stage. Lesson: a bug's nature does not settle its
+         blast radius — the STAGE CONFIG does. Check the pool and the deck.
+         Measured split: owns FF/Shortcut 29.0% + hand width >8 10.1%
+         (the only rows that took the prescreen path, so the only ones
+         carrying the lottery/seating/pre-K1 bugs) = **union 1445 (36.1%)
+         relabel, 2555 (63.9%) clean**.
+         The clean rows are BRUTE-EXACT and therefore strictly BETTER than
+         anything generable now (post-K3 a fresh label is "exact among
+         prescreened candidates", 0.980) — regenerating them would DOWNGRADE
+         them. `scripts/relabel_stage2_k3.py` does the surgery into a fresh
+         dir (never in place); the manifest records the mixed provenance.
+         Engine-drift check applied (the C2 capture-skew rule, but for
+         LABELS — a label is NOT re-scored by current code, so every
+         label-semantics change since the run dirties it): B7's depth gate
+         and the dollar marginals landed BEFORE the run; `5b9ab27`
+         (O(n) get_x_same) landed after but is equivalence-PINNED; every
+         other post-run change is prescreen-only or FF/Shortcut-gated, i.e.
+         already inside the relabel set.
       4. The obs features (`hand_potential_features`) take four_fingers /
          shortcut but NOT smeared — an informativeness gap on the same
          axis, not label-corrupting. Unfixed.
