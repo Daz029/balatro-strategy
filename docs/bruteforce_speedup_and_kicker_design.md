@@ -5,14 +5,18 @@ CLAUDE.md ("Kicker variants + prescreen-at-n=8"). The §6 questions below are
 all RESOLVED there; this document remains the measurement record (§1-§5, §7-§8
 stay authoritative for the numbers).
 
-> **READ §9 FIRST (2026-07-17).** K3 ran and found FOUR bugs, one of which —
-> `score_hand` passing `jokers=None` to `evaluate_hand` — meant **Four
-> Fingers, Shortcut and Smeared Joker were COMPLETELY INERT in every label
-> ever generated**, including every label behind §1's cost table and §4's
-> kicker finding. The §4 analysis still stands (the 27/27 misses were real
-> and are fixed), but any number here that touches those three jokers was
-> measured on an engine where they did nothing. No gate verdict is claimed
-> yet; arms are re-running.
+> **READ §9 FIRST (2026-07-17).** K3 ran and found **SIX bugs, five of them
+> silently corrupting labels** — chief among them `score_hand` passing
+> `jokers=None` to `evaluate_hand`, which meant **Four Fingers, Shortcut and
+> Smeared Joker were COMPLETELY INERT in every label ever generated**,
+> including every label behind §1's cost table and §4's kicker finding. The
+> §4 analysis still stands (the 27/27 misses were real and are fixed), but
+> any number here that touches those three jokers was measured on an engine
+> where they did nothing.
+>
+> **K3 is now CLOSED: gate passed, `PRESCREEN_HAND_LIMIT` deleted** — so §1's
+> premise ("the n>8 prescreen") and §5's framing are historical; the
+> prescreen runs at every hand size.
 
 **K1 BUILT 2026-07-17** (branch `kicker-variants-k1`) — the variant emitter,
 family key, and variants-ride-their-line. K2-K4 remain. Two spec gaps were
@@ -86,14 +90,21 @@ machinery; no gate RUN is claimed (that is K3). Contents:
   future-hand nodes land in an "mc" stratum and are valued under the node's
   own `search_orderings` tier). The wrapper calls the original first and
   returns its result unchanged — an instrumented solve is byte-identical to
-  a bare one (pinned by test; at n<=8 the original's own result doubles as
-  the free brute truth). Root-action agreement is a smoke readout only:
-  each k re-solves with `PRESCREEN_HAND_LIMIT=0` + `PRESCREEN_TOP_K=k`
-  patched — the exact post-K3 production configuration, prescreen firing at
-  every node INCLUDING the MC sampler — and compares root choice + p_clear.
+  a bare one (pinned by test). Root-action agreement is a smoke readout
+  only: each k re-solves with the prescreen forced everywhere and compares
+  root choice + p_clear.
   Tests: `tests/scripts/test_validate_prescreen_fullsolve.py` (7 — non-
-  perturbation, depth attribution, free-oracle truth, `_brute_argmax` ==
-  `best_immediate_play` at n=8, global restore).
+  perturbation, depth attribution, truth derivation, `_brute_argmax`
+  agreement, global restore).
+  **SUPERSEDED BY K3 (§9), and this is the silent trap:** the "at n<=8 the
+  original's own result doubles as the free brute truth" shortcut was correct
+  ONLY while n<=8 brute-forced. `PRESCREEN_HAND_LIMIT` is now deleted, so
+  that call PRESCREENS at every size and its result IS the box under test —
+  the shortcut would have scored the box against itself and reported regret
+  identically 0 at every n. Truth is now always an explicit enumeration, and
+  the `_brute_argmax == best_immediate_play` test no longer pins subset
+  identity (they tie; see §9's tie assumption). The `limit=0` patch is a
+  no-op and is gone.
 * Smoke readout from the 2-solve shakeout run (NOT a gate claim): stage2
   d<=2 nodes all captured at k=4, root action match 2/2, one exact-set
   mismatch at p_clear delta 0 (the interchangeable-kicker twin case §3
@@ -423,7 +434,7 @@ Free, no semantics change, makes progress visible and caps crash-loss.
 
 ---
 
-## 9. K3 — the gate ran, and found four bugs (2026-07-17)
+## 9. K3 — the gate ran, found SIX bugs, then passed (2026-07-17)
 
 Branch `engine-hand-eval-flags-fix` (off `kicker-variants-k1`@593f57c).
 **No gate verdict yet**: every arm measured before `a4a0053` is invalid and
@@ -491,14 +502,88 @@ engine fix deserves suspicion, not relief.
   took the detection flags twice (booleans → templates, `eval_flags` →
   kicker gates); nothing made them agree. It now raises on contradiction.
 
+### The last two bugs, and the gate
+
+4. **The HARNESS screened with `smeared=False`** (`a4a0053`). Both
+   validation harnesses passed four_fingers/shortcut but not smeared
+   (default False), so a Smeared board was **screened with raw-suit
+   templates and scored against a smeared engine** — the box built for a
+   different board than it was measured on. Found because arm C still
+   reported the smeared miss at an *unchanged* regret of 200 after the Bug C
+   fix, while a unit test on the same board passed. **A contradiction
+   between two measurements is a bug in one of them.**
+   `prescreen_play_candidates` took the detection flags twice (booleans →
+   templates, `eval_flags` → kicker gates) with nothing forcing agreement; it
+   now raises on contradiction.
+5. **The cheap rank was an emission-order LOTTERY** (`caf3394`).
+   `_ranking_score` is fixed-order by design; dedupe was by card-identity
+   SET, first-wins. So a family's cheap rank was decided by
+   `itertools.permutations` order. On `stage2_curated_00002797` (Photograph +
+   Hanging Chad) the full house was first emitted threes-first → **1408**;
+   the kings-first emission of the *same five cards* → **4080** was skipped
+   as a duplicate. At 1408 it ranked ~7th, was cut at `top_k=5`, and the
+   exact pass **never saw a full house at all** — it lost to a 3008 straight.
+   Fix: max over emitted orders (the generator already emits both). A
+   canonical sort was rejected: any fixed order is a guess.
+
+Plus the **seating fix** (`a02e47b`): Shortcut widens a straight window and
+Four Fingers adds shorter ones, so a hold overflows and five seats must be
+chosen — by `_keep_priority`, joker-blind. Emit the seatings, let the real
+scorer rank them. This killed the hand-size gradient (n=12: 0.896 → 0.958 →
+0.979, versus n=8's 0.980).
+
+**GATE PASSED, `PRESCREEN_HAND_LIMIT` DELETED** (`cb9eeb0`), bar ≥0.95
+capture-by-value:
+
+| arm | capture |
+|---|---|
+| root, n=8 stage2 brute | 0.980 (k-invariant) |
+| root, stage3 copy-jokers | 0.980 |
+| root, 9–12 tail | 0.950 |
+| full-solve, node-level at true depth | 0.9808 (d0 .981 / d1 .997 / d2 1.0 / d3 1.0) |
+
+Accepted residuals (user call): ~5% of states, tail mean regret ~22 chips,
+one coherent family — class-3 set-level jokers (Jolly/Droll/Blackboard/
+Square) plus Four Fingers. The tail's 0.950 is carried by n=9/n=12 (n=10
+0.939, n=11 0.935 are individually below); the full-solve `mc` stratum sits
+at 0.925. All PPO-correctable in the documented sense — with the caveat that
+that is a claim about the *end* of fine-tuning, and `mc` feeds p_clear
+*values* (the critic's warm start), not just actions.
+
+### Two methodology traps worth more than the bugs
+
+* **THE SILENT TRAP — when you delete a fast path, re-check every
+  measurement it licensed.** The full-solve arm reused
+  `best_immediate_play`'s own result as truth (the "free oracle"), which was
+  correct *only* while n≤8 brute-forced. With the limit deleted that call
+  prescreens, so its result **is the box under test** — reusing it scores the
+  box against itself and reports **regret identically 0 at every n**: the arm
+  silently becomes a no-op that always passes. §3's free-oracle note and K2's
+  `_brute_argmax` fix are the same hazard caught earlier for the tail arm;
+  it generalizes to *any* harness whose oracle and subject become the same
+  code.
+* **THE TIE ASSUMPTION — the argmax is not unique, so compare VALUES.**
+  `_brute_argmax` vs `best_immediate_play` used to pin subset *identity*
+  because both sides were the same enumeration. They are now different
+  searches that tie: on a High Card board only the top card scores, so `[A]`
+  and `[A,x,x,x,x]` are worth exactly the same — brute enumerates sizes
+  ascending and takes the 1-card play, the box returns a 5-card one. This is
+  why capture is measured by value throughout (§3), and any new comparison of
+  two searches must do the same.
+
 ### What this costs
 
-* Every K3 arm re-runs.
-* **B7 revalidation is mandatory** — Bug A and Bug C both change
-  `build_templates`, which feeds the discard side, so the locked sweep
-  (25 helped / 9 regressed at k=4) was measured on templates that could not
-  propose 5-card straights, smeared flushes or wild flushes. ~25 min per
-  DISAGREEING state vs ~0.05s per agreeing one → a 9600X job.
+* **B7 REVALIDATED, verdict survives**: 200 states, k=4, n_samples=80 —
+  32 helped / 13 regressed (was 28/11), frac_helped 0.333 (was 0.308),
+  worst_paired_diff −0.20 (unchanged), disagreement 0.495 (was 0.470,
+  expected since the templates changed). 8 of the 11 original regressors
+  still regress including **seed 247** (the Shoot-the-Moon keep-both-Queens
+  case), so the depth gate's rationale carries over intact. NOT re-run: the
+  k=4/6/8/12/64 sweep that localized regressions to the rank-k boundary —
+  deferred as low-risk given the qualitative match.
+* The **discard side has the identical seat-blindness** (`eval_cards =
+  hold[:5]`, not even keep-priority), deliberately unfixed per the
+  measure-first rule and documented at the site with the sweep as tripwire.
 * **The in-flight stage2 brute corpus is discarded, not kept** (reverses the
   2026-07-16 call). ~29% owns the three inert jokers; selective relabel is
   provably sound for that half, but Bug C's wild-card half is not
