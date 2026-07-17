@@ -548,3 +548,128 @@ class TestIdolIntegration:
             game_state={"idol_card": idol_card},
         )
         assert r.total == base.total
+
+
+# ============================================================================
+# N. Hand-eval modifier flags reach the SCORING pipeline (Throwback class)
+# ============================================================================
+
+
+class TestHandEvalFlagsIntegration:
+    """Four Fingers / Shortcut / Smeared must change hand DETECTION inside
+    `score_hand`, not merely inside `hand_eval`.
+
+    Regression for a real bug: `score_hand` called
+    `evaluate_hand(played_cards, jokers=None)` -- a copy-paste carryover
+    from `score_hand_base` (the deliberately jokerless scorer, 09105e3)
+    into the joker-aware scorer (7633d34). `evaluate_hand` derives every
+    detection flag from that list, so all three jokers were INERT
+    everywhere: in-game, in the env, and in every solver label. Splash
+    alone survived, because `score_hand` re-implements it independently at
+    Phase 3c.
+
+    These assertions deliberately go through `score_hand` and NOT through
+    `evaluate_hand`/`get_flush`/`evaluate_poker_hand`. Unit tests at those
+    levels already existed and PASSED throughout -- the defect was purely
+    in the integration seam, which is the same gap that hid The Idol and
+    Throwback itself. A test that constructs the flags by hand cannot fail
+    on this bug and is worthless here.
+    """
+
+    def _score(self, played, jokers):
+        return score_hand(
+            played,
+            [],
+            jokers,
+            HandLevels(),
+            _small_blind(),
+            PseudoRandom("T"),
+        )
+
+    def test_four_fingers_four_card_straight_detected(self):
+        played = [
+            _card("Clubs", "10"),
+            _card("Diamonds", "9"),
+            _card("Diamonds", "8"),
+            _card("Clubs", "7"),
+        ]
+        assert self._score(played, []).hand_type == "High Card"
+        assert self._score(played, [_joker("j_four_fingers")]).hand_type == "Straight"
+
+    def test_four_fingers_four_card_flush_detected(self):
+        played = [
+            _card("Hearts", "2"),
+            _card("Hearts", "5"),
+            _card("Hearts", "9"),
+            _card("Hearts", "King"),
+        ]
+        assert self._score(played, []).hand_type == "High Card"
+        assert self._score(played, [_joker("j_four_fingers")]).hand_type == "Flush"
+
+    def test_shortcut_gapped_straight_detected(self):
+        played = [
+            _card("Diamonds", "9"),
+            _card("Clubs", "7"),
+            _card("Hearts", "5"),
+            _card("Spades", "4"),
+            _card("Diamonds", "3"),
+        ]
+        assert self._score(played, []).hand_type == "High Card"
+        assert self._score(played, [_joker("j_shortcut")]).hand_type == "Straight"
+
+    def test_smeared_mixed_suit_flush_detected(self):
+        played = [
+            _card("Hearts", "2"),
+            _card("Diamonds", "5"),
+            _card("Hearts", "9"),
+            _card("Diamonds", "King"),
+            _card("Hearts", "3"),
+        ]
+        assert self._score(played, []).hand_type == "High Card"
+        assert self._score(played, [_joker("j_smeared")]).hand_type == "Flush"
+
+    def test_debuffed_four_fingers_does_not_enable(self):
+        """`get_hand_eval_flags` skips debuffed jokers (find_joker semantics).
+        Pinned at the integration level so passing the list can never
+        smuggle a debuffed joker's flag through."""
+        played = [
+            _card("Clubs", "10"),
+            _card("Diamonds", "9"),
+            _card("Diamonds", "8"),
+            _card("Clubs", "7"),
+        ]
+        ff = _joker("j_four_fingers")
+        ff.debuff = True
+        assert self._score(played, [ff]).hand_type == "High Card"
+
+    def test_four_fingers_straight_scores_more_than_high_card(self):
+        """The detection change must reach the SCORE, not just the label --
+        a Straight's base chips/mult are what the solver's labels read."""
+        played = [
+            _card("Clubs", "10"),
+            _card("Diamonds", "9"),
+            _card("Diamonds", "8"),
+            _card("Clubs", "7"),
+        ]
+        assert (
+            self._score(played, [_joker("j_four_fingers")]).total
+            > self._score(played, []).total
+        )
+
+    def test_splash_still_scores_all_played_cards(self):
+        """Splash is applied TWICE once jokers are passed (evaluate_hand's
+        augmentation + Phase 3c). Both produce `list(played_cards)` in
+        played order, so the second is a redundant no-op -- pinned so a
+        future Phase 3c removal, or an evaluate_hand change, cannot
+        silently double-count or drop it."""
+        played = [
+            _card("Hearts", "Ace"),
+            _card("Spades", "Ace"),
+            _card("Clubs", "2"),
+        ]
+        plain = self._score(played, [])
+        splash = self._score(played, [_joker("j_splash")])
+        assert plain.hand_type == splash.hand_type == "Pair"
+        assert len(plain.scoring_cards) == 2  # the two Aces
+        assert len(splash.scoring_cards) == 3  # + the off-line 2
+        assert splash.total > plain.total
