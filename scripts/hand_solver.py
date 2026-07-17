@@ -261,7 +261,6 @@ def build_templates(
     """
     templates: list[Template] = []
     flush_need = 4 if four_fingers else 5
-    straight_need = 4 if four_fingers else 5
 
     # --- flush-by-suit (4 templates) ---
     for suit in SUITS:
@@ -275,16 +274,35 @@ def build_templates(
 
     # --- straight-by-window ---
     # ranks 2..14 (Ace high); Ace can also play low (id 14 treated as 1).
-    windows = []
+    #
+    # Four Fingers ADDS the 4-length windows, it does not REPLACE the
+    # 5-length ones: the joker is permissive (4 consecutive cards now also
+    # count) and a natural 5-card straight stays legal and scores MORE.
+    # Emitting only 4-windows under it -- the original behaviour -- made a
+    # 5-card straight structurally unproposable, because a window is an
+    # explicit rank set and the 5th rank fails its predicate. Measured on
+    # `stage2_curated_00002468` (Four Fingers + Crazy): the true line
+    # JS-10C-9D-8D-7C (1480) could not be constructed and the best
+    # candidate was the 4-card JS-10C-9D-8D (1340).
+    #
+    # Both needs are honest, so both are kept: 4-of-4 completes a straight
+    # under Four Fingers, 5-of-5 completes the natural straight. (A
+    # 5-window with needed=4 would be WRONG -- "4 of these 5 ranks" does
+    # not imply 4 CONSECUTIVE ranks: {7,8,9,J} is not a straight.)
+    # The flush side needs no such fix: its predicate is "same suit", so
+    # `construct_hold` already gathers all 5 same-suit cards and `needed`
+    # only feeds the reachability math.
+    straight_needs = (4, 5) if four_fingers else (5,)
+    windows: list[tuple[list[int], int]] = []
     lo, hi = 2, 14
-    for start in range(lo, hi - straight_need + 2):
-        windows.append(list(range(start, start + straight_need)))
-    # ace-low window, e.g. [14(as1),2,3,4] for four_fingers, or [..,5] normal
-    ace_low_window = [14] + list(range(2, 2 + straight_need - 1))
-    windows.append(ace_low_window)
+    for need in straight_needs:
+        for start in range(lo, hi - need + 2):
+            windows.append((list(range(start, start + need)), need))
+        # ace-low window, e.g. [14(as1),2,3,4] at need=4, [..,5] at need=5
+        windows.append(([14] + list(range(2, 2 + need - 1)), need))
 
     gap = 1 if shortcut else 0
-    for w in windows:
+    for w, need in windows:
         wset = set(w)
         if gap:
             # widen predicate: allow ranks within the window OR adjacent gap-fillers
@@ -292,11 +310,18 @@ def build_templates(
             # here we just loosen membership by +/-1 rank of window bounds)
             lo_w, hi_w = min(w), max(w)
             wset = set(range(lo_w - gap, hi_w + gap + 1))
+        # The `_n{need}` suffix disambiguates the two ace-low windows, which
+        # both render as `straight_2-14` (min 2, max 14) regardless of
+        # length. Applied only under four_fingers, so every non-four-fingers
+        # template name is byte-identical to before.
+        name = f"straight_{min(w)}-{max(w)}"
+        if four_fingers:
+            name = f"{name}_n{need}"
         templates.append(
             Template(
-                name=f"straight_{min(w)}-{max(w)}",
+                name=name,
                 predicate=lambda c, ws=wset: _card_rank_id(c) in ws,
-                needed=straight_need,
+                needed=need,
             )
         )
 
