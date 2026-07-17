@@ -791,6 +791,18 @@ forces a second regen.
       120, 18.2% -> 0), plain board unchanged. Both regression tests
       confirmed FAILING on pre-K1. Measured fan-out 14-23 candidates vs
       brute's 218, matching the doc's ~15 budget.
+    - SUITE VERIFIED 2026-07-17 (commit `b2ec3ff`, clean tree): the 49
+      targeted tests (22 kicker-variant incl. both regressions above + 27
+      prescreen) plus the full `tests/scripts` + `tests/env` sweep — 821
+      passed, 0 failures, ~22min — covering the generation and
+      `trigger_match` suites. RUFF: the 3 errors ruff reports on
+      K1-touched files (UP035 `Callable` in trigger_match; I001 + F401
+      `COPY_JOKER_KEYS` in hand_solver) ALL PRE-DATE this commit —
+      verified by running ruff against the PARENT (2 errors already) and
+      by the diff touching none of those lines. K1 adds zero new lint;
+      repo-wide 16 is likewise pre-existing. `COPY_JOKER_KEYS` IS dead
+      (gates read resolved identities via `resolve_copy_targets`) but it
+      is old debt, not K1's — deleting it is safe and unrelated.
     - ACCEPTED RESIDUAL (new, beyond the spec's list): SEALS are not
       consulted by the held-value hypothesis. A Blue seal is genuinely
       held-value (Planet at end of round), so a held variant can pad one

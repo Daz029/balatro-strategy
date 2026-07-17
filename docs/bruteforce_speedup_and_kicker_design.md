@@ -36,6 +36,16 @@ flush* fixture has no kicker choice to get wrong, so it passes pre-K1 and proves
 nothing. The state must have a line SHORTER than 5 with the kicker actually
 contested.
 
+**Test state (2026-07-17, commit `b2ec3ff`).** Green: the 49 targeted tests (22
+kicker-variant, 27 prescreen) and the full `tests/scripts` + `tests/env` sweep,
+821 passed / 0 failures / ~22min, covering the generation and `trigger_match`
+suites. Ruff reports 3 errors on K1-touched files, but all 3 PRE-DATE the commit
+(the parent already has 2; the diff touches none of those lines) — K1 introduces
+no new lint. One is a genuinely dead `COPY_JOKER_KEYS` import in `hand_solver.py`
+left from an older draft that gated on raw joker keys; the shipped gates read
+resolved identities via `resolve_copy_targets`, so it is safe to delete whenever
+someone is in there — it is not K1 debt.
+
 **K2 must fix the harnesses.** `top_k` now counts LINES, so the returned list is
 longer than k and prefix stability holds only at line granularity — it is no
 longer INDEXABLE by k. Both harnesses currently score k-cuts by slicing `[:k]`
