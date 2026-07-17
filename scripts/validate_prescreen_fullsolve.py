@@ -236,6 +236,7 @@ class PrescreenNodeProbe:
                 hand, jokers, hand_levels, blind, rng,
                 four_fingers=flags["four_fingers"],
                 shortcut=flags["shortcut"],
+                smeared=flags["smeared"],
                 top_k=k,
                 game_state=game_state,
                 blind_chips=blind_chips,

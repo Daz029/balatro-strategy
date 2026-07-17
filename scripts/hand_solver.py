@@ -1128,10 +1128,31 @@ def prescreen_play_candidates(
     has already computed it); it sources the Splash gate and the family
     scan's smeared handling. None = compute it here.
     """
+    flags = eval_flags if eval_flags is not None else get_hand_eval_flags(jokers)
+    # This function takes the detection flags TWICE -- as three booleans
+    # (they reach `build_templates`) and inside `eval_flags` (it reaches the
+    # kicker gates and the family scan). Nothing made them agree, so a
+    # caller could pass `eval_flags` with smeared=True and leave the boolean
+    # at its default, and the box would silently be built from raw-suit
+    # templates: exactly the K3 arm-C miss that survived the Bug C fix,
+    # because BOTH validation harnesses did precisely this. Same shape as
+    # the `jokers=None` bug one layer down -- a call site quietly not
+    # forwarding what it holds. Loud, per the Riff-raff precedent.
+    for _name, _passed in (
+        ("four_fingers", four_fingers),
+        ("shortcut", shortcut),
+        ("smeared", smeared),
+    ):
+        if bool(flags.get(_name, False)) != bool(_passed):
+            raise ValueError(
+                f"prescreen_play_candidates: {_name}={_passed} contradicts "
+                f"eval_flags[{_name!r}]={flags.get(_name)}. The booleans build the "
+                "templates and eval_flags gates the kickers; disagreeing means the "
+                "box is built for a different board than it is scored against."
+            )
     templates = build_templates(
         hand, four_fingers=four_fingers, shortcut=shortcut, smeared=smeared
     )
-    flags = eval_flags if eval_flags is not None else get_hand_eval_flags(jokers)
     views = _resolved_joker_views(jokers)
     counts = _card_channel_counts(hand, views, game_state, flags)
     gates = _kicker_gates(hand, views, flags, counts)

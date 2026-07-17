@@ -315,9 +315,15 @@ def _box_at_k(args: dict[str, Any], k: int) -> list[list]:
         args["rng"],
         four_fingers=flags["four_fingers"],
         shortcut=flags["shortcut"],
+        # smeared was MISSING here, and its default is False, so every
+        # Smeared board was screened with raw-suit flush templates and the
+        # arm reported the solver missing lines the solver can now build.
+        # eval_flags is passed too, so hand_solver cross-checks the two.
+        smeared=flags["smeared"],
         top_k=k,
         game_state=args["game_state"],
         blind_chips=args["blind_chips"],
+        eval_flags=flags,
     )
 
 
