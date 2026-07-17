@@ -673,3 +673,61 @@ class TestHandEvalFlagsIntegration:
         assert len(plain.scoring_cards) == 2  # the two Aces
         assert len(splash.scoring_cards) == 3  # + the off-line 2
         assert splash.total > plain.total
+
+    def test_four_fingers_and_shortcut_stack(self):
+        """Two detection flags on one board must COMPOSE, not race.
+
+        10-8-6-4 is a straight only if the hand is allowed to be 4 long
+        (Four Fingers) AND to skip a rank at every step (Shortcut). Either
+        joker alone leaves it High Card, so this fails unless both flags
+        survive the same `get_hand_eval_flags` call and both reach
+        detection. The flags are independent booleans, so composition is
+        expected -- but "expected to compose" is precisely the reasoning
+        that let jokers=None ship, hence a board only the conjunction can
+        score.
+        """
+        played = [
+            _card("Clubs", "10"),
+            _card("Diamonds", "8"),
+            _card("Hearts", "6"),
+            _card("Spades", "4"),
+        ]
+        ff = _joker("j_four_fingers")
+        sc = _joker("j_shortcut")
+        assert self._score(played, []).hand_type == "High Card"
+        assert self._score(played, [ff]).hand_type == "High Card"
+        assert self._score(played, [sc]).hand_type == "High Card"
+        both = self._score(played, [ff, sc])
+        assert both.hand_type == "Straight"
+        assert len(both.scoring_cards) == 4
+        assert both.total > self._score(played, [ff]).total
+
+    def test_splash_composes_with_four_fingers(self):
+        """Splash's two application sites must agree once a SECOND flag is
+        live on the same board.
+
+        The redundant-restatement argument for keeping Phase 3c rests on
+        both sites producing `list(played_cards)`. That is trivially true
+        when Splash is the only flag; this pins it when Four Fingers has
+        already rewritten `scoring_cards` upstream (4-card flush + 1
+        off-suit card). If Phase 3c ever stopped being a pure restatement,
+        the off-suit 5th card is where it would show: dropped (Phase 3c
+        overwritten by FF's line) or double-counted.
+        """
+        played = [
+            _card("Hearts", "2"),
+            _card("Hearts", "5"),
+            _card("Hearts", "9"),
+            _card("Hearts", "King"),
+            _card("Clubs", "3"),
+        ]
+        ff = _joker("j_four_fingers")
+        ff_only = self._score(played, [ff])
+        assert ff_only.hand_type == "Flush"
+        assert len(ff_only.scoring_cards) == 4  # the off-suit 3 sits out
+
+        both = self._score(played, [ff, _joker("j_splash")])
+        assert both.hand_type == "Flush"
+        assert len(both.scoring_cards) == 5  # ... and now it scores
+        assert both.scoring_cards == played  # played order, no dupes
+        assert both.total > ff_only.total
