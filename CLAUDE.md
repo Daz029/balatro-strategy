@@ -699,7 +699,8 @@ forces a second regen.
     emitter: a variant = the GREEDY argmax completion of a line under ONE
     hypothesis about where kicker value lives — (1) inert/nominal-best
     (current behavior, kept), (2) scored-value (chips + enhancement +
-    scored-channel candidacy bits), emitted ONLY when the Splash flag is set
+    EDITION + scored-channel candidacy bits), emitted ONLY when the Splash
+    flag is set
     (Splash is class-3 all-zero in the trigger matrix BY DESIGN — the flag
     must come from `get_hand_eval_flags`, and without Splash kickers never
     score so the variant is pure waste), (3) held-value (retain held-channel
@@ -757,6 +758,43 @@ forces a second regen.
     (full-solve arm + stage2-oracle fold-in) -> K3 gate runs (n=8 + tail +
     stage3/4 copy sample) -> delete the limit -> K4 stage2 tail relabel +
     discard-side density measurement -> regen (stages 1,3,4 + C2 stage5).
+  - **K1 BUILT 2026-07-17** (branch `kicker-variants-k1`), spec followed with
+    TWO user-caught corrections recorded below. `hand_solver.py`:
+    `_resolved_joker_views` (gates read the engine's `resolve_copy_targets`),
+    `_card_channel_counts` (candidacy tallies via a new PUBLIC
+    `trigger_match.trigger_predicate` accessor — the solver reads the SAME B2
+    taxonomy the obs does rather than a second joker list that would rot),
+    `_KickerGates` + `_kicker_variants` (4 gated hypotheses, deduped),
+    `_line_family` (splash-agnostic `get_best_hand` scan), and the body
+    regrouped so `top_k` counts FAMILIES with variants riding. Prefix
+    stability survives at LINE granularity but is NO LONGER INDEXABLE by k
+    (entry j != line j) — **both validation harnesses slice `[:k]` from one
+    max-k call and must switch to per-k calls at K2**
+    (`validate_prescreen.py:204`, `validate_prescreen_n8.py:187`).
+    - CORRECTION 1 (editions): the spec's hypothesis-2 key omitted EDITIONS.
+      They are absent from `trigger_match` by design (it is a card x JOKER
+      matrix) but fire on the scored channel, so under Splash a Polychrome
+      kicker is x1.5 — a Poly 2 would have ranked below a plain King, the
+      exact miss class K1 exists to kill. Added as a presence bit
+      (`_scored_kicker_key`); no magnitudes, so the "raw derivation is safe"
+      argument is untouched.
+    - CORRECTION 2 (held enhancements): a hardcoded {"Steel Card",
+      "Gold Card"} set was replaced by `_has_held_enhancement`, reading the
+      engine's own config (`get_chip_h_x_mult` / `get_chip_h_mult` /
+      `ability["h_dollars"]` — Gold has no accessor). Correct on today's
+      content either way, but the name set is the rot pattern §6 q4 warns
+      about; it also gets debuff-correctness free.
+    - VERIFIED against brute force on a purpose-built fixture that
+      reproduces the miss (trip Kings + kicker bait; the sibling suite's
+      dominant-flush hands pass pre-K1 and prove NOTHING): Splash+Lusty
+      444 -> 585 (regret 141, 24.1% -> 0), Raised Fist 540 -> 660 (regret
+      120, 18.2% -> 0), plain board unchanged. Both regression tests
+      confirmed FAILING on pre-K1. Measured fan-out 14-23 candidates vs
+      brute's 218, matching the doc's ~15 budget.
+    - ACCEPTED RESIDUAL (new, beyond the spec's list): SEALS are not
+      consulted by the held-value hypothesis. A Blue seal is genuinely
+      held-value (Planet at end of round), so a held variant can pad one
+      away. Earns a term only if the K3 rescan shows it.
 
 ### h1 architecture — Candidate B COMMITTED (autoregressive pointer head)
 

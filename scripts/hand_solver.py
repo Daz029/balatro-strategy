@@ -55,7 +55,7 @@ from dataclasses import dataclass, field
 from math import comb
 
 from jackdaw.engine.card import Card
-from jackdaw.engine.hand_eval import get_hand_eval_flags
+from jackdaw.engine.hand_eval import get_best_hand, get_hand_eval_flags
 from jackdaw.engine.hand_levels import HandLevels
 from jackdaw.engine.play_ordering import (
     MAX_PERMUTATIONS,  # noqa: F401 -- re-export for existing importers
@@ -86,6 +86,7 @@ from jackdaw.engine.play_ordering import (
 )
 from jackdaw.engine.rng import PseudoRandom
 from jackdaw.engine.scoring import ScoreResult, score_hand
+from jackdaw.env.trigger_match import resolve_copy_targets, trigger_predicate
 
 # NOTE: The fast-clone helpers, order-sensitivity detection, and covering-
 # permutation construction that used to live here moved to
@@ -603,6 +604,309 @@ def _ranking_score(
     return result, clone_to_orig
 
 
+# --- K1 kicker variants (locked 2026-07-16) ---------------------------------
+#
+# The prescreen proposes the right scoring LINE and the right size and then
+# picks the wrong KICKERS: the old `_kicker_pad` padded every line by keep-priority
+# nominal-best, which assumes kickers are inert filler. That assumption is
+# false on exactly the boards stage2 concentrates -- under Splash the
+# kickers SCORE (so their suit/rank feeds Lusty/Greedy/Even Steven), and
+# under Raised Fist the cards you RETAIN set the mult. Measured at n=8 on
+# stage2 density: 0.845 score-capture, misses up to 90% of the play's value,
+# and INVARIANT in k (27/27 misses had true_size 5 and the right line) --
+# the candidate GENERATOR was starved, so no k rescues it. Full measurement
+# record: docs/bruteforce_speedup_and_kicker_design.md.
+#
+# The fix is GENERATION-ONLY. `_ranking_score` is deliberately untouched: it
+# is a real joker/held-aware `score_hand` call that already values kickers
+# correctly when it is GIVEN them -- ranking judged what it was handed, and
+# changing it would force a B7 revalidation for no benefit.
+#
+# A variant is the GREEDY argmax completion of a line under ONE hypothesis
+# about where kicker value lives. There are NO magnitudes anywhere below: a
+# hypothesis's only job is to decide which cards are PRESENT in the set, and
+# `best_immediate_play`'s exact pass (full ordering search, real score_hand)
+# arbitrates between the variants. That is what makes raw derivation safe
+# here -- a wrong hypothesis costs one wasted candidate, never a wrong label.
+# Variants RIDE their line: `top_k` counts LINES, and every surviving line
+# carries all of its variants into the exact pass.
+
+def _has_held_enhancement(card: Card) -> bool:
+    """Does this card's ENHANCEMENT pay off while it sits in hand -- i.e.
+    does playing it away as a kicker forfeit something?
+
+    Read from the engine's own held-channel config rather than a name set
+    ({"Steel Card", "Gold Card"} would be correct on today's content and
+    would rot the moment an enhancement is added or rebalanced -- the same
+    hand-written-list failure the trigger taxonomy exists to avoid):
+
+      * `get_chip_h_x_mult` -- Steel's x1.5 (card.lua:1011)
+      * `get_chip_h_mult`   -- no standard enhancement uses it today, but
+                               it is the engine's held additive-mult hook
+      * `ability["h_dollars"]` -- Gold's end-of-round $3 (card.py:251; it
+                               has no accessor, hence the raw read, so the
+                               debuff guard is ours to apply)
+
+    The two accessors already return 0 for a debuffed card, which is the
+    behaviour we want: a debuffed Steel card has no held value and is fair
+    game as a kicker.
+
+    ACCEPTED RESIDUAL: SEALS are not consulted. A Blue seal is genuinely
+    held-value (a Planet at end of round if the card stays in hand), so a
+    held-value variant can pad one away. Same class as the spec's
+    documented mixed-hypothesis residuals -- it earns a term only if the
+    K3 rescan shows it.
+    """
+    if card.debuff:
+        return False
+    return (
+        card.get_chip_h_mult() > 0
+        or card.get_chip_h_x_mult() > 0
+        or card.ability.get("h_dollars", 0) > 0
+    )
+
+
+def _resolved_joker_views(jokers: list[Card]) -> list[tuple[str, Card]]:
+    """Active joker effects as (effective center key, the joker card whose
+    ability to read), one per slot, after COPY RESOLUTION.
+
+    Blueprint/Brainstorm resolve through the ENGINE's own path
+    (`resolve_copy_targets`) rather than a reimplementation, so the gates
+    below read what actually fires: a Blueprint copying Castle presents as
+    Castle AND reads the suit off the Castle joker (Castle stores it on its
+    own ability). `blueprint_compat` comes free from that path -- which is
+    load-bearing for the scored-value gate, since Splash is on the
+    29-joker incompat list and therefore can never be copied.
+
+    A copy joker that resolves to nothing keeps its own key, which carries
+    no predicate (class 4) and so gates nothing. Debuffed jokers are
+    dropped: the scoring loops skip them before any handler runs.
+    """
+    resolutions = resolve_copy_targets({"jokers": jokers})
+    views: list[tuple[str, Card]] = []
+    for joker, resolution in zip(jokers, resolutions):
+        if joker.debuff:
+            continue
+        if resolution.active:
+            target = jokers[resolution.target_index]
+            views.append((target.center_key, target))
+        else:
+            views.append((joker.center_key, joker))
+    return views
+
+
+def _card_channel_counts(
+    hand: list[Card],
+    views: list[tuple[str, Card]],
+    game_state: dict | None,
+    flags: dict[str, bool],
+) -> dict[int, tuple[int, int]]:
+    """id(card) -> (scored candidacies, held candidacies) over the B2
+    trigger taxonomy's OWN predicates (`trigger_predicate`) -- never a
+    second hand-written joker table, which would drift out of sync the
+    moment a joker is reclassified.
+
+    These are PRESENCE tallies -- how many active joker effects list this
+    card as a candidate -- not an estimate of what those effects are worth.
+    Class-3 (set-level) and class-4 (non-card) jokers contribute nothing by
+    construction, which is correct here: no honest per-card bit exists for
+    them.
+
+    Raised Fist is excluded from the tally entirely. Its bit marks the
+    CURRENT lowest held card, which is the wrong rule for a counterfactual
+    question about which cards to keep -- once a card leaves the hand the
+    minimum moves. Its min term gets an exact hypothesis of its own below.
+    """
+    counts = {id(c): [0, 0] for c in hand}
+    gs = game_state or {}
+    for key, joker in views:
+        if key == "j_raised_fist":
+            continue
+        predicate = trigger_predicate(key)
+        if predicate is None:
+            continue
+        for card in hand:
+            scored, held = predicate(card, joker, gs, flags)
+            if scored:
+                counts[id(card)][0] += 1
+            if held:
+                counts[id(card)][1] += 1
+    return {k: (v[0], v[1]) for k, v in counts.items()}
+
+
+@dataclass(frozen=True)
+class _KickerGates:
+    """Which kicker hypotheses are live on this board. Each gate reads
+    RESOLVED joker identities (never raw keys), so a copied effect gates
+    exactly like the original. Ungated hypotheses are pure waste -- without
+    Splash a kicker never scores, so the scored-value variant would only
+    burn an exact evaluation -- which is why the budget stays adaptive
+    rather than 3x flat."""
+
+    scored_value: bool
+    held_value: bool
+    play_away_lowest: bool
+
+
+def _kicker_gates(
+    hand: list[Card],
+    views: list[tuple[str, Card]],
+    flags: dict[str, bool],
+    counts: dict[int, tuple[int, int]],
+) -> _KickerGates:
+    keys = {key for key, _ in views}
+    return _KickerGates(
+        # Splash is the ONLY way a non-line card scores, so it alone makes
+        # kicker suit/rank matter. The flag comes from `get_hand_eval_flags`
+        # (the engine's own detection-modifier read) because Splash is
+        # class-3 all-zero in the trigger matrix BY DESIGN -- the matrix
+        # cannot answer this question.
+        scored_value=bool(flags.get("splash", False)),
+        held_value=any(held for _, held in counts.values())
+        or any(_has_held_enhancement(c) for c in hand),
+        play_away_lowest="j_raised_fist" in keys,
+    )
+
+
+def _scored_kicker_key(
+    counts: dict[int, tuple[int, int]],
+) -> Callable[[Card], tuple]:
+    """Descending kicker order under Splash: scored-channel candidacies
+    first, then EDITION presence, then `_keep_priority`'s (enhancement,
+    nominal).
+
+    The edition term is not in the taxonomy and cannot be: `trigger_match`
+    is a card x JOKER matrix, and an edition is a property of the card
+    itself -- `grep edition jackdaw/env/trigger_match.py` is empty by
+    design. But editions fire on the SCORED channel (`scoring.py`'s
+    per-scoring-card `card.get_edition()`), so under Splash a Polychrome
+    kicker is x1.5 mult and a Foil kicker is +50 chips. Without it this key
+    would rank a Polychrome 2 below a plain King -- precisely the
+    right-line/wrong-kicker miss K1 exists to kill. (The locked spec's
+    "chips + enhancement + scored-channel candidacy bits" omitted this;
+    caught in review 2026-07-16.)
+
+    Presence only, per the section header: which cards are in the set, not
+    what they are worth. Editions are scored-channel exclusively, so they
+    earn no term in the held-value key.
+    """
+
+    def key(card: Card) -> tuple:
+        return (
+            counts[id(card)][0],
+            1 if card.edition else 0,
+        ) + _keep_priority(card)
+
+    return key
+
+
+def _held_kicker_key(
+    counts: dict[int, tuple[int, int]],
+) -> Callable[[Card], tuple]:
+    """Held-value order: held-channel candidacies, then held-enhancement
+    presence, then `_keep_priority`. Sorted ASCENDING at the call site --
+    hypothesis 3 pads with the cards LEAST valuable held, so that the ones
+    held effects want (Baron's Kings, Shoot the Moon's Queens, Mime's
+    retriggers, Steel, Gold) stay in hand.
+
+    Editions earn no term here: they fire on the scored channel only, so a
+    Polychrome card is worth nothing held and is fair game as a kicker.
+    """
+
+    def key(card: Card) -> tuple:
+        return (
+            counts[id(card)][1],
+            1 if _has_held_enhancement(card) else 0,
+        ) + _keep_priority(card)
+
+    return key
+
+
+def _raised_fist_key(card: Card) -> tuple[int, int]:
+    """Ascending play-away order for Raised Fist's min term: lowest RANK ID
+    first (the handler's own comparison -- `nominal` would tie J/Q/K, which
+    the id distinguishes), Stone Cards last. Stones are excluded from the
+    handler's minimum, so playing one away cannot raise it -- it is never
+    the card this hypothesis wants to spend."""
+    stone = card.ability.get("effect") == "Stone Card"
+    return (1 if stone else 0, card.get_id())
+
+
+def _kicker_variants(
+    line: list[Card],
+    hand: list[Card],
+    gates: _KickerGates,
+    counts: dict[int, tuple[int, int]],
+) -> list[list[Card]]:
+    """Completions of `line` to 5 cards, one per live hypothesis about
+    where kicker value lives (see the section header). Deduped by card-
+    identity set, so on a plain board every hypothesis collapses onto
+    nominal-best and the line costs exactly one candidate.
+
+    Hypotheses:
+      1. inert / nominal-best -- the pre-K1 behaviour, always emitted.
+      2. scored-value (Splash only) -- kickers score, so prefer the ones
+         the most scored-channel effects list as candidates, then chips.
+      3. held-value -- retain the cards held effects want (Baron/Shoot the
+         Moon/Mime, Steel/Gold), i.e. pad with the cards LEAST valuable
+         held.
+      4. play-away-lowest -- exact for Raised Fist's min term.
+    """
+    if len(line) >= 5:
+        return [line]
+    need = 5 - len(line)
+    chosen = {id(c) for c in line}
+    pool = [c for c in hand if id(c) not in chosen]
+    if not pool:
+        return [line]
+
+    def _complete(key: Callable[[Card], tuple], *, best_first: bool) -> list[Card]:
+        return line + sorted(pool, key=key, reverse=best_first)[:need]
+
+    variants = [_complete(_keep_priority, best_first=True)]
+    if gates.scored_value:
+        variants.append(_complete(_scored_kicker_key(counts), best_first=True))
+    if gates.held_value:
+        variants.append(_complete(_held_kicker_key(counts), best_first=False))
+    if gates.play_away_lowest:
+        variants.append(_complete(_raised_fist_key, best_first=False))
+
+    seen: set[frozenset[int]] = set()
+    unique: list[list[Card]] = []
+    for variant in variants:
+        key = frozenset(id(c) for c in variant)
+        if key not in seen:
+            seen.add(key)
+            unique.append(variant)
+    return unique
+
+
+def _line_family(
+    cards: list[Card], *, four_fingers: bool, shortcut: bool, smeared: bool
+) -> tuple[str, frozenset[int]]:
+    """(realized hand type, identity set of the cards FORMING the line),
+    from a SPLASH-AGNOSTIC scan of the played cards.
+
+    Deliberately NOT `score_hand`'s `scoring_cards`: under Splash every
+    played card scores, so each kicker variant of one line would report a
+    different scoring set -- a different family -- and the variants would
+    crowd `family_best` out of the genuinely distinct lines. That is
+    handoff pitfall #13 recreated by the fix, on exactly the boards the fix
+    targets. The engine's own detection scan ignores Splash, so variants of
+    a line collide into one family as intended, which is also what lets
+    them ride their line into the exact pass.
+
+    The card SET stays in the key (hand type alone would collapse a pair of
+    Kings and a pair of 3s into one family). `get_best_hand` is the
+    engine's own path and tolerates base-less Stone cards -- they group but
+    never emit, so a stone-only candidate falls back to a bare hand type.
+    """
+    hand_type, line_cards, _ = get_best_hand(
+        cards, four_fingers=four_fingers, shortcut=shortcut, smeared=smeared
+    )
+    return (hand_type, frozenset(id(c) for c in line_cards))
+
+
 def prescreen_play_candidates(
     hand: list[Card],
     jokers: list[Card],
@@ -615,6 +919,7 @@ def prescreen_play_candidates(
     top_k: int = PRESCREEN_TOP_K,
     game_state: dict | None = None,
     blind_chips: int = 0,
+    eval_flags: dict[str, bool] | None = None,
 ) -> list[list[Card]]:
     """Template-derived candidate play subsets for big hands, ranked
     cheaply and selected FAMILY-DIVERSE: the best candidate of each family
@@ -635,21 +940,31 @@ def prescreen_play_candidates(
     accepts: ranking precision, not label precision -- the top-k get the
     full ordering search afterwards.
 
+    `top_k` counts LINES (families), not returned candidates: every
+    surviving line carries ALL of its kicker variants into the exact pass,
+    which is what arbitrates between them (K1). So the returned list is
+    generally LONGER than `top_k` -- on a plain board the variants dedupe
+    to one apiece and it approaches `top_k`, on a Splash/Raised-Fist board
+    it fans out. Budget math: ~5 lines x ~3 variants ~= 15 candidates
+    against brute force's 218.
+
     A family is the candidate's REALIZED scoring line -- (detected hand
-    type, scoring-card identity set) from the cheap evaluation -- not the
-    template that spawned it. Template identity is the wrong key: kicker
-    padding lets every weak template piggyback a dominant line (a lone
-    Queen padded with four held Kings scores as the SAME four-of-a-kind
+    type, line-card identity set) from a SPLASH-AGNOSTIC scan of the played
+    cards (`_line_family`) -- not the template that spawned it, and not
+    `score_hand`'s `scoring_cards`. Template identity is the wrong key:
+    kicker padding lets every weak template piggyback a dominant line (a
+    lone Queen padded with four held Kings scores as the SAME four-of-a-kind
     as the quads template's own candidate), so template-keyed diversity
     would fill every slot with re-labeled copies of one line -- the exact
-    crowding the family pass exists to prevent. Keying by what the
-    candidate actually scores as collapses those copies into one family
-    while keeping genuinely distinct lines (each flush suit, each straight
-    line, each rank group) separate for free.
+    crowding the family pass exists to prevent. `scoring_cards` is the
+    wrong key for the mirror-image reason: under Splash every played card
+    scores, so each kicker variant would report a different scoring set and
+    the variants would crowd out the distinct lines instead.
 
-    Ordering is PREFIX-STABLE in `top_k`: the first j entries of a
-    `top_k=k` call equal the `top_k=j` call for j < k -- the validation
-    harness scores multiple k-cuts from one call and relies on this.
+    Ordering is PREFIX-STABLE in `top_k` at LINE granularity: the
+    `top_k=j` call's output is a list PREFIX of the `top_k=k` call's for
+    j < k. It is no longer indexable by k (entry j is not line j), so a
+    caller wanting a j-line cut must pass `top_k=j` rather than slice.
 
     PAIR PIN: the best already-realized rank line (pair or better) is
     promoted to index 1 of the ordering, so every k>=2 cut evaluates it.
@@ -659,21 +974,23 @@ def prescreen_play_candidates(
 
     Candidates per template: the template's matching cards capped at 5
     (highest keep-priority first), plus -- when that leaves room -- the
-    same cards padded to 5 with the best non-matching kickers. The
-    fallback candidate (top 5 of the whole hand by keep-priority) covers
-    hands where no template matches anything useful (e.g. base-less stone
-    cards, which no rank/suit predicate can see).
+    same cards padded to 5 under each live kicker hypothesis (see the K1
+    section header). The fallback candidate (top 5 of the whole hand by
+    keep-priority) covers hands where no template matches anything useful
+    (e.g. base-less stone cards, which no rank/suit predicate can see).
+
+    `eval_flags` is `get_hand_eval_flags(jokers)` from the caller (which
+    has already computed it); it sources the Splash gate and the family
+    scan's smeared handling. None = compute it here.
     """
     templates = build_templates(hand, four_fingers=four_fingers, shortcut=shortcut)
+    flags = eval_flags if eval_flags is not None else get_hand_eval_flags(jokers)
+    views = _resolved_joker_views(jokers)
+    counts = _card_channel_counts(hand, views, game_state, flags)
+    gates = _kicker_gates(hand, views, flags, counts)
 
-    def _kicker_pad(cards: list[Card]) -> list[Card]:
-        if len(cards) >= 5:
-            return cards
-        chosen = {id(c) for c in cards}
-        kickers = sorted(
-            (c for c in hand if id(c) not in chosen), key=_keep_priority, reverse=True
-        )
-        return cards + kickers[: 5 - len(cards)]
+    def _variants(cards: list[Card]) -> list[list[Card]]:
+        return _kicker_variants(cards, hand, gates, counts)
 
     raw: list[list[Card]] = []
     for template in templates:
@@ -683,15 +1000,16 @@ def prescreen_play_candidates(
         playable = sorted(hold, key=_keep_priority, reverse=True)[:5]
         raw.append(playable)
         if len(playable) < 5:
-            # Padded variant: pair+kickers. (Historically claimed to also
-            # cover full house / two pair "emerging" from a rank hold padded
-            # with another rank's cards -- FALSE in practice: padding picks
-            # kickers by nominal priority, so the second rank group is only
-            # chosen when it happens to outrank every loose high card. All
-            # 17/48 generation holes in the B5 validation were exactly the
-            # missing combinations; see the rank-combination pass below.)
-            raw.append(_kicker_pad(playable))
-    raw.append(_kicker_pad([]))  # template-free fallback
+            # Padded variants: line + kickers, one per live hypothesis (K1).
+            # (Historically claimed to also cover full house / two pair
+            # "emerging" from a rank hold padded with another rank's cards --
+            # FALSE in practice: padding picks kickers by nominal priority,
+            # so the second rank group is only chosen when it happens to
+            # outrank every loose high card. All 17/48 generation holes in
+            # the B5 validation were exactly the missing combinations; see
+            # the rank-combination pass below.)
+            raw.extend(_variants(playable))
+    raw.extend(_variants([]))  # template-free fallback
 
     # Rank-line COMBINATIONS (B5 widening, 2026-07-15): two pair and full
     # house are cross-GROUP lines no single-rank template can propose.
@@ -713,7 +1031,7 @@ def prescreen_play_candidates(
     for g1, g2 in itertools.permutations(multi, 2):
         two_pair = g1[:2] + g2[:2]
         raw.append(two_pair)
-        raw.append(_kicker_pad(list(two_pair)))
+        raw.extend(_variants(list(two_pair)))
         if len(g1) >= 3:
             raw.append(g1[:3] + g2[:2])  # full house
 
@@ -732,45 +1050,42 @@ def prescreen_play_candidates(
             continue
         seen_sets.add(key)
         held = [c for c in hand if id(c) not in key]
-        cheap, clone_to_orig = _ranking_score(
+        cheap, _ = _ranking_score(
             cards, held, jokers, hand_levels, blind, rng, game_state, blind_chips
         )
-        family = (
-            cheap.hand_type,
-            frozenset(
-                id(clone_to_orig.get(id(c), c)) for c in cheap.scoring_cards
-            ),
+        family = _line_family(
+            cards,
+            four_fingers=four_fingers,
+            shortcut=shortcut,
+            smeared=bool(flags.get("smeared", False)),
         )
         scored.append((family, cards, cheap.total))
     scored.sort(key=lambda t: t[2], reverse=True)
 
-    families_seen: set[tuple] = set()
-    family_best: list[list[Card]] = []
-    fills: list[list[Card]] = []
-    pair_line: list[Card] | None = None
+    # Group variants under their line. `scored` is best-first, and dicts
+    # preserve insertion order, so a family's rank IS its best variant's
+    # cheap rank, and each family's variants stay best-first within it.
+    by_family: dict[tuple, list[list[Card]]] = {}
     for family, cards, _val in scored:
-        if family not in families_seen:
-            families_seen.add(family)
-            family_best.append(cards)
-            if pair_line is None and family[0] in _RANK_LINE_TYPES:
-                pair_line = cards
-        else:
-            fills.append(cards)
-    ordered = family_best + fills
+        by_family.setdefault(family, []).append(cards)
+    families = list(by_family)
 
     # Pair pin (user call, 2026-07-14): the best ALREADY-REALIZED rank line
     # (pair or better) is guaranteed a slot in every k>=2 cut. Its cheap
     # rank is weak -- base score of a low pair loses to any flashy draw
     # line -- but it is the one line that needs no draw and no luck, and
     # rank-triggered jokers can make its exact value far exceed its cheap
-    # rank. Promoted to index 1 (never displacing the overall best) so the
-    # ordering stays a single list and prefix-stability in top_k survives.
-    if pair_line is not None:
-        idx = next(i for i, c in enumerate(ordered) if c is pair_line)
-        if idx > 1:
-            ordered.pop(idx)
-            ordered.insert(1, pair_line)
-    return ordered[:top_k]
+    # rank. Promoted to index 1 (never displacing the overall best).
+    pair_idx = next(
+        (i for i, f in enumerate(families) if f[0] in _RANK_LINE_TYPES), None
+    )
+    if pair_idx is not None and pair_idx > 1:
+        families.insert(1, families.pop(pair_idx))
+
+    out: list[list[Card]] = []
+    for family in families[:top_k]:
+        out.extend(by_family[family])
+    return out
 
 
 def best_immediate_play(
@@ -810,6 +1125,7 @@ def best_immediate_play(
             top_k=prescreen_top_k if prescreen_top_k is not None else PRESCREEN_TOP_K,
             game_state=game_state,
             blind_chips=blind_chips,
+            eval_flags=flags,
         )
         subset_pools: list = [candidates]
     else:

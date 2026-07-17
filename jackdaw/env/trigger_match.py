@@ -341,6 +341,24 @@ _CLASS4_NON_CARD: frozenset[str] = frozenset(
 _PREDICATES: dict[str, Predicate] = {**_CLASS1_PREDICATES, **_CLASS2_PREDICATES}
 
 
+def trigger_predicate(center_key: str) -> Predicate | None:
+    """The taxonomy's per-card predicate for ``center_key``, or None when
+    the key carries no honest per-card bit (class 3 set-level, class 4
+    non-card) or is not a joker at all.
+
+    Public accessor so consumers outside the matrix builder read the SAME
+    taxonomy the observation does. The solver's kicker-variant gates (K1)
+    are the second consumer: a hand-written joker list there would rot out
+    of sync with this table the moment a joker is reclassified, which is
+    exactly the drift the import-time coverage check exists to prevent.
+
+    Callers get the same CANDIDACY semantics documented at the module
+    header: a True bit means the card is a candidate for that joker's
+    card-linked effect, not that it will fire.
+    """
+    return _PREDICATES.get(center_key)
+
+
 def _check_taxonomy() -> None:
     """Build-time coverage check: every joker key in the frozen vocabulary
     is classified exactly once. Runs at import — an unclassified joker is

@@ -3,8 +3,44 @@
 **Status:** GRILLED AND LOCKED 2026-07-16 — the decision record lives in
 CLAUDE.md ("Kicker variants + prescreen-at-n=8"). The §6 questions below are
 all RESOLVED there; this document remains the measurement record (§1-§5, §7-§8
-stay authoritative for the numbers). Not yet built — K1-K4 build order in the
-decision record.
+stay authoritative for the numbers).
+
+**K1 BUILT 2026-07-17** (branch `kicker-variants-k1`) — the variant emitter,
+family key, and variants-ride-their-line. K2-K4 remain. Two spec gaps were
+caught in review and fixed during the build; both are recorded in the CLAUDE.md
+decision record and matter to anyone reading §6 below:
+
+* **Editions were missing from hypothesis 2.** §6's sketch says "joker-favoured:
+  kickers matching suit/parity/rank jokers", and the locked key was "chips +
+  enhancement + scored-channel candidacy bits". Editions are neither — they are
+  absent from `trigger_match` **by design** (it is a card × JOKER matrix), yet
+  they fire on the scored channel, so under Splash a Polychrome kicker is ×1.5.
+  Without an edition term a Polychrome 2 ranks below a plain King: the exact
+  right-line/wrong-kicker miss this document is about. Now a presence bit.
+* **The held-value test is config-derived, not a name list.** §6 q4 asks whether
+  the variant set is principled or "a hand-written list that will rot". The
+  answer for jokers is the B2 taxonomy (via a new public
+  `trigger_match.trigger_predicate`). For *enhancements* the answer is the
+  engine's own held-channel config — `get_chip_h_x_mult` (Steel),
+  `get_chip_h_mult`, `ability["h_dollars"]` (Gold, which has no accessor) —
+  not `{"Steel Card", "Gold Card"}`.
+
+**Answering §6 q2 ("does capture actually reach ~1.0? Measure before
+believing"):** not yet — that is K3's gate, and this build does not claim it.
+What IS measured is that the fix works on purpose-built repros of the documented
+signature: Splash+Lusty regret 141 (24.1% of the play's value) → 0, Raised Fist
+regret 120 (18.2%) → 0, plain board unchanged, both confirmed FAILING pre-K1.
+Fan-out measured at 14-23 candidates vs brute's 218, matching §6's ~15 budget.
+A methodology warning for K2/K3, learned the hard way here: a *dominant complete
+flush* fixture has no kicker choice to get wrong, so it passes pre-K1 and proves
+nothing. The state must have a line SHORTER than 5 with the kicker actually
+contested.
+
+**K2 must fix the harnesses.** `top_k` now counts LINES, so the returned list is
+longer than k and prefix stability holds only at line granularity — it is no
+longer INDEXABLE by k. Both harnesses currently score k-cuts by slicing `[:k]`
+from one max-k call (`validate_prescreen.py:204`,
+`validate_prescreen_n8.py:187`); they must switch to one call per k.
 
 **Audience:** whoever builds the fix. Read "Ruled out" before proposing anything —
 four plausible hypotheses died to data in the session that produced this, and
