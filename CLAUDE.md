@@ -549,7 +549,10 @@ forces a second regen.
   nothing (that's also the lever if the boundary-stress exposure — mean
   0.12 p_clear at a blind placed exactly at the best play's total — ever
   needs shrinking); minimal passing k=3, PRESCREEN_TOP_K=4 (user margin
-  call). Big-hand labels now 0.7-10s at hand sizes 12-17 (in budget).
+  call; SUPERSEDED — the constant is 5 in code as of `718a284`, bumped for
+  extra margin, and k has been capture-INVARIANT in every arm measured
+  since, so the value buys margin, never capture). Big-hand labels now
+  0.7-10s at hand sizes 12-17 (in budget).
   A3 DONE, verdict CLEARED — B6 SKIPPED: discards>=2 recovery deficits
   are large (stage2/3/4 +30/+79/+105 pts, CIs exclude 0) BUT h0.5
   UNDER-discards vs the teacher in exactly those buckets (-0.11/-0.08/
@@ -758,6 +761,11 @@ forces a second regen.
     (full-solve arm + stage2-oracle fold-in) -> K3 gate runs (n=8 + tail +
     stage3/4 copy sample) -> delete the limit -> K4 stage2 tail relabel +
     discard-side density measurement -> regen (stages 1,3,4 + C2 stage5).
+    AMENDED 2026-07-17: K3's first arm found four bugs (see the K3 block),
+    so K3 is now [fix -> re-run arms -> B7 revalidation] before any verdict;
+    the delete-the-limit step still gates on both arms passing, and K4's
+    "tail relabel" has grown into a full stage2 regen (the corpus is
+    ~29% corrupt on the inert jokers alone).
   - **K1 BUILT 2026-07-17** (branch `kicker-variants-k1`), spec followed with
     TWO user-caught corrections recorded below. `hand_solver.py`:
     `_resolved_joker_views` (gates read the engine's `resolve_copy_targets`),
@@ -835,6 +843,101 @@ forces a second regen.
     sampler included). 7 new tests in
     `tests/scripts/test_validate_prescreen_fullsolve.py`; prescreen +
     kicker suites still green (56 total); ruff clean on all touched files.
+  - **K3 IN PROGRESS 2026-07-17** (branch `kicker-variants-k1`). The gate
+    RAN, and its first arm found FOUR bugs — three of them label-corrupting
+    and one of them engine-wide. No gate verdict is claimed yet: every arm
+    measured before `7ce81e7` is STALE and re-running. Numbers below are
+    pre-fix and kept only as the trail.
+    - **THE BIG ONE — `score_hand` passed `jokers=None` to `evaluate_hand`
+      (fixed `03e288d`).** `evaluate_hand` derives every hand-DETECTION
+      flag from that list, so **Four Fingers, Shortcut and Smeared Joker
+      were COMPLETELY INERT** — in-game, in the env, and in EVERY solver
+      label ever generated. Splash survived only because `score_hand`
+      re-derives it independently at Phase 3c (now a documented idempotent
+      restatement, pinned). Their `hand_eval` unit tests passed the whole
+      time: the defect was in the integration seam — the Throwback / Idol /
+      blueprint_compat / Marble / Riff-raff class, now five for five.
+      Traced to `7633d34` copy-pasting the line from `09105e3`'s
+      `score_hand_base`, which is jokerless BY DESIGN, so the None was
+      carryover and never load-bearing. `score_hand_base`'s `joker_flags`
+      arg was also accepted-and-discarded (`_ = joker_flags`); it now
+      reaches `evaluate_hand(flags=...)`, because detection and effects are
+      SEPARATE AXES (a Four Fingers owner's 4-card straight is a Straight
+      even when priced jokerlessly).
+      LESSON, generalized: a joker whose tests all pass can still be dead.
+      Assert through the INTEGRATION path (`score_hand`), never the handler
+      — a test that builds the flags by hand cannot fail on this bug class.
+    - **Bug A — solver, `build_templates` (fixed `a60dbbf`).** Four Fingers
+      REPLACED the 5-length straight windows with 4-length ones instead of
+      ADDING them, so a natural 5-card straight was structurally
+      unproposable (a window is an explicit rank set; the 5th rank fails a
+      4-window's predicate). Both `needed` values now emitted. A 5-window
+      with `needed=4` would be a NEW reachability bug — "4 of these 5
+      ranks" does not imply 4 CONSECUTIVE ranks ({7,8,9,J} is not a
+      straight). Pinned engine-side too (`fd0d876`): the engine was already
+      correct, but nothing stopped the same mistake being ported into it.
+    - **Bug C — solver flush predicate got THREE rules wrong (fixed
+      `7ce81e7`).** It was a bare `_card_suit(c) == s`, re-deriving suit
+      matching instead of asking the engine; `Card.is_suit(flush_calc=True)`
+      owns all three and is now delegated to: SMEARED (H=D, S=C — miss
+      `stage3_full_00003496`, `QC 9S 8S 3C 2C` is a Flush, regret 200),
+      **WILD counts as EVERY suit** (NOT flag-gated — mislabeling boards
+      since long before the jokers=None bug, 60 vs brute 284), and STONE
+      never counts. Under smeared it emits TWO colour-group templates
+      (`flush_black`/`flush_red`), not four: four is the same two predicates
+      twice, doubling the box and crowding `family_best` = pitfall #13
+      recreated by the fix. `_FakeCard` (DeckComposition probe) keeps suit
+      identity — composition tracks (rank, suit) only, so a wild in the
+      DECK is unrepresentable either way; the fallback undercounts wild
+      draws, the safe direction.
+    - **Hypothesis 5 — type-upgrade kicker pad (added `7ce81e7`).** The
+      first hypothesis that asks what the pad makes the HAND, not what it
+      is worth as a CARD. Miss `stage3_full_00001545` (Four Fingers):
+      padding the 4-card heart flush `QH 7H 5H 4H` with the 6 of CLUBS is a
+      STRAIGHT FLUSH (FF wants 4 hearts for the flush and 4 of 7-6-5-4 for
+      the straight, and vanilla lets those be different cards) — regret
+      892, 73.4%, the arm's largest. The winning set is the UNION of two
+      templates' cards, so no single predicate proposes it and no per-card
+      key ranks the club 6 above the King. UNGATED (trips + pair -> Full
+      House is the same shape); dedupe collapses it when it changes
+      nothing. `_kicker_variants` takes `flags` as a REQUIRED positional —
+      an empty default would let a call site silently claim "no FF /
+      Shortcut / Smeared".
+    - **What arm C actually showed** (stage3 copy-jokers, PRE-Bug-C-fix):
+      brute capture DROPPED 1.000 -> 0.960 after the engine fix. That is
+      the HONEST direction — fixing the engine CREATES better truth lines,
+      so the generator's own gaps surface. Expect every re-run arm to be
+      harder than its pre-fix number; a capture that IMPROVES after an
+      engine fix deserves suspicion, not relief.
+    - **Method notes worth keeping**: the per-miss board dump (`0cad469`,
+      `--dump-miss-k`) is what converted "27/27 misses have true_size=5"
+      into four named bugs — aggregate capture/regret located nothing.
+      Every new test was checked against the PARENT commit; two drafts of
+      the wild-card fixture PASSED on broken code because `_keep_priority`
+      is `(enhanced, nominal)` and pads an enhanced wild in for the wrong
+      reason (only a Glass Ace outranking it on that key discriminates).
+      A green test on a known-broken solver is worthless.
+    - **Consequences / still open**:
+      1. Every K3 arm must be re-run against `7ce81e7` (in flight).
+      2. **B7 revalidation is MANDATORY** — Bug A and Bug C both change
+         `build_templates`, which feeds the discard side
+         (`rank_templates_cheaply`, `solve_hand_turn`), so the locked
+         depth-gate sweep (25 helped / 9 regressed at k=4) was measured on
+         templates that could not propose 5-card straights, smeared flushes
+         or wild flushes. Cost note: the harness is ~25 min on a
+         DISAGREEING state and ~0.05s on an agreeing one, so 200 states is
+         a 9600X job, not a local one.
+      3. **The in-flight stage2 brute corpus is CORRUPT and must not be
+         kept**: ~29% of it owns j_four_fingers / j_shortcut / j_smeared
+         (measured via shard `joker_ids`), and those labels were produced
+         with the jokers inert. Selective relabel is sound — the engine fix
+         is provably a no-op without those three (flags all-false == the
+         old `jokers=None` path) — but Bug C's wild-card half is NOT so
+         gated, so a wild-card flush board is mislabeled with no joker
+         present at all. Wholesale regen is the safe call.
+      4. The obs features (`hand_potential_features`) take four_fingers /
+         shortcut but NOT smeared — an informativeness gap on the same
+         axis, not label-corrupting. Unfixed.
 
 ### h1 architecture — Candidate B COMMITTED (autoregressive pointer head)
 
