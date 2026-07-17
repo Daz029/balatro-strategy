@@ -1302,24 +1302,66 @@ def prescreen_play_candidates(
     # accumulation; see evaluate_value's clone note). Family = the realized
     # scoring line (see docstring), mapped back from the scored CLONES to
     # original card identity so identical lines actually collide.
-    seen_sets: set[frozenset[int]] = set()
-    scored: list[tuple[tuple, list[Card], float]] = []
+    # MAX OVER EMITTED ORDERS, not first-wins (K3, 2026-07-17).
+    # `_ranking_score` is FIXED-ORDER by design (searching orderings is the
+    # exact pass's job), so it scores whatever order the generator emitted.
+    # Deduping by card-identity SET and keeping the FIRST therefore made a
+    # family's cheap rank a lottery decided by `itertools` ordering.
+    # Measured (stage2_curated_00002797; Photograph x2 on the first face
+    # scored + Hanging Chad retriggering the first card): the
+    # `permutations(multi, 2)` pass yields (threes, kings) BEFORE
+    # (kings, threes), so the full house was first emitted as
+    # `3S 3C 13H 13C 13D` -> 1408, and the kings-first emission of the SAME
+    # FIVE CARDS -> 4080 arrived later and was skipped. At 1408 it ranked
+    # ~7th and was cut at top_k=5, so the exact pass -- whose ordering
+    # search would have found 4080 -- never saw a FULL HOUSE at all; it lost
+    # to a 3008 straight.
+    # The generator already emits such sets in several orders, so taking the
+    # MAX recovers the good one for free. A canonical sort was rejected: any
+    # fixed order is a guess (keep-priority-descending suits Photograph, and
+    # would bury a joker that wants a low card first), so it trades one
+    # arbitrary order for another. This invents nothing and only uses orders
+    # the generator produced. It is NOT an ordering search and must not
+    # become one -- that stays the exact pass's job.
+    # GATED on `_needs_permutation_search`, and that gate is not an
+    # optimization but the difference between viable and not. `raw` is dense
+    # with duplicate emissions (kicker variants of different templates
+    # coincide constantly -- see the rank-combination note above), so
+    # re-scoring every one of them costs 7x at n=8 (16.9 -> 117.4 ms/state,
+    # measured), which would leave the prescreen barely beating the 56-subset
+    # brute force it exists to replace -- and n=8 takes this path the moment
+    # PRESCREEN_HAND_LIMIT is deleted. But when NO order-sensitive
+    # contributor is present, every order of a set scores IDENTICALLY, so
+    # first-wins is already exact and re-scoring buys nothing. Re-score only
+    # when order can actually matter (the same predicate that decides whether
+    # the exact pass bothers with a permutation search).
+    # `_ranking_score` is untouched, so B7's discard-side sweep does not move.
+    best_by_set: dict[frozenset[int], tuple[float, list[Card], tuple]] = {}
     for cards in raw:
-        key = frozenset(id(c) for c in cards)
-        if not cards or key in seen_sets:
+        if not cards:
             continue
-        seen_sets.add(key)
+        key = frozenset(id(c) for c in cards)
+        if key in best_by_set and not _needs_permutation_search(cards, jokers):
+            continue
         held = [c for c in hand if id(c) not in key]
         cheap, _ = _ranking_score(
             cards, held, jokers, hand_levels, blind, rng, game_state, blind_chips
         )
-        family = _line_family(
-            cards,
-            four_fingers=four_fingers,
-            shortcut=shortcut,
-            smeared=bool(flags.get("smeared", False)),
-        )
-        scored.append((family, cards, cheap.total))
+        prev = best_by_set.get(key)
+        if prev is None:
+            # The family is a property of the SET (a splash-agnostic scan),
+            # so it is order-invariant -- compute it once per set, not once
+            # per emission.
+            family = _line_family(
+                cards,
+                four_fingers=four_fingers,
+                shortcut=shortcut,
+                smeared=bool(flags.get("smeared", False)),
+            )
+            best_by_set[key] = (cheap.total, cards, family)
+        elif cheap.total > prev[0]:
+            best_by_set[key] = (cheap.total, cards, prev[2])
+    scored = [(family, cards, val) for val, cards, family in best_by_set.values()]
     scored.sort(key=lambda t: t[2], reverse=True)
 
     # Group variants under their line. `scored` is best-first, and dicts

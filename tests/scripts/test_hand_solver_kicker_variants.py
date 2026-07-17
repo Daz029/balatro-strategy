@@ -493,6 +493,30 @@ def _wild_flush_bait_hand() -> list[Card]:
     ]
 
 
+def _order_lottery_hand() -> list[Card]:
+    """12 cards reproducing K3 tail miss stage2_curated_00002797.
+
+    Three Kings and two 3s (so the rank-combination pass emits the full
+    house from BOTH permutation directions -- that is the point), plus a
+    J-10-8-6-5 shortcut straight to be the rival family that wins when the
+    full house is buried, and enough spare cards to reach a tail hand size.
+    """
+    return [
+        create_playing_card(Suit.HEARTS, Rank.KING),
+        create_playing_card(Suit.CLUBS, Rank.KING),
+        create_playing_card(Suit.DIAMONDS, Rank.KING),
+        create_playing_card(Suit.HEARTS, Rank.JACK),
+        create_playing_card(Suit.CLUBS, Rank.TEN),
+        create_playing_card(Suit.CLUBS, Rank.EIGHT),
+        create_playing_card(Suit.SPADES, Rank.SIX),
+        create_playing_card(Suit.SPADES, Rank.FIVE),
+        create_playing_card(Suit.DIAMONDS, Rank.FOUR),
+        create_playing_card(Suit.SPADES, Rank.THREE),
+        create_playing_card(Suit.CLUBS, Rank.THREE),
+        create_playing_card(Suit.SPADES, Rank.TWO),
+    ]
+
+
 class TestRegressionAgainstBruteForce:
     """The tests that actually catch the bug: each one FAILS on pre-K1 code
     with the regret recorded in its docstring, measured on this branch.
@@ -590,6 +614,39 @@ class TestRegressionAgainstBruteForce:
         line = hand[:2]
         for variant in hand_solver._kicker_variants(line, hand, gates, counts, flags):
             assert len({id(c) for c in variant}) == len(variant), variant
+
+    def test_emission_order_does_not_bury_a_family(self):
+        """The cheap tier is FIXED-ORDER, so it scores whatever order the
+        generator emitted; deduping by card-identity SET and keeping the
+        first therefore made a family's cheap rank a lottery.
+
+        From K3 tail miss stage2_curated_00002797 (Photograph x2 on the first
+        face scored + Hanging Chad retriggering the first card):
+        `permutations(multi, 2)` yields (threes, kings) BEFORE (kings,
+        threes), so the full house was first emitted threes-first and scored
+        1408, and the kings-first emission of the SAME FIVE CARDS -- worth
+        4080 -- was skipped as a duplicate. At 1408 it ranked ~7th, was cut
+        at top_k=5, and the exact pass never saw a full house at all: it lost
+        to a 3008 straight.
+
+        Taking the MAX over emitted orders recovers it. Asserted through
+        `best_immediate_play` (the exact pass), so it fails if the family is
+        cut before reaching it.
+        """
+        hand = _order_lottery_hand()
+        jokers = [
+            create_joker("j_shortcut"),
+            create_joker("j_photograph"),
+            create_joker("j_hack"),
+            create_joker("j_hanging_chad"),
+            create_joker("j_jolly"),
+        ]
+        hand_levels, blind, rng = _fixtures()
+        subset, result = best_immediate_play(hand, jokers, hand_levels, blind, rng)
+        assert result.total == _brute_force_best(hand, jokers)
+        # Specifically: the full house must be found, not a straight.
+        assert result.hand_type == "Full House", result.hand_type
+        assert sorted(c.base.id for c in subset) == [3, 3, 13, 13, 13]
 
     def test_plain_board_unchanged(self):
         """The other side of the contract: with every gate shut, K1 must not
