@@ -1051,6 +1051,85 @@ def _line_family(
     return (hand_type, frozenset(id(c) for c in line_cards))
 
 
+SEATING_MAX_POOL = 9
+SEATING_BUDGET = 50
+
+
+def _seat_variants(
+    hold: list[Card],
+    hand: list[Card],
+    jokers: list[Card],
+    hand_levels: HandLevels,
+    blind,
+    rng: PseudoRandom,
+    game_state: dict | None,
+    blind_chips: int,
+) -> list[list[Card]]:
+    """Which 5 of a template's matching cards to SEAT, when it matches more
+    than 5. Returns the seatings worth carrying, best cheap-score first.
+
+    THE K3 TAIL BUG. A straight window normally matches exactly 5 cards and
+    `[:5]` is a no-op -- but Shortcut widens the window predicate and Four
+    Fingers adds shorter windows, so the hold OVERFLOWS and five seats must
+    be chosen from more candidates. That choice was
+    `sorted(hold, key=_keep_priority)[:5]` = (enhanced, nominal): JOKER-
+    BLIND. Measured (stage2_curated_00002127, Shortcut + Wee Joker): hold
+    `7S 6S 5S 4S 3C 2D`, seated `7-6-5-4-3`, truth `7-6-5-3-2` -- Wee pays
+    per 2 SCORED and the 2 was dropped for being the lowest card. It is also
+    the tail arm's hand-size gradient (capture 0.950 at n=9 decaying to
+    0.896 at n=12 while n=8 sits at 0.980): a bigger hand puts more cards
+    inside a widened window, so there is more to get wrong.
+
+    K1's hypotheses cannot reach this. They choose KICKERS, and they only
+    run when `len(playable) < 5` -- these lines are OVER five. A kicker sits
+    outside the line and swaps freely; a line member is LOAD-BEARING.
+
+    NO hypothesis, NO type filter, NO family dedupe -- all three were tried
+    in review and all three are the same mistake in different hats: they
+    discard a candidate on a PROXY for value (nominal rank / hand type /
+    line identity) before the scorer ever sees it, which is precisely the
+    bug being fixed. Instead: enumerate and let `_ranking_score` -- a real
+    joker- and held-aware `score_hand` -- rank them. The K spec's own point
+    is that ranking was never wrong, generation was starving it. Validity
+    needs no check either: an illegal seating (`7-6-5-4-2`, whose 4->2 gap
+    exceeds Shortcut's one) simply scores as High Card and loses on merit.
+
+    COST (measured, tail states): `_ranking_score` 0.26ms, exact
+    `evaluate_value` 2.85ms, mean 8.6 seatings/state, and 80% of tail states
+    have NO overflowing hold at all. Ranking every seating costs ~2ms/node;
+    the riders cost ~24ms/node. A node goes ~76ms -> ~102ms (+35%), tail
+    labels 0.7-10s -> ~0.9-13.5s, and the tail is 10% of the regen => ~+3.5%
+    overall. The cost is the RIDING, not the enumeration.
+
+    `SEATING_BUDGET` therefore is NOT an average-case lever (the mean, 8.6,
+    never reaches it): it bounds the worst node, where 62 seatings would
+    take that node to ~3x. Cutting by cheap score is a real risk -- the
+    cheap tier is fixed-order, so an order-sensitive board (Photograph,
+    Hanging Chad) can mis-rank -- but at 50 the cheap tier only excludes
+    what it ranked below fifty others, which is a budget, not the
+    "cheap-arbitration-is-final" pattern the spec rejects (that was
+    top-N-by-cheap-score deciding the answer). Everything surviving RIDES
+    into the exact pass, which arbitrates with the full ordering search.
+    `SEATING_MAX_POOL` is a guard, not a mechanism: measured max hold is 9,
+    so it does not bind today.
+    """
+    if len(hold) <= 5:
+        return [list(hold)]
+
+    pool = sorted(hold, key=_keep_priority, reverse=True)[:SEATING_MAX_POOL]
+    scored: list[tuple[float, list[Card]]] = []
+    for combo in itertools.combinations(pool, 5):
+        cards = list(combo)
+        ids = {id(c) for c in cards}
+        held = [c for c in hand if id(c) not in ids]
+        result, _ = _ranking_score(
+            cards, held, jokers, hand_levels, blind, rng, game_state, blind_chips
+        )
+        scored.append((result.total, cards))
+    scored.sort(key=lambda t: -t[0])
+    return [cards for _, cards in scored[:SEATING_BUDGET]]
+
+
 def prescreen_play_candidates(
     hand: list[Card],
     jokers: list[Card],
@@ -1167,6 +1246,19 @@ def prescreen_play_candidates(
             continue
         playable = sorted(hold, key=_keep_priority, reverse=True)[:5]
         raw.append(playable)
+        if len(hold) > 5:
+            # Overflowing hold: `playable` above is only ONE of the possible
+            # seatings, and it is the joker-blind one. Emit the rest ranked
+            # by the real scorer (K3 tail fix; see `_seat_variants`). They
+            # are distinct FAMILIES, not kicker variants of one line, so
+            # they compete for top_k slots on merit rather than riding for
+            # free -- which is what top_k is for, and capture-vs-k is the
+            # readout that says whether k needs raising.
+            raw.extend(
+                _seat_variants(
+                    hold, hand, jokers, hand_levels, blind, rng, game_state, blind_chips
+                )
+            )
         if len(playable) < 5:
             # Padded variants: line + kickers, one per live hypothesis (K1).
             # (Historically claimed to also cover full house / two pair
@@ -1643,6 +1735,25 @@ def rank_templates_cheaply(
 
         if still_needed == 0:
             p_reach = 1.0
+            # KNOWN GAP, deliberately unfixed (K3, 2026-07-17): when a hold
+            # OVERFLOWS (Shortcut widens a straight window, Four Fingers adds
+            # shorter ones, a 6+ card flush), `[:5]` seats the first five in
+            # HAND ORDER -- not even `_keep_priority`, let alone joker-aware.
+            # Same class as the play-side seat blindness that failed K3's
+            # tail arm (capture 0.915; hold `7S 6S 5S 4S 3C 2D` seated
+            # `7-6-5-4-3` when Wee Joker wanted the 2), and the play side is
+            # being fixed by scoring the seatings with `_ranking_score`.
+            #
+            # NOT fixed here because the K spec says the discard side is
+            # MEASURE-FIRST, no code change: its completions are IDEALIZED
+            # DRAWS, so a seating hypothesis here is a hypothesis about
+            # hypothetical cards. It is also a label-semantics change at
+            # every hand size, so it would drag B7's whole validated sweep
+            # with it (`validate_discard_ranking_sweep.py`, the depth-gate
+            # rationale) for a benefit nobody has measured.
+            # The tripwire is the spec's: rerun that sweep on stage2-config
+            # density and look for the directional signature (dropping
+            # discards whose value lives in kickers/held cards).
             eval_cards = hold[:5]
         elif template.name.startswith("straight_"):
             held_ranks = {_card_rank_id(c) for c in hold}
