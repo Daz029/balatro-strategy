@@ -5,6 +5,15 @@ CLAUDE.md ("Kicker variants + prescreen-at-n=8"). The §6 questions below are
 all RESOLVED there; this document remains the measurement record (§1-§5, §7-§8
 stay authoritative for the numbers).
 
+> **READ §9 FIRST (2026-07-17).** K3 ran and found FOUR bugs, one of which —
+> `score_hand` passing `jokers=None` to `evaluate_hand` — meant **Four
+> Fingers, Shortcut and Smeared Joker were COMPLETELY INERT in every label
+> ever generated**, including every label behind §1's cost table and §4's
+> kicker finding. The §4 analysis still stands (the 27/27 misses were real
+> and are fixed), but any number here that touches those three jokers was
+> measured on an engine where they did nothing. No gate verdict is claimed
+> yet; arms are re-running.
+
 **K1 BUILT 2026-07-17** (branch `kicker-variants-k1`) — the variant emitter,
 family key, and variants-ride-their-line. K2-K4 remain. Two spec gaps were
 caught in review and fixed during the build; both are recorded in the CLAUDE.md
@@ -411,3 +420,90 @@ Free, no semantics change, makes progress visible and caps crash-loss.
   rewrite (exhaustive over all rank ids for short hands).
 * Commit `5b9ab27` — the `get_x_same` speedup + the harness + the n=8 verdict.
 * Profile reproduction: `cProfile` on `generate_one_example("stage2_curated_00000003", stage2_config)`.
+
+---
+
+## 9. K3 — the gate ran, and found four bugs (2026-07-17)
+
+Branch `engine-hand-eval-flags-fix` (off `kicker-variants-k1`@593f57c).
+**No gate verdict yet**: every arm measured before `a4a0053` is invalid and
+re-running. Decision record in CLAUDE.md's K3 block; this section keeps the
+measurements and the method.
+
+### The bugs, in the order they fell
+
+1. **`score_hand` passed `jokers=None` to `evaluate_hand`** (`03e288d`).
+   `evaluate_hand` derives every hand-DETECTION flag from that list, so
+   **Four Fingers, Shortcut and Smeared were COMPLETELY INERT** — in-game,
+   in the env, and in every solver label ever generated. Splash survived
+   only via Phase 3c's independent re-derivation. Traced to `7633d34`
+   copying the line from `09105e3`'s `score_hand_base`, which is jokerless
+   BY DESIGN — carryover, never load-bearing.
+2. **Bug A — `build_templates`** (`a60dbbf`). Four Fingers REPLACED the
+   5-length straight windows instead of ADDING them, making a natural
+   5-card straight structurally unproposable.
+3. **Bug C — the flush predicate** (`7ce81e7`). A bare `_card_suit(c) == s`,
+   wrong on SMEARED, on **WILD** (counts as every suit — never flag-gated,
+   so broken independently of #1) and on STONE. Now delegates to the
+   engine's `Card.is_suit(flush_calc=True)`.
+4. **The harness itself** (`a4a0053`). Both validation harnesses called
+   `prescreen_play_candidates` without `smeared` (default False), so every
+   Smeared board was **screened with raw-suit templates and scored against a
+   smeared engine** — the box built for a different board than it was
+   measured on.
+
+Plus **hypothesis 5** (type-upgrade pad, `7ce81e7`): the first hypothesis
+asking what the pad makes the HAND rather than what it is worth as a CARD.
+
+### The measurements
+
+| state | what it is | pre | post |
+|---|---|---|---|
+| `stage2_curated_00002468` | FF, 5-card straight unproposable | rel regret 94.59% | **0.0** |
+| `stage3_full_00001545` | FF straight flush via a club kicker | regret 892 (73.4%) | **absent** |
+| `stage3_full_00003496` | smeared flush `QC 9S 8S 3C 2C` | regret 200 (37.3%) | **0.0** |
+| wild-flush test board | wild as a spade | 60 vs brute 284 | **equal** |
+
+Arm C's brute capture **DROPPED 1.000 → 0.960** on the engine fix alone.
+**That is the honest direction** — fixing the engine creates better truth
+lines, so the generator's own gaps surface. A capture that IMPROVES after an
+engine fix deserves suspicion, not relief.
+
+### Method notes (the reusable part)
+
+* **The per-miss board dump is what did it** (`0cad469`, `--dump-miss-k`).
+  Aggregate capture/regret had located nothing in two prior passes; §4's
+  "27/27 misses have `true_size=5`" was as far as aggregates could go. Dump
+  the board, classify by hand, and the bugs name themselves.
+* **A test that passes on broken code is worthless — check it against the
+  parent.** Two drafts of the wild-card fixture passed pre-fix, because
+  `_keep_priority` is `(enhanced, nominal)` and pads an enhanced wild in for
+  the wrong reason. Only a Glass Ace outranking it on that same key
+  discriminates.
+* **Assert through the integration path, never the handler.** #1 is the
+  fifth joker found dead with a green handler suite (Throwback, The Idol,
+  blueprint_compat, Marble, now these three). A test that builds the flags
+  by hand cannot fail on that bug class.
+* **A contradiction between two measurements is a bug in one of them.**
+  Arm C reporting the smeared miss at an unchanged 200 while a unit test on
+  the same board passed is what exposed #4. Chase the discrepancy.
+* **Redundant parameters silently disagree.** `prescreen_play_candidates`
+  took the detection flags twice (booleans → templates, `eval_flags` →
+  kicker gates); nothing made them agree. It now raises on contradiction.
+
+### What this costs
+
+* Every K3 arm re-runs.
+* **B7 revalidation is mandatory** — Bug A and Bug C both change
+  `build_templates`, which feeds the discard side, so the locked sweep
+  (25 helped / 9 regressed at k=4) was measured on templates that could not
+  propose 5-card straights, smeared flushes or wild flushes. ~25 min per
+  DISAGREEING state vs ~0.05s per agreeing one → a 9600X job.
+* **The in-flight stage2 brute corpus is discarded, not kept** (reverses the
+  2026-07-16 call). ~29% owns the three inert jokers; selective relabel is
+  provably sound for that half, but Bug C's wild-card half is not
+  joker-gated, so wild-flush boards are mislabeled with no joker present.
+* `hand_potential_features` (obs) still takes four_fingers/shortcut but not
+  smeared — informativeness gap on the same axis, not label-corrupting.
+
+---
