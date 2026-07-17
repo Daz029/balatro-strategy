@@ -46,11 +46,49 @@ left from an older draft that gated on raw joker keys; the shipped gates read
 resolved identities via `resolve_copy_targets`, so it is safe to delete whenever
 someone is in there — it is not K1 debt.
 
-**K2 must fix the harnesses.** `top_k` now counts LINES, so the returned list is
-longer than k and prefix stability holds only at line granularity — it is no
-longer INDEXABLE by k. Both harnesses currently score k-cuts by slicing `[:k]`
-from one max-k call (`validate_prescreen.py:204`,
-`validate_prescreen_n8.py:187`); they must switch to one call per k.
+**K2 BUILT 2026-07-17** (branch `kicker-variants-k1`) — the gate's measurement
+machinery; no gate RUN is claimed (that is K3). Contents:
+
+* **Per-k harness fix.** `top_k` now counts LINES, so the returned list is
+  longer than k and prefix stability holds only at line granularity — no
+  longer INDEXABLE by k. `validate_prescreen.py` scored k-cuts by slicing
+  `[:k]` from one max-k call; it now makes one `prescreen_play_candidates`
+  call per k. (K1's note fingered `validate_prescreen_n8.py:187` too — that
+  was WRONG: its `_box_at_k` always made per-k calls; line 187 was merely
+  inside that helper. No change needed there.)
+* **Root harness generalized** (`validate_prescreen_n8.py`, per §5's
+  "n-parameterised in spirit"): brute-arm truth is now an EXPLICIT C(n,1..5)
+  enumeration (`_brute_argmax`) — a `best_immediate_play` call above
+  `PRESCREEN_HAND_LIMIT` prescreens, so "truth" would silently be the box
+  under test and the 9-12 tail would always read regret 0. New CLI:
+  `--hand-sizes` (brute-arm filter; shard arm stays n==8 — n>8 labels are
+  already prescreened, not an oracle), `--force-tail` (B1 flat tail, prob 1.0
+  delta 1-4; skips the shard arm since the modified config can't reproduce
+  shard states), `--stage-preset` (config without a shard manifest, for the
+  stage3/4 sample), `--require-jokers` (copy-joker coverage — measured ~5%
+  natural hit rate for Blueprint/Brainstorm on stage3, so the filter is
+  necessary). Speedup now reported vs the actual per-state brute count
+  (`speedup_vs_brute`), not a hardcoded 218.
+* **Full-solve arm** (`scripts/validate_prescreen_fullsolve.py`, the §3
+  planned-but-unbuilt arm): `PrescreenNodeProbe` patches
+  `hand_solver.best_immediate_play` / `solve_hand_turn` /
+  `estimate_future_hand_distribution` as module attributes, so every node of
+  a REAL solve is measured at its true depth (discards_left stack; MC
+  future-hand nodes land in an "mc" stratum and are valued under the node's
+  own `search_orderings` tier). The wrapper calls the original first and
+  returns its result unchanged — an instrumented solve is byte-identical to
+  a bare one (pinned by test; at n<=8 the original's own result doubles as
+  the free brute truth). Root-action agreement is a smoke readout only:
+  each k re-solves with `PRESCREEN_HAND_LIMIT=0` + `PRESCREEN_TOP_K=k`
+  patched — the exact post-K3 production configuration, prescreen firing at
+  every node INCLUDING the MC sampler — and compares root choice + p_clear.
+  Tests: `tests/scripts/test_validate_prescreen_fullsolve.py` (7 — non-
+  perturbation, depth attribution, free-oracle truth, `_brute_argmax` ==
+  `best_immediate_play` at n=8, global restore).
+* Smoke readout from the 2-solve shakeout run (NOT a gate claim): stage2
+  d<=2 nodes all captured at k=4, root action match 2/2, one exact-set
+  mismatch at p_clear delta 0 (the interchangeable-kicker twin case §3
+  documents — capture by value, not set identity).
 
 **Audience:** whoever builds the fix. Read "Ruled out" before proposing anything —
 four plausible hypotheses died to data in the session that produced this, and
@@ -196,11 +234,13 @@ It is blocked because it is currently **lossy**, measured by
 * **Known gap in the current harness:** it measures the **root node only**. The
   prescreen would fire at EVERY node, including deep inside discard branches on
   post-discard/redraw hands (a different, more conditioned hand distribution),
-  where per-node errors could compound. The planned-but-unbuilt arm: wrap
+  where per-node errors could compound. The planned arm: wrap
   `best_immediate_play` and run real full solves — every call becomes a measured
   node at its true depth (~488 nodes per solve, so ~10 solves ≈ 5,000 nodes,
   ~25 min). `evaluate_value` fast-clones rng/blind/cards/jokers, so measuring
   inside a live solve is verified safe (it cannot perturb the run).
+  **BUILT at K2**: `scripts/validate_prescreen_fullsolve.py` (see the K2 block
+  at the top of this document).
 
 ---
 
@@ -361,8 +401,12 @@ Free, no semantics change, makes progress visible and caps crash-loss.
 
 ## 8. Artifacts
 
-* `scripts/validate_prescreen_n8.py` — the capture/regret harness (both arms).
-  Report: `data/prescreen_n8.json`.
+* `scripts/validate_prescreen_n8.py` — the root capture/regret harness (shard
+  free-oracle + brute arms; K2 added tail/preset/copy-joker modes). Report:
+  `data/prescreen_n8.json`.
+* `scripts/validate_prescreen_fullsolve.py` — the K2 full-solve arm
+  (node-level capture at true depth inside real solves + root-agreement
+  smoke). Report: `data/prescreen_fullsolve.json`.
 * `tests/engine/test_get_x_same_equivalence.py` — oracle pin for the O(n)
   rewrite (exhaustive over all rank ids for short hands).
 * Commit `5b9ab27` — the `get_x_same` speedup + the harness + the n=8 verdict.

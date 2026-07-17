@@ -53,21 +53,54 @@ The shard arm additionally VERIFIES reproduction by re-encoding the state and
 comparing against the shard's stored `hand_cards`, so a config mismatch is
 caught rather than silently measuring different states.
 
-Usage::
+K2 GENERALIZATIONS (the harness is n-parameterised, per the design doc's §5;
+the n==8 filter is a CLI-level choice):
 
+  * Brute-arm truth is an EXPLICIT C(n,1..5) enumeration, never a
+    `best_immediate_play` call -- above PRESCREEN_HAND_LIMIT that function
+    prescreens, so "truth" would silently become the box under test and the
+    9-12 tail would always read regret 0.
+  * ``--hand-sizes`` filters the brute arm (the shard arm stays pinned to
+    n == 8: n > 8 labels are already prescreened and are not an oracle).
+  * ``--force-tail`` deals via B1's flat hand-size tail (prob 1.0, delta
+    1-4) for the 9-12 tail gate arm. Skips the shard arm -- the modified
+    config no longer regenerates the shards' states.
+  * ``--stage-preset`` sources the config from
+    `generate_hand_demos.stage_presets()` instead of a shard manifest (the
+    stage3/4 copy-joker sample -- no shard run exists for those yet). Skips
+    the shard arm.
+  * ``--require-jokers`` keeps only brute-arm states owning at least one of
+    the given center keys (Blueprint/Brainstorm coverage: uniform stage3/4
+    sampling hits a copy joker too rarely to measure).
+
+Gate runs (K3)::
+
+    # n=8, stage2 density, both arms; --n-shard 0 = the full stage2
+    # brute-force corpus folded in as the free oracle
     uv run python scripts/validate_prescreen_n8.py \
-        --shard-dir data/stage_2_h1_shards \
-        --ks 3,5,8,12 --n-brute 300 --out data/prescreen_n8.json
+        --shard-dir data/stage_2_h1_shards --n-shard 0 --n-brute 300
+
+    # 9-12 tail, stage2 density
+    uv run python scripts/validate_prescreen_n8.py --force-tail \
+        --hand-sizes 9,10,11,12 --n-brute 200 --out data/prescreen_tail.json
+
+    # stage3/4 copy-joker sample
+    uv run python scripts/validate_prescreen_n8.py --stage-preset stage3_full \
+        --total-examples 20000 --require-jokers j_blueprint,j_brainstorm \
+        --n-brute 100 --out data/prescreen_copy_jokers.json
 """
 
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
+import math
 import random
 import sys
 import time
 from collections import defaultdict
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -81,7 +114,6 @@ for _p in (str(_SCRIPTS_DIR), str(_REPO_ROOT)):
 
 from hand_solver import (  # noqa: E402
     PRESCREEN_TOP_K,
-    best_immediate_play,
     evaluate_value,
     prescreen_play_candidates,
 )
@@ -182,6 +214,25 @@ def _value_of(subset: list, args: dict[str, Any]) -> float:
     )
 
 
+def _brute_argmax(args: dict[str, Any]) -> tuple[list, float]:
+    """Exact argmax over every 1-5-card subset: sizes ascending, enumeration
+    order, first-wins on ties -- byte-identical to `best_immediate_play`'s
+    n <= 8 branch. Explicit rather than a `best_immediate_play` call because
+    above PRESCREEN_HAND_LIMIT that function PRESCREENS, so "truth" would
+    silently become the box under test and the 9-12 tail arm would always
+    read regret 0 (K2)."""
+    hand = args["hand"]
+    best_subset: list | None = None
+    best_total: float | None = None
+    for size in range(1, min(5, len(hand)) + 1):
+        for combo in itertools.combinations(hand, size):
+            total = _value_of(list(combo), args)
+            if best_total is None or total > best_total:
+                best_subset, best_total = list(combo), total
+    assert best_subset is not None and best_total is not None
+    return best_subset, best_total
+
+
 def _box_at_k(args: dict[str, Any], k: int) -> list[list]:
     flags = get_hand_eval_flags(args["jokers"])
     return prescreen_play_candidates(
@@ -212,21 +263,19 @@ def measure_state(
     hand = args["hand"]
 
     if truth_subset is None:
-        truth_subset, truth_result = best_immediate_play(
-            hand,
-            args["jokers"],
-            args["hand_levels"],
-            args["blind"],
-            args["rng"],
-            args["game_state"],
-            args["blind_chips"],
-        )
-        truth_total = float(truth_result.total)
+        truth_subset, truth_total = _brute_argmax(args)
     else:
         truth_total = _value_of(truth_subset, args)
 
     truth_ids = _index_set(truth_subset, hand)
-    out: dict[str, Any] = {"truth_total": truth_total, "by_k": {}}
+    n = len(hand)
+    n_subsets = sum(math.comb(n, size) for size in range(1, min(5, n) + 1))
+    out: dict[str, Any] = {
+        "truth_total": truth_total,
+        "hand_size": n,
+        "n_subsets": n_subsets,  # the brute baseline: 218 at n=8, C(n,1..5) above
+        "by_k": {},
+    }
     for k in ks:
         box = _box_at_k(args, k)
         box_id_sets = [_index_set(c, hand) for c in box]
@@ -284,6 +333,7 @@ def _summarize(records: list[dict[str, Any]], ks: list[int]) -> dict[str, Any]:
         regs = [r["by_k"][k]["regret"] for r in records]
         rels = [r["by_k"][k]["rel_regret"] for r in records]
         boxes = [r["by_k"][k]["box_size"] for r in records]
+        subsets = [r["n_subsets"] for r in records]
         n = max(1, len(records))
         out["by_k"][str(k)] = {
             "capture_rate_by_value": round(sum(capv) / n, 4),
@@ -295,7 +345,8 @@ def _summarize(records: list[dict[str, Any]], ks: list[int]) -> dict[str, Any]:
             "mean_rel_regret": round(sum(rels) / n, 5),
             "max_rel_regret": round(max(rels, default=0.0), 4),
             "mean_box_size": round(sum(boxes) / n, 2),
-            "speedup_vs_218": round(218 / max(1e-9, sum(boxes) / n), 1),
+            # vs the ACTUAL brute count per state (218 at n=8, C(n,1..5) above)
+            "speedup_vs_brute": round((sum(subsets) / n) / max(1e-9, sum(boxes) / n), 1),
         }
     return out
 
@@ -331,60 +382,119 @@ def main() -> None:
     parser.add_argument("--n-shard", type=int, default=250, help="0 = all eligible")
     parser.add_argument("--n-brute", type=int, default=300)
     parser.add_argument("--total-examples", type=int, default=4000)
-    parser.add_argument("--stage-name", default="stage2_curated")
+    parser.add_argument(
+        "--stage-name",
+        default=None,
+        help="seed prefix; defaults to the preset name or stage2_curated",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--out", type=Path, default=Path("data/prescreen_n8.json"))
+    parser.add_argument(
+        "--hand-sizes",
+        default="8",
+        help="brute-arm hand-size filter, comma list (shard arm stays n==8: "
+        "n>8 labels are already prescreened, not an oracle)",
+    )
+    parser.add_argument(
+        "--force-tail",
+        action="store_true",
+        help="deal via B1's flat hand-size tail (prob 1.0, delta 1-4) for the "
+        "9-12 tail arm; skips the shard arm (config no longer matches shards)",
+    )
+    parser.add_argument(
+        "--stage-preset",
+        default=None,
+        help="config from generate_hand_demos.stage_presets() instead of a "
+        "shard manifest (stage3/4 copy-joker sample); skips the shard arm",
+    )
+    parser.add_argument(
+        "--require-jokers",
+        default=None,
+        help="comma center keys; brute arm keeps only states owning >=1 of them",
+    )
     args = parser.parse_args()
 
     ks = [int(k) for k in args.ks.split(",")]
-    manifest = json.loads((args.shard_dir / "manifest.json").read_text(encoding="utf-8"))
-    config = config_from_manifest(manifest)
+    hand_sizes = {int(s) for s in args.hand_sizes.split(",")}
+    require_jokers = (
+        {k.strip() for k in args.require_jokers.split(",")} if args.require_jokers else None
+    )
+    stage_name = args.stage_name or args.stage_preset or "stage2_curated"
+
+    if args.stage_preset:
+        from generate_hand_demos import stage_presets
+
+        config = stage_presets()[args.stage_preset].config
+    else:
+        manifest = json.loads((args.shard_dir / "manifest.json").read_text(encoding="utf-8"))
+        config = config_from_manifest(manifest)
+    if args.force_tail:
+        config = replace(config, hand_size_tail_prob=1.0, hand_size_delta_range=(1, 4))
     rng = random.Random(args.seed)
 
     # ---- arm 1: shard (free oracle, biased) ----
-    rows = load_shard_rows(args.shard_dir)
-    if args.n_shard and len(rows) > args.n_shard:
-        rows = rng.sample(rows, args.n_shard)
+    # Only in default manifest mode: --stage-preset has no shard run to read,
+    # and --force-tail's modified config would fail state reproduction anyway.
     shard_records: list[dict[str, Any]] = []
     n_mismatch = 0
-    t0 = time.perf_counter()
-    for i, row in enumerate(rows):
-        gs = build_state(row["seed"], config)
-        hand = gs["hand"]
-        if len(hand) != 8:
-            n_mismatch += 1
-            continue
-        # Integrity: the regenerated state must BE the shard's state.
-        enc = encode_hand_state_v2(gs)["hand_cards"]
-        if not np.allclose(enc, row["hand_cards"], atol=1e-5):
-            n_mismatch += 1
-            continue
-        truth = [hand[j] for j in row["picks"]]
-        rec = measure_state(gs, ks, truth)
-        rec["discards_left"] = int(gs["current_round"].get("discards_left", 0))
-        rec["n_jokers"] = len(gs["jokers"])
-        shard_records.append(rec)
-        if (i + 1) % 25 == 0:
-            print(f"[shard] {i + 1}/{len(rows)}  ({time.perf_counter() - t0:.0f}s)", flush=True)
+    run_shard_arm = not (args.stage_preset or args.force_tail)
+    if run_shard_arm:
+        rows = load_shard_rows(args.shard_dir)
+        if args.n_shard and len(rows) > args.n_shard:
+            rows = rng.sample(rows, args.n_shard)
+        t0 = time.perf_counter()
+        for i, row in enumerate(rows):
+            gs = build_state(row["seed"], config)
+            hand = gs["hand"]
+            if len(hand) != 8:
+                n_mismatch += 1
+                continue
+            # Integrity: the regenerated state must BE the shard's state.
+            enc = encode_hand_state_v2(gs)["hand_cards"]
+            if not np.allclose(enc, row["hand_cards"], atol=1e-5):
+                n_mismatch += 1
+                continue
+            truth = [hand[j] for j in row["picks"]]
+            rec = measure_state(gs, ks, truth)
+            rec["discards_left"] = int(gs["current_round"].get("discards_left", 0))
+            rec["n_jokers"] = len(gs["jokers"])
+            shard_records.append(rec)
+            if (i + 1) % 25 == 0:
+                print(
+                    f"[shard] {i + 1}/{len(rows)}  ({time.perf_counter() - t0:.0f}s)",
+                    flush=True,
+                )
 
     # ---- arm 2: brute force (unbiased; a node is ~0.36s at ANY depth) ----
-    brute_seeds = [
-        f"{args.stage_name}_{i:08d}"
-        for i in rng.sample(range(args.total_examples), min(args.n_brute, args.total_examples))
-    ]
+    # Iterate a seeded shuffle of the whole index range and keep the first
+    # n_brute states passing the filters -- with --hand-sizes or
+    # --require-jokers active, a fixed pre-sample would silently under-fill.
+    indices = list(range(args.total_examples))
+    rng.shuffle(indices)
     brute_records: list[dict[str, Any]] = []
+    n_target = min(args.n_brute, args.total_examples)
+    n_checked = 0
     t1 = time.perf_counter()
-    for i, seed in enumerate(brute_seeds):
+    for idx in indices:
+        if len(brute_records) >= n_target:
+            break
+        seed = f"{stage_name}_{idx:08d}"
         gs = build_state(seed, config)
-        if len(gs["hand"]) != 8:
-            continue  # n>8 already prescreens; n<8 is not the question
+        n_checked += 1
+        if len(gs["hand"]) not in hand_sizes:
+            continue
+        if require_jokers is not None and not (
+            {j.center_key for j in gs["jokers"]} & require_jokers
+        ):
+            continue
         rec = measure_state(gs, ks, None)
         rec["discards_left"] = int(gs["current_round"].get("discards_left", 0))
         rec["n_jokers"] = len(gs["jokers"])
         brute_records.append(rec)
-        if (i + 1) % 25 == 0:
+        if len(brute_records) % 25 == 0:
             print(
-                f"[brute] {i + 1}/{len(brute_seeds)}  ({time.perf_counter() - t1:.0f}s)",
+                f"[brute] {len(brute_records)}/{n_target} "
+                f"(checked {n_checked}, {time.perf_counter() - t1:.0f}s)",
                 flush=True,
             )
 
@@ -392,13 +502,20 @@ def main() -> None:
         "params": {
             "ks": ks,
             "seed": args.seed,
-            "shard_dir": args.shard_dir.as_posix(),
-            "stage_name": args.stage_name,
+            "shard_dir": args.shard_dir.as_posix() if run_shard_arm else None,
+            "stage_name": stage_name,
+            "stage_preset": args.stage_preset,
+            "hand_sizes": sorted(hand_sizes),
+            "force_tail": args.force_tail,
+            "require_jokers": sorted(require_jokers) if require_jokers else None,
+            "n_brute_checked": n_checked,
             "prescreen_top_k_default": PRESCREEN_TOP_K,
         },
         "shard_arm": {
             "note": "free oracle (label == brute-force argmax); BIASED: finished-first "
-            "workers, play-labeled roots only, n==8 only",
+            "workers, play-labeled roots only, n==8 only"
+            if run_shard_arm
+            else "skipped (--stage-preset / --force-tail)",
             "n_state_mismatch_skipped": n_mismatch,
             **_summarize(shard_records, ks),
             "by_discards_left": _stratify(shard_records, ks, "discards_left"),
@@ -406,10 +523,12 @@ def main() -> None:
         },
         "brute_arm": {
             "note": "unbiased: seeds sampled uniformly over the stage range; argmax "
-            "computed here (218 evals ~0.36s, independent of discards_left)",
+            "enumerated here explicitly (C(n,1..5) evals, ~0.36s at n=8, "
+            "independent of discards_left)",
             **_summarize(brute_records, ks),
             "by_discards_left": _stratify(brute_records, ks, "discards_left"),
             "by_n_jokers": _stratify(brute_records, ks, "n_jokers"),
+            "by_hand_size": _stratify(brute_records, ks, "hand_size"),
         },
     }
     args.out.parent.mkdir(parents=True, exist_ok=True)

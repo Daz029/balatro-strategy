@@ -807,6 +807,34 @@ forces a second regen.
       consulted by the held-value hypothesis. A Blue seal is genuinely
       held-value (Planet at end of round), so a held variant can pad one
       away. Earns a term only if the K3 rescan shows it.
+  - **K2 BUILT 2026-07-17** (same branch): the gate's measurement machinery —
+    no gate RUN claimed (that is K3). Full record in the design doc's K2
+    block. (1) Per-k fix: `validate_prescreen.py` now calls
+    `prescreen_play_candidates` once PER k instead of slicing `[:k]` from a
+    max-k call (K1 made output non-indexable by k; the K1 note also fingered
+    `validate_prescreen_n8.py:187` — WRONG, its `_box_at_k` was always
+    per-k, no change needed). (2) Root harness generalized for the K3 arms:
+    brute-arm truth = explicit `_brute_argmax` enumeration (a
+    `best_immediate_play` call above the limit PRESCREENS, so tail "truth"
+    would be the box itself, regret always 0); `--hand-sizes`,
+    `--force-tail` (B1 knob; skips shard arm — modified config can't
+    reproduce shard states), `--stage-preset`, `--require-jokers`
+    (Blueprint/Brainstorm hit ~5% naturally on stage3); shard arm stays
+    n==8-only (n>8 labels already prescreened = not an oracle); stage2
+    oracle fold-in = `--n-shard 0` on the transferred brute corpus.
+    (3) Full-solve arm BUILT: `scripts/validate_prescreen_fullsolve.py` —
+    `PrescreenNodeProbe` patches `best_immediate_play`/`solve_hand_turn`/
+    `estimate_future_hand_distribution` as module attributes; every node of
+    a real solve measured at true depth (discards_left stack, "mc" stratum
+    for future-hand samples, box valued under the node's own
+    search_orderings tier); wrapper returns the original's result unchanged
+    (instrumented solve byte-identical — pinned by test; at n<=8 the
+    original result IS the free brute truth). Root-action agreement =
+    smoke readout only: re-solve with PRESCREEN_HAND_LIMIT=0 +
+    PRESCREEN_TOP_K=k patched (the exact post-K3 production config, MC
+    sampler included). 7 new tests in
+    `tests/scripts/test_validate_prescreen_fullsolve.py`; prescreen +
+    kicker suites still green (56 total); ruff clean on all touched files.
 
 ### h1 architecture — Candidate B COMMITTED (autoregressive pointer head)
 

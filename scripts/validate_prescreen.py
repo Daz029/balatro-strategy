@@ -11,9 +11,12 @@ Method (decision record: CLAUDE.md "Pre-regeneration build plan", B5):
     hand-size tail knob on a stage preset's config (default stage3_full --
     the prescreen must hold up under jokers, not just bare boards).
   - Per state: ONE full brute-force pass exactly-evaluates every subset,
-    then every ``--k-cuts`` cut is scored from those same evaluations
-    (`prescreen_play_candidates` is prefix-stable in top_k, so one call at
-    max(k) yields every cut).
+    then every ``--k-cuts`` cut is scored from those same evaluations via
+    one `prescreen_play_candidates` call PER k (K2). Since K1, `top_k`
+    counts LINES and every surviving line carries its kicker variants, so
+    the output is prefix-stable at line granularity but NOT indexable by
+    k -- slicing ``[:k]`` from one max-k call would cut mid-line and
+    misassign every cut.
   - Metric = REGRET, not disagreement (pitfall #12): p_clear(brute-force
     best) - p_clear(prescreen's choice), BOTH valued by brute force.
     Near-tied plays that "disagree" harmlessly cost ~0 here.
@@ -201,22 +204,28 @@ def score_one_hand(state: _StateBundle, k_cuts: list[int]) -> dict:
     _, best_total = _argmax_first(enum_pairs)
     best_p = p_clear(best_total)
 
-    candidates = prescreen_play_candidates(
-        hand,
-        state.jokers,
-        state.hand_levels,
-        state.blind,
-        state.rng,
-        four_fingers=state.four_fingers,
-        shortcut=state.shortcut,
-        top_k=max(k_cuts),
-        game_state=state.gs,
-        blind_chips=state.blind_chips,
-    )
-    cand_pairs = [
-        (frozenset(id(c) for c in cards), totals[frozenset(id(c) for c in cards)])
-        for cards in candidates
-    ]
+    # One prescreen call per k (K2): top_k counts LINES and variants ride,
+    # so a j-line cut must come from its own top_k=j call -- the max-k
+    # output is a line-granular prefix but entry j is not line j.
+    cut_pairs_by_k: dict[int, list[tuple[frozenset[int], float]]] = {}
+    for k in k_cuts:
+        candidates = prescreen_play_candidates(
+            hand,
+            state.jokers,
+            state.hand_levels,
+            state.blind,
+            state.rng,
+            four_fingers=state.four_fingers,
+            shortcut=state.shortcut,
+            top_k=k,
+            game_state=state.gs,
+            blind_chips=state.blind_chips,
+        )
+        cut_pairs_by_k[k] = [
+            (frozenset(id(c) for c in cards), totals[frozenset(id(c) for c in cards)])
+            for cards in candidates
+        ]
+    cand_pairs = cut_pairs_by_k[max(k_cuts)]
 
     row: dict = {
         "seed": state.seed,
@@ -236,7 +245,7 @@ def score_one_hand(state: _StateBundle, k_cuts: list[int]) -> dict:
         "cuts": {},
     }
     for k in k_cuts:
-        cut = cand_pairs[: min(k, len(cand_pairs))]
+        cut = cut_pairs_by_k[k]
         _, cut_total = _argmax_first(cut)
         cut_p = p_clear(cut_total)
         stress = {}
@@ -249,6 +258,7 @@ def score_one_hand(state: _StateBundle, k_cuts: list[int]) -> dict:
             "choice_total": cut_total,
             "choice_p_clear": cut_p,
             "regret": best_p - cut_p,
+            "n_candidates": len(cut),
             "stress_regret": stress,
         }
     return row
