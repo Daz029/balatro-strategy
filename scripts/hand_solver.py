@@ -55,7 +55,8 @@ from dataclasses import dataclass, field
 from math import comb
 
 from jackdaw.engine.card import Card
-from jackdaw.engine.hand_eval import get_hand_eval_flags
+from jackdaw.engine.data.hands import HAND_ORDER
+from jackdaw.engine.hand_eval import get_best_hand, get_hand_eval_flags
 from jackdaw.engine.hand_levels import HandLevels
 from jackdaw.engine.play_ordering import (
     MAX_PERMUTATIONS,  # noqa: F401 -- re-export for existing importers
@@ -86,6 +87,7 @@ from jackdaw.engine.play_ordering import (
 )
 from jackdaw.engine.rng import PseudoRandom
 from jackdaw.engine.scoring import ScoreResult, score_hand
+from jackdaw.env.trigger_match import resolve_copy_targets, trigger_predicate
 
 # NOTE: The fast-clone helpers, order-sensitivity detection, and covering-
 # permutation construction that used to live here moved to
@@ -247,43 +249,103 @@ def _card_suit(c: Card) -> str | None:
     return c.base.suit if c.base is not None else None
 
 
+def _suit_is_red(suit) -> bool:
+    return (suit.value if hasattr(suit, "value") else suit) in ("Hearts", "Diamonds")
+
+
+def _flush_match(c, suit: str, smeared: bool) -> bool:
+    """Does `c` count toward a `suit` flush?
+
+    Delegates to the ENGINE's own `Card.is_suit(flush_calc=True)`, which
+    owns three rules this module must not re-derive: Stone cards never
+    count, WILD cards count as EVERY suit, and Smeared merges
+    Hearts=Diamonds / Spades=Clubs. The old predicate here was a bare
+    `_card_suit(c) == s`, which got all three wrong -- wild and smeared
+    flushes were structurally unproposable (measured: stage3_full_00003496,
+    truth `QC 9S 8S 3C 2C` is a Flush under Smeared and the solver could
+    only offer two pair, 200 chips of regret).
+
+    `_FakeCard` (the DeckComposition membership probe) has no `is_suit`, so
+    it falls back to suit identity. That is the honest answer there and not
+    a shortcut: deck composition tracks (rank, suit) ONLY, so it cannot
+    represent enhancements at all -- a wild card sitting in the deck is
+    invisible to it either way. The fallback therefore UNDERCOUNTS wild
+    draws, which is the safe direction (a real wild in the deck can only
+    raise p_reach, never lower it).
+    """
+    engine_is_suit = getattr(c, "is_suit", None)
+    if engine_is_suit is not None:
+        return engine_is_suit(suit, flush_calc=True, smeared=smeared)
+    cs = _card_suit(c)
+    if cs is None:
+        return False
+    if smeared:
+        return _suit_is_red(cs) == _suit_is_red(suit)
+    return cs == suit
+
+
 def build_templates(
     hand: list[Card],
     *,
     four_fingers: bool = False,
     shortcut: bool = False,
+    smeared: bool = False,
 ) -> list[Template]:
-    """Fixed, joker-agnostic template set. `four_fingers` / `shortcut` should
-    be derived from the live joker list before calling (both loosen size/gap
-    requirements for straights & flushes) -- pass them in rather than
-    re-deriving joker knowledge here.
+    """Fixed, joker-agnostic template set. `four_fingers` / `shortcut` /
+    `smeared` should be derived from the live joker list before calling (all
+    three loosen size/gap/suit requirements for straights & flushes) -- pass
+    them in rather than re-deriving joker knowledge here.
     """
     templates: list[Template] = []
     flush_need = 4 if four_fingers else 5
-    straight_need = 4 if four_fingers else 5
 
-    # --- flush-by-suit (4 templates) ---
-    for suit in SUITS:
+    # --- flush-by-suit ---
+    # Smeared collapses the four suits into TWO colour groups, so emitting
+    # all four would just be the same two templates twice: identical
+    # predicates, identical holds, doubling the box for nothing (and
+    # crowding `family_best`, pitfall #13). One representative per group.
+    flush_suits = ["Spades", "Hearts"] if smeared else SUITS
+    for suit in flush_suits:
+        name = f"flush_{'black' if suit == 'Spades' else 'red'}" if smeared else f"flush_{suit}"
         templates.append(
             Template(
-                name=f"flush_{suit}",
-                predicate=lambda c, s=suit: _card_suit(c) == s,
+                name=name,
+                predicate=lambda c, s=suit, sm=smeared: _flush_match(c, s, sm),
                 needed=flush_need,
             )
         )
 
     # --- straight-by-window ---
     # ranks 2..14 (Ace high); Ace can also play low (id 14 treated as 1).
-    windows = []
+    #
+    # Four Fingers ADDS the 4-length windows, it does not REPLACE the
+    # 5-length ones: the joker is permissive (4 consecutive cards now also
+    # count) and a natural 5-card straight stays legal and scores MORE.
+    # Emitting only 4-windows under it -- the original behaviour -- made a
+    # 5-card straight structurally unproposable, because a window is an
+    # explicit rank set and the 5th rank fails its predicate. Measured on
+    # `stage2_curated_00002468` (Four Fingers + Crazy): the true line
+    # JS-10C-9D-8D-7C (1480) could not be constructed and the best
+    # candidate was the 4-card JS-10C-9D-8D (1340).
+    #
+    # Both needs are honest, so both are kept: 4-of-4 completes a straight
+    # under Four Fingers, 5-of-5 completes the natural straight. (A
+    # 5-window with needed=4 would be WRONG -- "4 of these 5 ranks" does
+    # not imply 4 CONSECUTIVE ranks: {7,8,9,J} is not a straight.)
+    # The flush side needs no such fix: its predicate is "same suit", so
+    # `construct_hold` already gathers all 5 same-suit cards and `needed`
+    # only feeds the reachability math.
+    straight_needs = (4, 5) if four_fingers else (5,)
+    windows: list[tuple[list[int], int]] = []
     lo, hi = 2, 14
-    for start in range(lo, hi - straight_need + 2):
-        windows.append(list(range(start, start + straight_need)))
-    # ace-low window, e.g. [14(as1),2,3,4] for four_fingers, or [..,5] normal
-    ace_low_window = [14] + list(range(2, 2 + straight_need - 1))
-    windows.append(ace_low_window)
+    for need in straight_needs:
+        for start in range(lo, hi - need + 2):
+            windows.append((list(range(start, start + need)), need))
+        # ace-low window, e.g. [14(as1),2,3,4] at need=4, [..,5] at need=5
+        windows.append(([14] + list(range(2, 2 + need - 1)), need))
 
     gap = 1 if shortcut else 0
-    for w in windows:
+    for w, need in windows:
         wset = set(w)
         if gap:
             # widen predicate: allow ranks within the window OR adjacent gap-fillers
@@ -291,11 +353,18 @@ def build_templates(
             # here we just loosen membership by +/-1 rank of window bounds)
             lo_w, hi_w = min(w), max(w)
             wset = set(range(lo_w - gap, hi_w + gap + 1))
+        # The `_n{need}` suffix disambiguates the two ace-low windows, which
+        # both render as `straight_2-14` (min 2, max 14) regardless of
+        # length. Applied only under four_fingers, so every non-four-fingers
+        # template name is byte-identical to before.
+        name = f"straight_{min(w)}-{max(w)}"
+        if four_fingers:
+            name = f"{name}_n{need}"
         templates.append(
             Template(
-                name=f"straight_{min(w)}-{max(w)}",
+                name=name,
                 predicate=lambda c, ws=wset: _card_rank_id(c) in ws,
-                needed=straight_need,
+                needed=need,
             )
         )
 
@@ -524,7 +593,35 @@ class DiscardChoice:
 # lever if it ever matters: kicker VARIANTS per combination (per-suit /
 # per-enhancement alternatives), not k. Full report:
 # data/prescreen_validation.json.
-PRESCREEN_HAND_LIMIT = 8
+#
+# PRESCREEN_HAND_LIMIT DELETED (K3, 2026-07-17). Every hand size is now
+# screened uniformly. The old `n > 8` seam existed because the prescreen was
+# only trusted on big hands, but it was also where B5's residual hid: n=8
+# kept brute-forcing, so the box was never measured there and the kicker bug
+# went unseen until the n=8 harness was pointed at it (0.845 capture, misses
+# up to 90% of a play's value). One path, measured everywhere.
+#
+# Licensed by K3's gate, both arms: root arm capture-by-value 0.980 at n=8
+# (stage2 brute, k-invariant), 0.980 on the stage3 copy-joker sample, 0.950
+# on the 9-12 tail; full-solve arm 0.9808 node-level at true depth (d0 0.981,
+# d1 0.997, d2/d3 1.000), root-action agreement 1.0. Bar was >=0.95.
+#
+# ACCEPTED RESIDUALS (user call 2026-07-17), all PPO-correctable in the
+# documented sense -- the real reward is P(clear) and a mis-ranked play is a
+# legal single-step action (the A3 "training problem, not labels" precedent):
+#   - ~5% of states, mean regret ~22 chips on the tail, one coherent family:
+#     class-3 SET-LEVEL jokers (Jolly/Droll/Blackboard/Square), where no
+#     honest per-card bit exists by taxonomy design, plus Four Fingers.
+#   - The tail's aggregate 0.950 is carried by n=9/n=12; n=10 (0.939) and
+#     n=11 (0.935) are individually below the bar.
+#   - The full-solve arm's `mc` stratum sits at 0.925 (160 nodes, mean regret
+#     44) -- future-hand samples valued at the coarse search_orderings=False
+#     tier. It feeds p_clear VALUES (the critic's warm start), not just
+#     actions; PPO retrains the critic on real returns.
+#   - "PPO corrects it" is a claim about the END of fine-tuning: BC teaches
+#     the prior and the KL leash holds the policy near it early, so a line BC
+#     never proposes may go unsampled for a while. The leash provably decays
+#     to zero.
 PRESCREEN_TOP_K = 5
 
 # --- B7 discard-shortlist depth gating (locked 2026-07-16) ------------------
@@ -603,6 +700,464 @@ def _ranking_score(
     return result, clone_to_orig
 
 
+# --- K1 kicker variants (locked 2026-07-16) ---------------------------------
+#
+# The prescreen proposes the right scoring LINE and the right size and then
+# picks the wrong KICKERS: the old `_kicker_pad` padded every line by keep-priority
+# nominal-best, which assumes kickers are inert filler. That assumption is
+# false on exactly the boards stage2 concentrates -- under Splash the
+# kickers SCORE (so their suit/rank feeds Lusty/Greedy/Even Steven), and
+# under Raised Fist the cards you RETAIN set the mult. Measured at n=8 on
+# stage2 density: 0.845 score-capture, misses up to 90% of the play's value,
+# and INVARIANT in k (27/27 misses had true_size 5 and the right line) --
+# the candidate GENERATOR was starved, so no k rescues it. Full measurement
+# record: docs/bruteforce_speedup_and_kicker_design.md.
+#
+# The fix is GENERATION-ONLY. `_ranking_score` is deliberately untouched: it
+# is a real joker/held-aware `score_hand` call that already values kickers
+# correctly when it is GIVEN them -- ranking judged what it was handed, and
+# changing it would force a B7 revalidation for no benefit.
+#
+# A variant is the GREEDY argmax completion of a line under ONE hypothesis
+# about where kicker value lives. There are NO magnitudes anywhere below: a
+# hypothesis's only job is to decide which cards are PRESENT in the set, and
+# `best_immediate_play`'s exact pass (full ordering search, real score_hand)
+# arbitrates between the variants. That is what makes raw derivation safe
+# here -- a wrong hypothesis costs one wasted candidate, never a wrong label.
+# Variants RIDE their line: `top_k` counts LINES, and every surviving line
+# carries all of its variants into the exact pass.
+
+def _has_held_enhancement(card: Card) -> bool:
+    """Does this card's ENHANCEMENT pay off while it sits in hand -- i.e.
+    does playing it away as a kicker forfeit something?
+
+    Read from the engine's own held-channel config rather than a name set
+    ({"Steel Card", "Gold Card"} would be correct on today's content and
+    would rot the moment an enhancement is added or rebalanced -- the same
+    hand-written-list failure the trigger taxonomy exists to avoid):
+
+      * `get_chip_h_x_mult` -- Steel's x1.5 (card.lua:1011)
+      * `get_chip_h_mult`   -- no standard enhancement uses it today, but
+                               it is the engine's held additive-mult hook
+      * `ability["h_dollars"]` -- Gold's end-of-round $3 (card.py:251; it
+                               has no accessor, hence the raw read, so the
+                               debuff guard is ours to apply)
+
+    The two accessors already return 0 for a debuffed card, which is the
+    behaviour we want: a debuffed Steel card has no held value and is fair
+    game as a kicker.
+
+    ACCEPTED RESIDUAL: SEALS are not consulted. A Blue seal is genuinely
+    held-value (a Planet at end of round if the card stays in hand), so a
+    held-value variant can pad one away. Same class as the spec's
+    documented mixed-hypothesis residuals -- it earns a term only if the
+    K3 rescan shows it.
+    """
+    if card.debuff:
+        return False
+    return (
+        card.get_chip_h_mult() > 0
+        or card.get_chip_h_x_mult() > 0
+        or card.ability.get("h_dollars", 0) > 0
+    )
+
+
+def _resolved_joker_views(jokers: list[Card]) -> list[tuple[str, Card]]:
+    """Active joker effects as (effective center key, the joker card whose
+    ability to read), one per slot, after COPY RESOLUTION.
+
+    Blueprint/Brainstorm resolve through the ENGINE's own path
+    (`resolve_copy_targets`) rather than a reimplementation, so the gates
+    below read what actually fires: a Blueprint copying Castle presents as
+    Castle AND reads the suit off the Castle joker (Castle stores it on its
+    own ability). `blueprint_compat` comes free from that path -- which is
+    load-bearing for the scored-value gate, since Splash is on the
+    29-joker incompat list and therefore can never be copied.
+
+    A copy joker that resolves to nothing keeps its own key, which carries
+    no predicate (class 4) and so gates nothing. Debuffed jokers are
+    dropped: the scoring loops skip them before any handler runs.
+    """
+    resolutions = resolve_copy_targets({"jokers": jokers})
+    views: list[tuple[str, Card]] = []
+    for joker, resolution in zip(jokers, resolutions):
+        if joker.debuff:
+            continue
+        if resolution.active:
+            target = jokers[resolution.target_index]
+            views.append((target.center_key, target))
+        else:
+            views.append((joker.center_key, joker))
+    return views
+
+
+def _card_channel_counts(
+    hand: list[Card],
+    views: list[tuple[str, Card]],
+    game_state: dict | None,
+    flags: dict[str, bool],
+) -> dict[int, tuple[int, int]]:
+    """id(card) -> (scored candidacies, held candidacies) over the B2
+    trigger taxonomy's OWN predicates (`trigger_predicate`) -- never a
+    second hand-written joker table, which would drift out of sync the
+    moment a joker is reclassified.
+
+    These are PRESENCE tallies -- how many active joker effects list this
+    card as a candidate -- not an estimate of what those effects are worth.
+    Class-3 (set-level) and class-4 (non-card) jokers contribute nothing by
+    construction, which is correct here: no honest per-card bit exists for
+    them.
+
+    Raised Fist is excluded from the tally entirely. Its bit marks the
+    CURRENT lowest held card, which is the wrong rule for a counterfactual
+    question about which cards to keep -- once a card leaves the hand the
+    minimum moves. Its min term gets an exact hypothesis of its own below.
+    """
+    counts = {id(c): [0, 0] for c in hand}
+    gs = game_state or {}
+    for key, joker in views:
+        if key == "j_raised_fist":
+            continue
+        predicate = trigger_predicate(key)
+        if predicate is None:
+            continue
+        for card in hand:
+            scored, held = predicate(card, joker, gs, flags)
+            if scored:
+                counts[id(card)][0] += 1
+            if held:
+                counts[id(card)][1] += 1
+    return {k: (v[0], v[1]) for k, v in counts.items()}
+
+
+@dataclass(frozen=True)
+class _KickerGates:
+    """Which kicker hypotheses are live on this board. Each gate reads
+    RESOLVED joker identities (never raw keys), so a copied effect gates
+    exactly like the original. Ungated hypotheses are pure waste -- without
+    Splash a kicker never scores, so the scored-value variant would only
+    burn an exact evaluation -- which is why the budget stays adaptive
+    rather than 3x flat."""
+
+    scored_value: bool
+    held_value: bool
+    play_away_lowest: bool
+
+
+def _kicker_gates(
+    hand: list[Card],
+    views: list[tuple[str, Card]],
+    flags: dict[str, bool],
+    counts: dict[int, tuple[int, int]],
+) -> _KickerGates:
+    keys = {key for key, _ in views}
+    return _KickerGates(
+        # Splash is the ONLY way a non-line card scores, so it alone makes
+        # kicker suit/rank matter. The flag comes from `get_hand_eval_flags`
+        # (the engine's own detection-modifier read) because Splash is
+        # class-3 all-zero in the trigger matrix BY DESIGN -- the matrix
+        # cannot answer this question.
+        scored_value=bool(flags.get("splash", False)),
+        held_value=any(held for _, held in counts.values())
+        or any(_has_held_enhancement(c) for c in hand),
+        play_away_lowest="j_raised_fist" in keys,
+    )
+
+
+def _scored_kicker_key(
+    counts: dict[int, tuple[int, int]],
+) -> Callable[[Card], tuple]:
+    """Descending kicker order under Splash: scored-channel candidacies
+    first, then EDITION presence, then `_keep_priority`'s (enhancement,
+    nominal).
+
+    The edition term is not in the taxonomy and cannot be: `trigger_match`
+    is a card x JOKER matrix, and an edition is a property of the card
+    itself -- `grep edition jackdaw/env/trigger_match.py` is empty by
+    design. But editions fire on the SCORED channel (`scoring.py`'s
+    per-scoring-card `card.get_edition()`), so under Splash a Polychrome
+    kicker is x1.5 mult and a Foil kicker is +50 chips. Without it this key
+    would rank a Polychrome 2 below a plain King -- precisely the
+    right-line/wrong-kicker miss K1 exists to kill. (The locked spec's
+    "chips + enhancement + scored-channel candidacy bits" omitted this;
+    caught in review 2026-07-16.)
+
+    Presence only, per the section header: which cards are in the set, not
+    what they are worth. Editions are scored-channel exclusively, so they
+    earn no term in the held-value key.
+    """
+
+    def key(card: Card) -> tuple:
+        return (
+            counts[id(card)][0],
+            1 if card.edition else 0,
+        ) + _keep_priority(card)
+
+    return key
+
+
+def _held_kicker_key(
+    counts: dict[int, tuple[int, int]],
+) -> Callable[[Card], tuple]:
+    """Held-value order: held-channel candidacies, then held-enhancement
+    presence, then `_keep_priority`. Sorted ASCENDING at the call site --
+    hypothesis 3 pads with the cards LEAST valuable held, so that the ones
+    held effects want (Baron's Kings, Shoot the Moon's Queens, Mime's
+    retriggers, Steel, Gold) stay in hand.
+
+    Editions earn no term here: they fire on the scored channel only, so a
+    Polychrome card is worth nothing held and is fair game as a kicker.
+    """
+
+    def key(card: Card) -> tuple:
+        return (
+            counts[id(card)][1],
+            1 if _has_held_enhancement(card) else 0,
+        ) + _keep_priority(card)
+
+    return key
+
+
+def _raised_fist_key(card: Card) -> tuple[int, int]:
+    """Ascending play-away order for Raised Fist's min term: lowest RANK ID
+    first (the handler's own comparison -- `nominal` would tie J/Q/K, which
+    the id distinguishes), Stone Cards last. Stones are excluded from the
+    handler's minimum, so playing one away cannot raise it -- it is never
+    the card this hypothesis wants to spend."""
+    stone = card.ability.get("effect") == "Stone Card"
+    return (1 if stone else 0, card.get_id())
+
+
+_HAND_TYPE_RANK: dict[str, int] = {
+    (ht.value if hasattr(ht, "value") else ht): len(HAND_ORDER) - i
+    for i, ht in enumerate(HAND_ORDER)
+}
+
+
+def _hand_type_rank(name) -> int:
+    """Higher = better. Unknown / "NULL" ranks below every real type."""
+    return _HAND_TYPE_RANK.get(name.value if hasattr(name, "value") else name, 0)
+
+
+def _type_upgrade_completion(
+    line: list[Card],
+    pool: list[Card],
+    need: int,
+    flags: dict[str, bool],
+) -> list[Card]:
+    """Greedy completion maximizing the DETECTED HAND TYPE, ties broken by
+    `_keep_priority`.
+
+    Hypothesis 5, and the only one that is not about what a kicker is worth
+    AS A CARD: the pad can change what the hand IS. The other four sort the
+    pool by a per-card key, so a pad that upgrades the hand type is
+    invisible to all of them.
+
+    The motivating miss (stage3_full_00001545, Four Fingers): the line is
+    the 4-card heart flush `QH 7H 5H 4H`, and padding with `6C` -- a CLUB,
+    which nominal-best ranks below `KC` and every other hypothesis ignores
+    -- makes it a STRAIGHT FLUSH, because under Four Fingers the flush
+    needs 4 hearts and the straight needs 4 of 7-6-5-4 and vanilla lets
+    those be different cards. 892 chips of regret, the largest single miss
+    in the arm.
+
+    NOT Four-Fingers-specific, so it is ungated: padding trips with a pair
+    makes a Full House, and nominal-best takes the two highest cards
+    instead. Templates cannot cover these because the winning set is the
+    UNION of two templates' cards -- no single predicate proposes it.
+
+    Presence only, per the section header: this ranks hand TYPES, never
+    magnitudes, and the exact evaluator still arbitrates. Detection is the
+    engine's own `get_best_hand` scan (as `_line_family` uses), so Splash
+    is ignored here and copy/compat rules come free.
+    """
+    cur = list(line)
+    remaining = list(pool)
+    for _ in range(need):
+        best_key: tuple | None = None
+        best_card: Card | None = None
+        for candidate in remaining:
+            hand_type, _, _ = get_best_hand(
+                cur + [candidate],
+                four_fingers=flags.get("four_fingers", False),
+                shortcut=flags.get("shortcut", False),
+                smeared=flags.get("smeared", False),
+            )
+            key = (_hand_type_rank(hand_type),) + _keep_priority(candidate)
+            if best_key is None or key > best_key:
+                best_key, best_card = key, candidate
+        if best_card is None:
+            break
+        cur.append(best_card)
+        # id() compared with `!=`, never `is not` (two large ints are
+        # separate objects, so `is not` is always True and the pick is
+        # never removed -- the greedy loop then re-picks it and emits the
+        # same card 5 times), and never list.remove (Card equality is
+        # value-based, so an Erratic deck's duplicate would drop the wrong
+        # copy -- the bug class of best_immediate_play's `held` filter).
+        remaining = [c for c in remaining if id(c) != id(best_card)]
+    return cur
+
+
+def _kicker_variants(
+    line: list[Card],
+    hand: list[Card],
+    gates: _KickerGates,
+    counts: dict[int, tuple[int, int]],
+    flags: dict[str, bool],
+) -> list[list[Card]]:
+    """Completions of `line` to 5 cards, one per live hypothesis about
+    where kicker value lives (see the section header). Deduped by card-
+    identity set, so on a plain board every hypothesis collapses onto
+    nominal-best and the line costs exactly one candidate.
+
+    Hypotheses:
+      1. inert / nominal-best -- the pre-K1 behaviour, always emitted.
+      2. scored-value (Splash only) -- kickers score, so prefer the ones
+         the most scored-channel effects list as candidates, then chips.
+      3. held-value -- retain the cards held effects want (Baron/Shoot the
+         Moon/Mime, Steel/Gold), i.e. pad with the cards LEAST valuable
+         held.
+      4. play-away-lowest -- exact for Raised Fist's min term.
+      5. type-upgrade -- the pad card can change the detected hand type
+         (FF straight flush, trips + pair -> full house); ungated, since
+         no board makes it structurally impossible.
+    """
+    if len(line) >= 5:
+        return [line]
+    need = 5 - len(line)
+    chosen = {id(c) for c in line}
+    pool = [c for c in hand if id(c) not in chosen]
+    if not pool:
+        return [line]
+
+    def _complete(key: Callable[[Card], tuple], *, best_first: bool) -> list[Card]:
+        return line + sorted(pool, key=key, reverse=best_first)[:need]
+
+    variants = [_complete(_keep_priority, best_first=True)]
+    if gates.scored_value:
+        variants.append(_complete(_scored_kicker_key(counts), best_first=True))
+    if gates.held_value:
+        variants.append(_complete(_held_kicker_key(counts), best_first=False))
+    if gates.play_away_lowest:
+        variants.append(_complete(_raised_fist_key, best_first=False))
+    variants.append(_type_upgrade_completion(line, pool, need, flags))
+
+    seen: set[frozenset[int]] = set()
+    unique: list[list[Card]] = []
+    for variant in variants:
+        key = frozenset(id(c) for c in variant)
+        if key not in seen:
+            seen.add(key)
+            unique.append(variant)
+    return unique
+
+
+def _line_family(
+    cards: list[Card], *, four_fingers: bool, shortcut: bool, smeared: bool
+) -> tuple[str, frozenset[int]]:
+    """(realized hand type, identity set of the cards FORMING the line),
+    from a SPLASH-AGNOSTIC scan of the played cards.
+
+    Deliberately NOT `score_hand`'s `scoring_cards`: under Splash every
+    played card scores, so each kicker variant of one line would report a
+    different scoring set -- a different family -- and the variants would
+    crowd `family_best` out of the genuinely distinct lines. That is
+    handoff pitfall #13 recreated by the fix, on exactly the boards the fix
+    targets. The engine's own detection scan ignores Splash, so variants of
+    a line collide into one family as intended, which is also what lets
+    them ride their line into the exact pass.
+
+    The card SET stays in the key (hand type alone would collapse a pair of
+    Kings and a pair of 3s into one family). `get_best_hand` is the
+    engine's own path and tolerates base-less Stone cards -- they group but
+    never emit, so a stone-only candidate falls back to a bare hand type.
+    """
+    hand_type, line_cards, _ = get_best_hand(
+        cards, four_fingers=four_fingers, shortcut=shortcut, smeared=smeared
+    )
+    return (hand_type, frozenset(id(c) for c in line_cards))
+
+
+SEATING_MAX_POOL = 9
+SEATING_BUDGET = 50
+
+
+def _seat_variants(
+    hold: list[Card],
+    hand: list[Card],
+    jokers: list[Card],
+    hand_levels: HandLevels,
+    blind,
+    rng: PseudoRandom,
+    game_state: dict | None,
+    blind_chips: int,
+) -> list[list[Card]]:
+    """Which 5 of a template's matching cards to SEAT, when it matches more
+    than 5. Returns the seatings worth carrying, best cheap-score first.
+
+    THE K3 TAIL BUG. A straight window normally matches exactly 5 cards and
+    `[:5]` is a no-op -- but Shortcut widens the window predicate and Four
+    Fingers adds shorter windows, so the hold OVERFLOWS and five seats must
+    be chosen from more candidates. That choice was
+    `sorted(hold, key=_keep_priority)[:5]` = (enhanced, nominal): JOKER-
+    BLIND. Measured (stage2_curated_00002127, Shortcut + Wee Joker): hold
+    `7S 6S 5S 4S 3C 2D`, seated `7-6-5-4-3`, truth `7-6-5-3-2` -- Wee pays
+    per 2 SCORED and the 2 was dropped for being the lowest card. It is also
+    the tail arm's hand-size gradient (capture 0.950 at n=9 decaying to
+    0.896 at n=12 while n=8 sits at 0.980): a bigger hand puts more cards
+    inside a widened window, so there is more to get wrong.
+
+    K1's hypotheses cannot reach this. They choose KICKERS, and they only
+    run when `len(playable) < 5` -- these lines are OVER five. A kicker sits
+    outside the line and swaps freely; a line member is LOAD-BEARING.
+
+    NO hypothesis, NO type filter, NO family dedupe -- all three were tried
+    in review and all three are the same mistake in different hats: they
+    discard a candidate on a PROXY for value (nominal rank / hand type /
+    line identity) before the scorer ever sees it, which is precisely the
+    bug being fixed. Instead: enumerate and let `_ranking_score` -- a real
+    joker- and held-aware `score_hand` -- rank them. The K spec's own point
+    is that ranking was never wrong, generation was starving it. Validity
+    needs no check either: an illegal seating (`7-6-5-4-2`, whose 4->2 gap
+    exceeds Shortcut's one) simply scores as High Card and loses on merit.
+
+    COST (measured, tail states): `_ranking_score` 0.26ms, exact
+    `evaluate_value` 2.85ms, mean 8.6 seatings/state, and 80% of tail states
+    have NO overflowing hold at all. Ranking every seating costs ~2ms/node;
+    the riders cost ~24ms/node. A node goes ~76ms -> ~102ms (+35%), tail
+    labels 0.7-10s -> ~0.9-13.5s, and the tail is 10% of the regen => ~+3.5%
+    overall. The cost is the RIDING, not the enumeration.
+
+    `SEATING_BUDGET` therefore is NOT an average-case lever (the mean, 8.6,
+    never reaches it): it bounds the worst node, where 62 seatings would
+    take that node to ~3x. Cutting by cheap score is a real risk -- the
+    cheap tier is fixed-order, so an order-sensitive board (Photograph,
+    Hanging Chad) can mis-rank -- but at 50 the cheap tier only excludes
+    what it ranked below fifty others, which is a budget, not the
+    "cheap-arbitration-is-final" pattern the spec rejects (that was
+    top-N-by-cheap-score deciding the answer). Everything surviving RIDES
+    into the exact pass, which arbitrates with the full ordering search.
+    `SEATING_MAX_POOL` is a guard, not a mechanism: measured max hold is 9,
+    so it does not bind today.
+    """
+    if len(hold) <= 5:
+        return [list(hold)]
+
+    pool = sorted(hold, key=_keep_priority, reverse=True)[:SEATING_MAX_POOL]
+    scored: list[tuple[float, list[Card]]] = []
+    for combo in itertools.combinations(pool, 5):
+        cards = list(combo)
+        ids = {id(c) for c in cards}
+        held = [c for c in hand if id(c) not in ids]
+        result, _ = _ranking_score(
+            cards, held, jokers, hand_levels, blind, rng, game_state, blind_chips
+        )
+        scored.append((result.total, cards))
+    scored.sort(key=lambda t: -t[0])
+    return [cards for _, cards in scored[:SEATING_BUDGET]]
+
+
 def prescreen_play_candidates(
     hand: list[Card],
     jokers: list[Card],
@@ -612,9 +1167,11 @@ def prescreen_play_candidates(
     *,
     four_fingers: bool = False,
     shortcut: bool = False,
+    smeared: bool = False,
     top_k: int = PRESCREEN_TOP_K,
     game_state: dict | None = None,
     blind_chips: int = 0,
+    eval_flags: dict[str, bool] | None = None,
 ) -> list[list[Card]]:
     """Template-derived candidate play subsets for big hands, ranked
     cheaply and selected FAMILY-DIVERSE: the best candidate of each family
@@ -635,21 +1192,31 @@ def prescreen_play_candidates(
     accepts: ranking precision, not label precision -- the top-k get the
     full ordering search afterwards.
 
+    `top_k` counts LINES (families), not returned candidates: every
+    surviving line carries ALL of its kicker variants into the exact pass,
+    which is what arbitrates between them (K1). So the returned list is
+    generally LONGER than `top_k` -- on a plain board the variants dedupe
+    to one apiece and it approaches `top_k`, on a Splash/Raised-Fist board
+    it fans out. Budget math: ~5 lines x ~3 variants ~= 15 candidates
+    against brute force's 218.
+
     A family is the candidate's REALIZED scoring line -- (detected hand
-    type, scoring-card identity set) from the cheap evaluation -- not the
-    template that spawned it. Template identity is the wrong key: kicker
-    padding lets every weak template piggyback a dominant line (a lone
-    Queen padded with four held Kings scores as the SAME four-of-a-kind
+    type, line-card identity set) from a SPLASH-AGNOSTIC scan of the played
+    cards (`_line_family`) -- not the template that spawned it, and not
+    `score_hand`'s `scoring_cards`. Template identity is the wrong key:
+    kicker padding lets every weak template piggyback a dominant line (a
+    lone Queen padded with four held Kings scores as the SAME four-of-a-kind
     as the quads template's own candidate), so template-keyed diversity
     would fill every slot with re-labeled copies of one line -- the exact
-    crowding the family pass exists to prevent. Keying by what the
-    candidate actually scores as collapses those copies into one family
-    while keeping genuinely distinct lines (each flush suit, each straight
-    line, each rank group) separate for free.
+    crowding the family pass exists to prevent. `scoring_cards` is the
+    wrong key for the mirror-image reason: under Splash every played card
+    scores, so each kicker variant would report a different scoring set and
+    the variants would crowd out the distinct lines instead.
 
-    Ordering is PREFIX-STABLE in `top_k`: the first j entries of a
-    `top_k=k` call equal the `top_k=j` call for j < k -- the validation
-    harness scores multiple k-cuts from one call and relies on this.
+    Ordering is PREFIX-STABLE in `top_k` at LINE granularity: the
+    `top_k=j` call's output is a list PREFIX of the `top_k=k` call's for
+    j < k. It is no longer indexable by k (entry j is not line j), so a
+    caller wanting a j-line cut must pass `top_k=j` rather than slice.
 
     PAIR PIN: the best already-realized rank line (pair or better) is
     promoted to index 1 of the ordering, so every k>=2 cut evaluates it.
@@ -659,21 +1226,46 @@ def prescreen_play_candidates(
 
     Candidates per template: the template's matching cards capped at 5
     (highest keep-priority first), plus -- when that leaves room -- the
-    same cards padded to 5 with the best non-matching kickers. The
-    fallback candidate (top 5 of the whole hand by keep-priority) covers
-    hands where no template matches anything useful (e.g. base-less stone
-    cards, which no rank/suit predicate can see).
-    """
-    templates = build_templates(hand, four_fingers=four_fingers, shortcut=shortcut)
+    same cards padded to 5 under each live kicker hypothesis (see the K1
+    section header). The fallback candidate (top 5 of the whole hand by
+    keep-priority) covers hands where no template matches anything useful
+    (e.g. base-less stone cards, which no rank/suit predicate can see).
 
-    def _kicker_pad(cards: list[Card]) -> list[Card]:
-        if len(cards) >= 5:
-            return cards
-        chosen = {id(c) for c in cards}
-        kickers = sorted(
-            (c for c in hand if id(c) not in chosen), key=_keep_priority, reverse=True
-        )
-        return cards + kickers[: 5 - len(cards)]
+    `eval_flags` is `get_hand_eval_flags(jokers)` from the caller (which
+    has already computed it); it sources the Splash gate and the family
+    scan's smeared handling. None = compute it here.
+    """
+    flags = eval_flags if eval_flags is not None else get_hand_eval_flags(jokers)
+    # This function takes the detection flags TWICE -- as three booleans
+    # (they reach `build_templates`) and inside `eval_flags` (it reaches the
+    # kicker gates and the family scan). Nothing made them agree, so a
+    # caller could pass `eval_flags` with smeared=True and leave the boolean
+    # at its default, and the box would silently be built from raw-suit
+    # templates: exactly the K3 arm-C miss that survived the Bug C fix,
+    # because BOTH validation harnesses did precisely this. Same shape as
+    # the `jokers=None` bug one layer down -- a call site quietly not
+    # forwarding what it holds. Loud, per the Riff-raff precedent.
+    for _name, _passed in (
+        ("four_fingers", four_fingers),
+        ("shortcut", shortcut),
+        ("smeared", smeared),
+    ):
+        if bool(flags.get(_name, False)) != bool(_passed):
+            raise ValueError(
+                f"prescreen_play_candidates: {_name}={_passed} contradicts "
+                f"eval_flags[{_name!r}]={flags.get(_name)}. The booleans build the "
+                "templates and eval_flags gates the kickers; disagreeing means the "
+                "box is built for a different board than it is scored against."
+            )
+    templates = build_templates(
+        hand, four_fingers=four_fingers, shortcut=shortcut, smeared=smeared
+    )
+    views = _resolved_joker_views(jokers)
+    counts = _card_channel_counts(hand, views, game_state, flags)
+    gates = _kicker_gates(hand, views, flags, counts)
+
+    def _variants(cards: list[Card]) -> list[list[Card]]:
+        return _kicker_variants(cards, hand, gates, counts, flags)
 
     raw: list[list[Card]] = []
     for template in templates:
@@ -682,16 +1274,30 @@ def prescreen_play_candidates(
             continue
         playable = sorted(hold, key=_keep_priority, reverse=True)[:5]
         raw.append(playable)
+        if len(hold) > 5:
+            # Overflowing hold: `playable` above is only ONE of the possible
+            # seatings, and it is the joker-blind one. Emit the rest ranked
+            # by the real scorer (K3 tail fix; see `_seat_variants`). They
+            # are distinct FAMILIES, not kicker variants of one line, so
+            # they compete for top_k slots on merit rather than riding for
+            # free -- which is what top_k is for, and capture-vs-k is the
+            # readout that says whether k needs raising.
+            raw.extend(
+                _seat_variants(
+                    hold, hand, jokers, hand_levels, blind, rng, game_state, blind_chips
+                )
+            )
         if len(playable) < 5:
-            # Padded variant: pair+kickers. (Historically claimed to also
-            # cover full house / two pair "emerging" from a rank hold padded
-            # with another rank's cards -- FALSE in practice: padding picks
-            # kickers by nominal priority, so the second rank group is only
-            # chosen when it happens to outrank every loose high card. All
-            # 17/48 generation holes in the B5 validation were exactly the
-            # missing combinations; see the rank-combination pass below.)
-            raw.append(_kicker_pad(playable))
-    raw.append(_kicker_pad([]))  # template-free fallback
+            # Padded variants: line + kickers, one per live hypothesis (K1).
+            # (Historically claimed to also cover full house / two pair
+            # "emerging" from a rank hold padded with another rank's cards --
+            # FALSE in practice: padding picks kickers by nominal priority,
+            # so the second rank group is only chosen when it happens to
+            # outrank every loose high card. All 17/48 generation holes in
+            # the B5 validation were exactly the missing combinations; see
+            # the rank-combination pass below.)
+            raw.extend(_variants(playable))
+    raw.extend(_variants([]))  # template-free fallback
 
     # Rank-line COMBINATIONS (B5 widening, 2026-07-15): two pair and full
     # house are cross-GROUP lines no single-rank template can propose.
@@ -713,7 +1319,7 @@ def prescreen_play_candidates(
     for g1, g2 in itertools.permutations(multi, 2):
         two_pair = g1[:2] + g2[:2]
         raw.append(two_pair)
-        raw.append(_kicker_pad(list(two_pair)))
+        raw.extend(_variants(list(two_pair)))
         if len(g1) >= 3:
             raw.append(g1[:3] + g2[:2])  # full house
 
@@ -724,53 +1330,92 @@ def prescreen_play_candidates(
     # accumulation; see evaluate_value's clone note). Family = the realized
     # scoring line (see docstring), mapped back from the scored CLONES to
     # original card identity so identical lines actually collide.
-    seen_sets: set[frozenset[int]] = set()
-    scored: list[tuple[tuple, list[Card], float]] = []
+    # MAX OVER EMITTED ORDERS, not first-wins (K3, 2026-07-17).
+    # `_ranking_score` is FIXED-ORDER by design (searching orderings is the
+    # exact pass's job), so it scores whatever order the generator emitted.
+    # Deduping by card-identity SET and keeping the FIRST therefore made a
+    # family's cheap rank a lottery decided by `itertools` ordering.
+    # Measured (stage2_curated_00002797; Photograph x2 on the first face
+    # scored + Hanging Chad retriggering the first card): the
+    # `permutations(multi, 2)` pass yields (threes, kings) BEFORE
+    # (kings, threes), so the full house was first emitted as
+    # `3S 3C 13H 13C 13D` -> 1408, and the kings-first emission of the SAME
+    # FIVE CARDS -> 4080 arrived later and was skipped. At 1408 it ranked
+    # ~7th and was cut at top_k=5, so the exact pass -- whose ordering
+    # search would have found 4080 -- never saw a FULL HOUSE at all; it lost
+    # to a 3008 straight.
+    # The generator already emits such sets in several orders, so taking the
+    # MAX recovers the good one for free. A canonical sort was rejected: any
+    # fixed order is a guess (keep-priority-descending suits Photograph, and
+    # would bury a joker that wants a low card first), so it trades one
+    # arbitrary order for another. This invents nothing and only uses orders
+    # the generator produced. It is NOT an ordering search and must not
+    # become one -- that stays the exact pass's job.
+    # GATED on `_needs_permutation_search`, and that gate is not an
+    # optimization but the difference between viable and not. `raw` is dense
+    # with duplicate emissions (kicker variants of different templates
+    # coincide constantly -- see the rank-combination note above), so
+    # re-scoring every one of them costs 7x at n=8 (16.9 -> 117.4 ms/state,
+    # measured), which would leave the prescreen barely beating the 56-subset
+    # brute force it exists to replace -- and n=8 takes this path the moment
+    # PRESCREEN_HAND_LIMIT is deleted. But when NO order-sensitive
+    # contributor is present, every order of a set scores IDENTICALLY, so
+    # first-wins is already exact and re-scoring buys nothing. Re-score only
+    # when order can actually matter (the same predicate that decides whether
+    # the exact pass bothers with a permutation search).
+    # `_ranking_score` is untouched, so B7's discard-side sweep does not move.
+    best_by_set: dict[frozenset[int], tuple[float, list[Card], tuple]] = {}
     for cards in raw:
-        key = frozenset(id(c) for c in cards)
-        if not cards or key in seen_sets:
+        if not cards:
             continue
-        seen_sets.add(key)
+        key = frozenset(id(c) for c in cards)
+        if key in best_by_set and not _needs_permutation_search(cards, jokers):
+            continue
         held = [c for c in hand if id(c) not in key]
-        cheap, clone_to_orig = _ranking_score(
+        cheap, _ = _ranking_score(
             cards, held, jokers, hand_levels, blind, rng, game_state, blind_chips
         )
-        family = (
-            cheap.hand_type,
-            frozenset(
-                id(clone_to_orig.get(id(c), c)) for c in cheap.scoring_cards
-            ),
-        )
-        scored.append((family, cards, cheap.total))
+        prev = best_by_set.get(key)
+        if prev is None:
+            # The family is a property of the SET (a splash-agnostic scan),
+            # so it is order-invariant -- compute it once per set, not once
+            # per emission.
+            family = _line_family(
+                cards,
+                four_fingers=four_fingers,
+                shortcut=shortcut,
+                smeared=bool(flags.get("smeared", False)),
+            )
+            best_by_set[key] = (cheap.total, cards, family)
+        elif cheap.total > prev[0]:
+            best_by_set[key] = (cheap.total, cards, prev[2])
+    scored = [(family, cards, val) for val, cards, family in best_by_set.values()]
     scored.sort(key=lambda t: t[2], reverse=True)
 
-    families_seen: set[tuple] = set()
-    family_best: list[list[Card]] = []
-    fills: list[list[Card]] = []
-    pair_line: list[Card] | None = None
+    # Group variants under their line. `scored` is best-first, and dicts
+    # preserve insertion order, so a family's rank IS its best variant's
+    # cheap rank, and each family's variants stay best-first within it.
+    by_family: dict[tuple, list[list[Card]]] = {}
     for family, cards, _val in scored:
-        if family not in families_seen:
-            families_seen.add(family)
-            family_best.append(cards)
-            if pair_line is None and family[0] in _RANK_LINE_TYPES:
-                pair_line = cards
-        else:
-            fills.append(cards)
-    ordered = family_best + fills
+        by_family.setdefault(family, []).append(cards)
+    families = list(by_family)
 
     # Pair pin (user call, 2026-07-14): the best ALREADY-REALIZED rank line
     # (pair or better) is guaranteed a slot in every k>=2 cut. Its cheap
     # rank is weak -- base score of a low pair loses to any flashy draw
     # line -- but it is the one line that needs no draw and no luck, and
     # rank-triggered jokers can make its exact value far exceed its cheap
-    # rank. Promoted to index 1 (never displacing the overall best) so the
-    # ordering stays a single list and prefix-stability in top_k survives.
-    if pair_line is not None:
-        idx = next(i for i, c in enumerate(ordered) if c is pair_line)
-        if idx > 1:
-            ordered.pop(idx)
-            ordered.insert(1, pair_line)
-    return ordered[:top_k]
+    # rank. Promoted to index 1 (never displacing the overall best).
+    pair_idx = next(
+        (i for i, f in enumerate(families) if f[0] in _RANK_LINE_TYPES), None
+    )
+    if pair_idx is not None and pair_idx > 1:
+        families.insert(1, families.pop(pair_idx))
+
+    out: list[list[Card]] = []
+    for family in families[:top_k]:
+        out.extend(by_family[family])
+    return out
 
 
 def best_immediate_play(
@@ -785,37 +1430,38 @@ def best_immediate_play(
     search_orderings: bool = True,
     prescreen_top_k: int | None = None,
 ) -> tuple[list[Card], ScoreResult]:
-    """No discards being considered -- brute force over all non-empty
-    subsets of size <=5 (cheap: C(8,5)=56 worst case). Above
-    PRESCREEN_HAND_LIMIT cards, brute force is replaced by exact evaluation
-    of the prescreened template-derived candidates only (see
-    `prescreen_play_candidates`); `prescreen_top_k` overrides the module
-    default k there (None = PRESCREEN_TOP_K).
+    """No discards being considered. Exact evaluation of the prescreened
+    template-derived candidates (see `prescreen_play_candidates`);
+    `prescreen_top_k` overrides the module default k there
+    (None = PRESCREEN_TOP_K).
+
+    The prescreen runs at EVERY hand size (K3, 2026-07-17): the old
+    `n > PRESCREEN_HAND_LIMIT` seam is deleted, so the label is uniformly
+    "exact among prescreened candidates" rather than "brute at n<=8, screened
+    above". That seam was where B5's residual hid -- n=8 brute-forcing meant
+    the box was never measured there. Gate + accepted residuals: see the
+    PRESCREEN_TOP_K block.
 
     `search_orderings` -- see `evaluate_value`; forwarded per subset."""
     best_subset: list[Card] | None = None
     best_result: ScoreResult | None = None
-    n = len(hand)
 
-    if n > PRESCREEN_HAND_LIMIT:
-        flags = get_hand_eval_flags(jokers)
-        candidates = prescreen_play_candidates(
-            hand,
-            jokers,
-            hand_levels,
-            blind,
-            rng,
-            four_fingers=flags["four_fingers"],
-            shortcut=flags["shortcut"],
-            top_k=prescreen_top_k if prescreen_top_k is not None else PRESCREEN_TOP_K,
-            game_state=game_state,
-            blind_chips=blind_chips,
-        )
-        subset_pools: list = [candidates]
-    else:
-        subset_pools = [
-            itertools.combinations(hand, size) for size in range(1, min(5, n) + 1)
-        ]
+    flags = get_hand_eval_flags(jokers)
+    candidates = prescreen_play_candidates(
+        hand,
+        jokers,
+        hand_levels,
+        blind,
+        rng,
+        four_fingers=flags["four_fingers"],
+        shortcut=flags["shortcut"],
+        smeared=flags["smeared"],
+        top_k=prescreen_top_k if prescreen_top_k is not None else PRESCREEN_TOP_K,
+        game_state=game_state,
+        blind_chips=blind_chips,
+        eval_flags=flags,
+    )
+    subset_pools: list = [candidates]
 
     for pool in subset_pools:
         for combo in pool:
@@ -852,6 +1498,7 @@ def solve_discard_decision(
     *,
     four_fingers: bool = False,
     shortcut: bool = False,
+    smeared: bool = False,
 ) -> DiscardChoice:
     """One-step decision: compare playing now vs. discarding toward each
     template. Does NOT recurse across multiple discards left (see
@@ -874,7 +1521,9 @@ def solve_discard_decision(
     if discards_left <= 0:
         return best_choice
 
-    templates = build_templates(hand, four_fingers=four_fingers, shortcut=shortcut)
+    templates = build_templates(
+        hand, four_fingers=four_fingers, shortcut=shortcut, smeared=smeared
+    )
 
     for template in templates:
         hold, discard = construct_hold(hand, template)
@@ -882,6 +1531,17 @@ def solve_discard_decision(
         still_needed = max(0, template.needed - already_have)
         discard, kept = cap_discard(discard)  # engine caps a discard at 5 cards
         draws = len(discard)  # cards redrawn = cards discarded (hand size held constant)
+
+        # A legal discard is 1-5 cards. `cap_discard` clamps the UPPER bound;
+        # this clamps the LOWER. The discard here is a template COMPLEMENT
+        # (hand minus the matching `hold`), not a move chosen from the legal
+        # action space, so a template matching the WHOLE hand yields discard=[]
+        # -- "discard nothing", which the engine cannot execute. That is the
+        # same "solver proposes an action the engine can't run" class as the
+        # 6-8 card discard `cap_discard` was added for, just the other bound.
+        # See `rank_templates_cheaply` for the full root-cause note.
+        if not discard:
+            continue
 
         if still_needed == 0:
             # already completed -- this degenerates to "play now" on this
@@ -1107,6 +1767,7 @@ def rank_templates_cheaply(
     *,
     four_fingers: bool = False,
     shortcut: bool = False,
+    smeared: bool = False,
     top_k: int = 4,
     jokers: list[Card] | None = None,
     game_state: dict | None = None,
@@ -1141,7 +1802,9 @@ def rank_templates_cheaply(
     """
     from jackdaw.engine.scoring import score_hand_base
 
-    templates = build_templates(hand, four_fingers=four_fingers, shortcut=shortcut)
+    templates = build_templates(
+        hand, four_fingers=four_fingers, shortcut=shortcut, smeared=smeared
+    )
     scored: list[tuple[Template, list[Card], list[Card], list[Card], float, float, int]] = []
 
     for template in templates:
@@ -1150,8 +1813,65 @@ def rank_templates_cheaply(
         discard, kept = cap_discard(discard)
         draws = len(discard)
 
+        # LOWER-BOUND CLAMP on the discard (K3, 2026-07-18). A legal discard
+        # is 1-5 cards; `cap_discard` enforces <=5, this enforces >=1. The
+        # discard is a template COMPLEMENT (hand minus `hold`), not a move
+        # picked from the legal action space, so a template that matches the
+        # WHOLE hand yields discard=[] -- an illegal "discard nothing". This
+        # is the mirror of the 6-8 card discard bug `cap_discard` was added
+        # for: the solver derives discards as `hand - hold` with no size
+        # bound, so it can leave BOTH ends of the engine's 1..5 range.
+        #
+        # It fires on a Shortcut-widened straight window (or FF-shortened,
+        # or an 8-card single-suit flush) that swallows every card:
+        # still_needed=0, nothing left to throw. Two facts make this a prune,
+        # not a value call:
+        #   1. "Discard nothing" is ILLEGAL -- reached the executability
+        #      check as GenerationError on 2 stage2 relabel seeds
+        #      (00001300 FF+Shortcut, 00002997 Jolly+Shortcut).
+        #   2. It is a PHANTOM of a real discard: it keeps all cards and
+        #      recurses at discards_left-1, and a real discard toward the
+        #      same completion reaches the identical continuation one discard
+        #      cheaper, so it TIES the phantom's p_clear (measured: 00001300
+        #      empty branch 0.4442 vs executable straight_6-9 0.4445;
+        #      00002997 both 1.0). Pruning routes the label to that real
+        #      discard -- the chain here genuinely favors discarding and the
+        #      fix surfaces the LEGAL spelling, it does not suppress it.
+        # Placed before scoring so the freed shortlist slot goes to a real
+        # candidate; without that, the phantom -- cheap-rank 0, since a
+        # complete hand scores highest -- both starves a real discard AND
+        # wins the p_clear tie by being first under the strict `>` selection.
+        #
+        # LATENT UNTIL K3: score_hand got jokers=None (03e288d), so Shortcut
+        # never DETECTED -> the completed straight scored as High Card ->
+        # low cheap rank AND low p_clear, so the phantom neither floated to
+        # the front nor won. The engine fix simultaneously floated it and
+        # inflated its p_clear; that is why the 2026-07-16 brute run had 0
+        # failures across 4000.
+        if not discard:
+            continue
+
         if still_needed == 0:
             p_reach = 1.0
+            # KNOWN GAP, deliberately unfixed (K3, 2026-07-17): when a hold
+            # OVERFLOWS (Shortcut widens a straight window, Four Fingers adds
+            # shorter ones, a 6+ card flush), `[:5]` seats the first five in
+            # HAND ORDER -- not even `_keep_priority`, let alone joker-aware.
+            # Same class as the play-side seat blindness that failed K3's
+            # tail arm (capture 0.915; hold `7S 6S 5S 4S 3C 2D` seated
+            # `7-6-5-4-3` when Wee Joker wanted the 2), and the play side is
+            # being fixed by scoring the seatings with `_ranking_score`.
+            #
+            # NOT fixed here because the K spec says the discard side is
+            # MEASURE-FIRST, no code change: its completions are IDEALIZED
+            # DRAWS, so a seating hypothesis here is a hypothesis about
+            # hypothetical cards. It is also a label-semantics change at
+            # every hand size, so it would drag B7's whole validated sweep
+            # with it (`validate_discard_ranking_sweep.py`, the depth-gate
+            # rationale) for a benefit nobody has measured.
+            # The tripwire is the spec's: rerun that sweep on stage2-config
+            # density and look for the directional signature (dropping
+            # discards whose value lives in kickers/held cards).
             eval_cards = hold[:5]
         elif template.name.startswith("straight_"):
             held_ranks = {_card_rank_id(c) for c in hold}
@@ -1341,6 +2061,7 @@ def solve_hand_turn(
     *,
     four_fingers: bool = False,
     shortcut: bool = False,
+    smeared: bool = False,
     top_k: int | None = None,
     hand_size: int | None = None,
     joker_aware: bool = True,
@@ -1413,7 +2134,7 @@ def solve_hand_turn(
     effective_top_k = top_k if top_k is not None else _discard_shortlist_k(discards_left)
     candidates = rank_templates_cheaply(
         hand, deck, hand_levels, blind, rng,
-        four_fingers=four_fingers, shortcut=shortcut, top_k=effective_top_k,
+        four_fingers=four_fingers, shortcut=shortcut, smeared=smeared, top_k=effective_top_k,
         jokers=jokers, game_state=game_state, blind_chips=blind_chips,
         joker_aware=joker_aware,
     )
@@ -1430,7 +2151,8 @@ def solve_hand_turn(
             hit_choice = solve_hand_turn(
                 hit_hand, jokers, hand_levels, blind, rng, hit_deck, chips_needed,
                 hands_left, discards_left - 1, future_samples, game_state, blind_chips,
-                four_fingers=four_fingers, shortcut=shortcut, top_k=top_k, hand_size=hand_size,
+                four_fingers=four_fingers, shortcut=shortcut, smeared=smeared, top_k=top_k,
+                hand_size=hand_size,
                 joker_aware=joker_aware,
             )
             p_clear = hit_choice.p_clear
@@ -1441,7 +2163,8 @@ def solve_hand_turn(
             hit_choice = solve_hand_turn(
                 hit_hand, jokers, hand_levels, blind, rng, hit_deck, chips_needed,
                 hands_left, discards_left - 1, future_samples, game_state, blind_chips,
-                four_fingers=four_fingers, shortcut=shortcut, top_k=top_k, hand_size=hand_size,
+                four_fingers=four_fingers, shortcut=shortcut, smeared=smeared, top_k=top_k,
+                hand_size=hand_size,
                 joker_aware=joker_aware,
             )
 
@@ -1451,7 +2174,8 @@ def solve_hand_turn(
             miss_choice = solve_hand_turn(
                 miss_hand, jokers, hand_levels, blind, rng, miss_deck, chips_needed,
                 hands_left, discards_left - 1, future_samples, game_state, blind_chips,
-                four_fingers=four_fingers, shortcut=shortcut, top_k=top_k, hand_size=hand_size,
+                four_fingers=four_fingers, shortcut=shortcut, smeared=smeared, top_k=top_k,
+                hand_size=hand_size,
                 joker_aware=joker_aware,
             )
             p_clear = p_reach * hit_choice.p_clear + (1 - p_reach) * miss_choice.p_clear
@@ -1484,6 +2208,7 @@ def solve_hand_for_ante_clear(
     *,
     four_fingers: bool = False,
     shortcut: bool = False,
+    smeared: bool = False,
     top_k: int | None = None,
     mc_seed: str | None = None,
 ) -> AnteClearChoice:
@@ -1521,7 +2246,7 @@ def solve_hand_for_ante_clear(
     return solve_hand_turn(
         hand, jokers, hand_levels, blind, rng, deck, chips_needed, hands_left, discards_left,
         future_samples, game_state, blind_chips,
-        four_fingers=four_fingers, shortcut=shortcut, top_k=top_k,
+        four_fingers=four_fingers, shortcut=shortcut, smeared=smeared, top_k=top_k,
     )
 
 

@@ -1,12 +1,13 @@
 """Tests for the big-hand play prescreen (B5).
 
 `best_immediate_play` is C(n,5) exact evaluations per call -- fine at n=8
-(56), prohibitive at the width-40 obs cap. Above PRESCREEN_HAND_LIMIT it
-evaluates only the top-k template-derived candidates from
-`prescreen_play_candidates`, selected family-diverse (handoff pitfall #13:
-naive top-k returns k variants of one dominant line). These tests pin:
+(56), prohibitive at the width-40 obs cap. It evaluates only the top-k
+template-derived candidates from `prescreen_play_candidates`, selected
+family-diverse (handoff pitfall #13: naive top-k returns k variants of one
+dominant line). K3 deleted PRESCREEN_HAND_LIMIT, so this happens at EVERY
+hand size. These tests pin:
 
-  - the n<=8 path is byte-identical brute force (prescreen never consulted);
+  - the prescreen runs at every hand size and still finds the brute answer;
   - the prescreen finds the same best play as full brute force on
     constructed big hands where the answer is unambiguous;
   - family diversity (a dominant flush cannot crowd out a rank line);
@@ -22,7 +23,6 @@ import itertools
 
 import hand_solver
 from hand_solver import (
-    PRESCREEN_HAND_LIMIT,
     best_immediate_play,
     evaluate_value,
     prescreen_play_candidates,
@@ -96,14 +96,25 @@ def _quads_and_flush_hand() -> list[Card]:
 
 
 class TestPathSelection:
-    def test_at_limit_prescreen_never_consulted(self, monkeypatch):
-        def boom(*args, **kwargs):
-            raise AssertionError("prescreen must not run at n <= PRESCREEN_HAND_LIMIT")
+    def test_small_hands_are_prescreened_too(self, monkeypatch):
+        """PRESCREEN_HAND_LIMIT is DELETED (K3): one path at every hand size.
+        The old test asserted the opposite -- that the prescreen must never
+        run at n <= 8 -- and that seam is exactly where B5's residual hid,
+        since a brute-forcing n=8 meant the box was never measured there.
 
-        monkeypatch.setattr(hand_solver, "prescreen_play_candidates", boom)
-        hand = _flush_plus_junk_hand()[:PRESCREEN_HAND_LIMIT]
+        The box must still find the brute-force answer on this board.
+        """
+        calls = []
+        real = hand_solver.prescreen_play_candidates
+        monkeypatch.setattr(
+            hand_solver,
+            "prescreen_play_candidates",
+            lambda *a, **kw: (calls.append(1), real(*a, **kw))[1],
+        )
+        hand = _flush_plus_junk_hand()[:8]
         hand_levels, blind, rng = _fixtures()
         subset, result = best_immediate_play(hand, [], hand_levels, blind, rng)
+        assert calls, "prescreen must run at every hand size now"
         assert 1 <= len(subset) <= 5
         assert result.total == _brute_force_best(hand, [])
 
@@ -136,14 +147,36 @@ class TestPrescreenQuality:
         _, result = best_immediate_play(hand, [], hand_levels, blind, rng)
         assert result.total == _brute_force_best(hand, [])
 
-    def test_candidates_capped_and_nonempty(self):
+    def test_candidates_nonempty_and_well_formed(self):
+        """`top_k` counts LINES, not returned candidates (K1): every
+        surviving line carries all its kicker variants into the exact pass,
+        so the returned list is generally LONGER than k. What must hold is
+        that it is non-empty, monotone in k, well-formed, and nowhere near
+        brute force's 218 -- the budget the prescreen exists to buy."""
+        hand = _quads_and_flush_hand()
+        hand_levels, blind, rng = _fixtures()
+        previous = 0
+        for k in (1, 3, 8):
+            candidates = prescreen_play_candidates(hand, [], hand_levels, blind, rng, top_k=k)
+            assert candidates
+            assert len(candidates) >= previous  # more lines never means fewer candidates
+            previous = len(candidates)
+            assert len(candidates) < 218, "prescreen must stay far under brute force"
+            for cards in candidates:
+                assert 1 <= len(cards) <= 5
+                assert len({id(c) for c in cards}) == len(cards)  # no card used twice
+
+    def test_line_count_respects_top_k(self):
+        """The thing k actually caps now: distinct FAMILIES represented."""
         hand = _quads_and_flush_hand()
         hand_levels, blind, rng = _fixtures()
         for k in (1, 3, 8):
             candidates = prescreen_play_candidates(hand, [], hand_levels, blind, rng, top_k=k)
-            assert 1 <= len(candidates) <= k
-            for cards in candidates:
-                assert 1 <= len(cards) <= 5
+            families = {
+                hand_solver._line_family(cards, four_fingers=False, shortcut=False, smeared=False)
+                for cards in candidates
+            }
+            assert len(families) <= k
 
 
 class TestFamilyDiversity:
@@ -165,14 +198,20 @@ class TestFamilyDiversity:
         assert heart_flushes, "the heart flush line must survive family-diverse selection"
 
     def test_prefix_stable_in_top_k(self):
+        """Prefix stability survives K1, at LINE granularity: a `top_k=j`
+        call is a list PREFIX of a `top_k=k` call for j < k. It is no
+        longer INDEXABLE by k (entry j is not line j, since variants ride
+        their line), so a caller wanting a j-line cut must pass top_k=j
+        rather than slice -- which is why the validation harnesses cannot
+        keep scoring k-cuts from one max-k call (K2)."""
         hand = _quads_and_flush_hand()
         hand_levels, blind, rng = _fixtures()
         full = prescreen_play_candidates(hand, [], hand_levels, blind, rng, top_k=8)
+        full_ids = [[id(c) for c in cards] for cards in full]
         for j in (1, 3, 5):
             prefix = prescreen_play_candidates(hand, [], hand_levels, blind, rng, top_k=j)
-            assert [[id(c) for c in cards] for cards in prefix] == [
-                [id(c) for c in cards] for cards in full[:j]
-            ]
+            prefix_ids = [[id(c) for c in cards] for cards in prefix]
+            assert prefix_ids == full_ids[: len(prefix_ids)]
 
 
 class TestJokerAwareRanking:

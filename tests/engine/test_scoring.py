@@ -548,3 +548,226 @@ class TestIdolIntegration:
             game_state={"idol_card": idol_card},
         )
         assert r.total == base.total
+
+
+# ============================================================================
+# N. Hand-eval modifier flags reach the SCORING pipeline (Throwback class)
+# ============================================================================
+
+
+class TestHandEvalFlagsIntegration:
+    """Four Fingers / Shortcut / Smeared must change hand DETECTION inside
+    `score_hand`, not merely inside `hand_eval`.
+
+    Regression for a real bug: `score_hand` called
+    `evaluate_hand(played_cards, jokers=None)` -- a copy-paste carryover
+    from `score_hand_base` (the deliberately jokerless scorer, 09105e3)
+    into the joker-aware scorer (7633d34). `evaluate_hand` derives every
+    detection flag from that list, so all three jokers were INERT
+    everywhere: in-game, in the env, and in every solver label. Splash
+    alone survived, because `score_hand` re-implements it independently at
+    Phase 3c.
+
+    These assertions deliberately go through `score_hand` and NOT through
+    `evaluate_hand`/`get_flush`/`evaluate_poker_hand`. Unit tests at those
+    levels already existed and PASSED throughout -- the defect was purely
+    in the integration seam, which is the same gap that hid The Idol and
+    Throwback itself. A test that constructs the flags by hand cannot fail
+    on this bug and is worthless here.
+    """
+
+    def _score(self, played, jokers):
+        return score_hand(
+            played,
+            [],
+            jokers,
+            HandLevels(),
+            _small_blind(),
+            PseudoRandom("T"),
+        )
+
+    def test_four_fingers_four_card_straight_detected(self):
+        played = [
+            _card("Clubs", "10"),
+            _card("Diamonds", "9"),
+            _card("Diamonds", "8"),
+            _card("Clubs", "7"),
+        ]
+        assert self._score(played, []).hand_type == "High Card"
+        assert self._score(played, [_joker("j_four_fingers")]).hand_type == "Straight"
+
+    def test_four_fingers_four_card_flush_detected(self):
+        played = [
+            _card("Hearts", "2"),
+            _card("Hearts", "5"),
+            _card("Hearts", "9"),
+            _card("Hearts", "King"),
+        ]
+        assert self._score(played, []).hand_type == "High Card"
+        assert self._score(played, [_joker("j_four_fingers")]).hand_type == "Flush"
+
+    def test_shortcut_gapped_straight_detected(self):
+        played = [
+            _card("Diamonds", "9"),
+            _card("Clubs", "7"),
+            _card("Hearts", "5"),
+            _card("Spades", "4"),
+            _card("Diamonds", "3"),
+        ]
+        assert self._score(played, []).hand_type == "High Card"
+        assert self._score(played, [_joker("j_shortcut")]).hand_type == "Straight"
+
+    def test_smeared_mixed_suit_flush_detected(self):
+        played = [
+            _card("Hearts", "2"),
+            _card("Diamonds", "5"),
+            _card("Hearts", "9"),
+            _card("Diamonds", "King"),
+            _card("Hearts", "3"),
+        ]
+        assert self._score(played, []).hand_type == "High Card"
+        assert self._score(played, [_joker("j_smeared")]).hand_type == "Flush"
+
+    def test_debuffed_four_fingers_does_not_enable(self):
+        """`get_hand_eval_flags` skips debuffed jokers (find_joker semantics).
+        Pinned at the integration level so passing the list can never
+        smuggle a debuffed joker's flag through."""
+        played = [
+            _card("Clubs", "10"),
+            _card("Diamonds", "9"),
+            _card("Diamonds", "8"),
+            _card("Clubs", "7"),
+        ]
+        ff = _joker("j_four_fingers")
+        ff.debuff = True
+        assert self._score(played, [ff]).hand_type == "High Card"
+
+    def test_four_fingers_straight_scores_more_than_high_card(self):
+        """The detection change must reach the SCORE, not just the label --
+        a Straight's base chips/mult are what the solver's labels read."""
+        played = [
+            _card("Clubs", "10"),
+            _card("Diamonds", "9"),
+            _card("Diamonds", "8"),
+            _card("Clubs", "7"),
+        ]
+        assert (
+            self._score(played, [_joker("j_four_fingers")]).total
+            > self._score(played, []).total
+        )
+
+    def test_splash_still_scores_all_played_cards(self):
+        """Splash is applied TWICE once jokers are passed (evaluate_hand's
+        augmentation + Phase 3c). Both produce `list(played_cards)` in
+        played order, so the second is a redundant no-op -- pinned so a
+        future Phase 3c removal, or an evaluate_hand change, cannot
+        silently double-count or drop it."""
+        played = [
+            _card("Hearts", "Ace"),
+            _card("Spades", "Ace"),
+            _card("Clubs", "2"),
+        ]
+        plain = self._score(played, [])
+        splash = self._score(played, [_joker("j_splash")])
+        assert plain.hand_type == splash.hand_type == "Pair"
+        assert len(plain.scoring_cards) == 2  # the two Aces
+        assert len(splash.scoring_cards) == 3  # + the off-line 2
+        assert splash.total > plain.total
+
+    def test_four_fingers_and_shortcut_stack(self):
+        """Two detection flags on one board must COMPOSE, not race.
+
+        10-8-6-4 is a straight only if the hand is allowed to be 4 long
+        (Four Fingers) AND to skip a rank at every step (Shortcut). Either
+        joker alone leaves it High Card, so this fails unless both flags
+        survive the same `get_hand_eval_flags` call and both reach
+        detection. The flags are independent booleans, so composition is
+        expected -- but "expected to compose" is precisely the reasoning
+        that let jokers=None ship, hence a board only the conjunction can
+        score.
+        """
+        played = [
+            _card("Clubs", "10"),
+            _card("Diamonds", "8"),
+            _card("Hearts", "6"),
+            _card("Spades", "4"),
+        ]
+        ff = _joker("j_four_fingers")
+        sc = _joker("j_shortcut")
+        assert self._score(played, []).hand_type == "High Card"
+        assert self._score(played, [ff]).hand_type == "High Card"
+        assert self._score(played, [sc]).hand_type == "High Card"
+        both = self._score(played, [ff, sc])
+        assert both.hand_type == "Straight"
+        assert len(both.scoring_cards) == 4
+        assert both.total > self._score(played, [ff]).total
+
+    def test_four_fingers_does_not_truncate_a_longer_shortcut_straight(self):
+        """Four Fingers must ADD the 4-card straight, never REPLACE the
+        5-card one -- the engine-side analogue of solver bug a60dbbf, where
+        `build_templates` emitted only 4-length windows under FF and made a
+        natural 5-card straight structurally unproposable.
+
+        10-9-8-6-4 mixes both step kinds (10-9 and 9-8 adjacent, 8-6 and
+        6-4 gapped), so it is a Straight only under Shortcut, and it is 5
+        long, so Four Fingers is not needed to detect it -- FF's only
+        possible contribution here is DAMAGE. It must stay a 5-card
+        Straight scoring all five, beating the 4-card line FF does enable
+        (10-8-6-4). Measured: 268 vs 232.
+        """
+        mixed = [
+            _card("Clubs", "10"),
+            _card("Diamonds", "9"),
+            _card("Diamonds", "8"),
+            _card("Hearts", "6"),
+            _card("Spades", "4"),
+        ]
+        four = [
+            _card("Clubs", "10"),
+            _card("Diamonds", "8"),
+            _card("Hearts", "6"),
+            _card("Spades", "4"),
+        ]
+        ff = _joker("j_four_fingers")
+        sc = _joker("j_shortcut")
+
+        # Shortcut alone already sees it; FF must not take it away.
+        assert self._score(mixed, [sc]).hand_type == "Straight"
+        with_ff = self._score(mixed, [ff, sc])
+        assert with_ff.hand_type == "Straight"
+        assert len(with_ff.scoring_cards) == 5
+
+        shorter = self._score(four, [ff, sc])
+        assert shorter.hand_type == "Straight"
+        assert len(shorter.scoring_cards) == 4
+        assert with_ff.total > shorter.total
+
+    def test_splash_composes_with_four_fingers(self):
+        """Splash's two application sites must agree once a SECOND flag is
+        live on the same board.
+
+        The redundant-restatement argument for keeping Phase 3c rests on
+        both sites producing `list(played_cards)`. That is trivially true
+        when Splash is the only flag; this pins it when Four Fingers has
+        already rewritten `scoring_cards` upstream (4-card flush + 1
+        off-suit card). If Phase 3c ever stopped being a pure restatement,
+        the off-suit 5th card is where it would show: dropped (Phase 3c
+        overwritten by FF's line) or double-counted.
+        """
+        played = [
+            _card("Hearts", "2"),
+            _card("Hearts", "5"),
+            _card("Hearts", "9"),
+            _card("Hearts", "King"),
+            _card("Clubs", "3"),
+        ]
+        ff = _joker("j_four_fingers")
+        ff_only = self._score(played, [ff])
+        assert ff_only.hand_type == "Flush"
+        assert len(ff_only.scoring_cards) == 4  # the off-suit 3 sits out
+
+        both = self._score(played, [ff, _joker("j_splash")])
+        assert both.hand_type == "Flush"
+        assert len(both.scoring_cards) == 5  # ... and now it scores
+        assert both.scoring_cards == played  # played order, no dupes
+        assert both.total > ff_only.total

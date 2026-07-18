@@ -851,14 +851,21 @@ size (the discard path runs at n<=8 too), so it must land before C2/regen.
 - **C:** manifest checked in; a smoke labeling run (a few dozen manifest records
   end-to-end into a shard, loaded back by `train_bc.py`'s loader) passes before
   the full 9600X job is queued.
-  **STATUS 2026-07-16: C1 + C2 built and green** (branch
-  `pre-regen-c1-c2-manifest-labeling`). Manifest checked in
+  **STATUS 2026-07-16: C1 + C2 built and green; phase C's definition of done is
+  MET** (branch `pre-regen-c1-c2-manifest-labeling`). Manifest checked in
   (`manifests/h1_harvested.json`, 7,891 records). The end-to-end
   manifest-records -> labeled v3 shard path is pinned in
-  `tests/scripts/test_generate_hand_demos_harvest.py::TestEndToEnd`. REMAINING
-  before the 9600X job is queued: the wider smoke run (a few dozen records) and
-  loading its shard back through `train_bc.py`'s loader — the loader leg is the
-  one gate the test suite does not yet cover end-to-end.
+  `tests/scripts/test_generate_hand_demos_harvest.py::TestEndToEnd`, and the
+  LOADER leg is now closed too: a real harvested shard was loaded back through
+  `train_bc.load_dataset` — `hand_cards (n, 40, 18)` up-padded from the shard's
+  actual width, `trigger_match (n, 40, 15, 2)` (the 4-D block up-pads),
+  `jokers (n, 15, 15)` = MAX_JOKERS_V2, `consumables (n, 8, 7)` =
+  MAX_CONSUMABLES_V2, ascending `-1`-padded `card_indices`. Both seed prefixes
+  round-tripped (`HARVEST_...` and `HARVEST_S_...`), confirming the
+  carry-`run_seed`-explicitly decision (id-parsing would have split
+  `HARVEST_S_` wrong).
+  **C is NOT the blocker. The regen is** — see the BLOCKER section below and
+  `docs/bruteforce_speedup_and_kicker_design.md` before queueing anything.
 
 ## BLOCKER — the regen costs ~17x its budget (2026-07-16)
 
