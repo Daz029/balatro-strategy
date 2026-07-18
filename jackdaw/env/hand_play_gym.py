@@ -144,6 +144,9 @@ STAKE = 1
 # Pure safety net: play/discard each consume budget, so episodes end
 # naturally in <= hands+discards <= 7 steps. Truncation counts as a loss.
 DEFAULT_MAX_STEPS = 32
+POINTER_CARD_SLOTS = 40
+POINTER_MAX_PICKS = 5
+POINTER_STOP_INDEX = POINTER_CARD_SLOTS
 
 
 def _pad(arr: np.ndarray, max_n: int, dim: int) -> tuple[np.ndarray, np.ndarray]:
@@ -396,27 +399,14 @@ def hand_action_mask(gs: dict[str, Any]) -> np.ndarray:
     )
 
 
-def action_to_engine_action(
-    action: int,
+def _selected_cards_to_engine_action(
+    action_type: ActionType,
+    combo: tuple[int, ...],
     gs: dict[str, Any],
     ordering_objective: Any = None,
 ) -> EnginePlayHand | EngineDiscard:
-    """Decode a canonical Discrete(436) index into an engine action.
+    """Route a validated hand subset through the canonical engine path."""
 
-    A play submits its card *subset* in engine-optimal scoring order via
-    ``best_play_order`` when an order-sensitive joker/card is present (the
-    agent picks a subset; ordering is a mechanical optimization delegated to
-    the engine). Module-level so ``HandPlayGymEnv`` and standalone policies
-    share one decode path.
-
-    ``ordering_objective`` re-targets the JOKER-order copy-placement argmax
-    (see ``best_joker_order``); None = raw score. The double-agent (shop
-    env + hand partner) path passes a money-aware objective here at the h1
-    seam so copy-joker placement isn't forced score-optimizing (user call
-    2026-07-15); solver labels stay score-only -- loose convergence
-    accepted.
-    """
-    action_type, combo = action_to_combo(action)
     if action_type == ActionType.Discard:
         return EngineDiscard(card_indices=combo)
 
@@ -463,8 +453,32 @@ def action_to_engine_action(
     return EnginePlayHand(card_indices=combo)
 
 
+def action_to_engine_action(
+    action: int,
+    gs: dict[str, Any],
+    ordering_objective: Any = None,
+) -> EnginePlayHand | EngineDiscard:
+    """Decode a canonical Discrete(436) index into an engine action.
+
+    A play submits its card *subset* in engine-optimal scoring order via
+    ``best_play_order`` when an order-sensitive joker/card is present (the
+    agent picks a subset; ordering is a mechanical optimization delegated to
+    the engine). Module-level so ``HandPlayGymEnv`` and standalone policies
+    share one decode path.
+
+    ``ordering_objective`` re-targets the JOKER-order copy-placement argmax
+    (see ``best_joker_order``); None = raw score. The double-agent (shop
+    env + hand partner) path passes a money-aware objective here at the h1
+    seam so copy-joker placement isn't forced score-optimizing (user call
+    2026-07-15); solver labels stay score-only -- loose convergence
+    accepted.
+    """
+    action_type, combo = action_to_combo(action)
+    return _selected_cards_to_engine_action(ActionType(action_type), combo, gs, ordering_objective)
+
+
 class HandPlayGymEnv(gymnasium.Env):
-    """Isolated hand-play episodes with the canonical Discrete(436) space.
+    """Isolated hand-play episodes with versioned action encodings.
 
     Parameters
     ----------
@@ -484,6 +498,10 @@ class HandPlayGymEnv(gymnasium.Env):
         env's partner path, ``eval_hand_policy``, ``train_hand_ppo``) must
         keep seeing the exact obs the checkpoint trained on (see
         docs/pre-regen-handoff.md, B2 slice 4 sequencing flag).
+    action_version:
+        Action encoding version. 1 (default) is the frozen Discrete(436)
+        space. 2 requires ``obs_version=2`` and uses the policy-masked
+        ``MultiDiscrete([2] + [41] * 5)`` pointer encoding.
     """
 
     metadata: dict[str, Any] = {"render_modes": []}
@@ -494,10 +512,15 @@ class HandPlayGymEnv(gymnasium.Env):
         seed_prefix: str = "HANDPPO",
         max_steps: int = DEFAULT_MAX_STEPS,
         obs_version: int = 1,
+        action_version: int = 1,
     ) -> None:
         super().__init__()
         if obs_version not in (1, 2):
             raise ValueError(f"unknown obs_version {obs_version} (expected 1 or 2)")
+        if action_version not in (1, 2):
+            raise ValueError(f"unknown action_version {action_version} (expected 1 or 2)")
+        if action_version == 2 and obs_version != 2:
+            raise ValueError("action_version=2 requires obs_version=2")
         self._config = config or HandPlayConfig()
         self._seed_prefix = seed_prefix
         self._max_steps = max_steps
@@ -505,10 +528,15 @@ class HandPlayGymEnv(gymnasium.Env):
         self._episode_counter = 0
         self._steps = 0
         self._episode_seed = ""
+        self.action_version = action_version
         self._build_obs = build_observation if obs_version == 1 else build_observation_v2
 
         self.observation_space = observation_space() if obs_version == 1 else observation_space_v2()
-        self.action_space = spaces.Discrete(NUM_HAND_ACTIONS)
+        self.action_space = (
+            spaces.MultiDiscrete([2] + [POINTER_CARD_SLOTS + 1] * POINTER_MAX_PICKS)
+            if action_version == 2
+            else spaces.Discrete(NUM_HAND_ACTIONS)
+        )
 
     # ------------------------------------------------------------------
     # Gymnasium API
@@ -532,20 +560,23 @@ class HandPlayGymEnv(gymnasium.Env):
         self._adapter.reset(BACK_KEY, STAKE, self._episode_seed)
         self._steps = 0
         gs = self._adapter.raw_state
-        return self._build_obs(gs), {
-            "episode_seed": self._episode_seed,
-            "action_mask": self.action_masks(),
-        }
+        info: dict[str, Any] = {"episode_seed": self._episode_seed}
+        if self.action_version == 1:
+            info["action_mask"] = self.action_masks()
+        return self._build_obs(gs), info
 
-    def step(self, action: int) -> tuple[dict[str, np.ndarray], float, bool, bool, dict[str, Any]]:
-        mask = self.action_masks()
-        if not mask[action]:
-            # A masked policy can never select these; reaching here means a
-            # wiring bug (stale mask, wrong env pairing) -- fail loudly
-            # rather than teach the agent that illegal actions no-op.
-            raise ValueError(
-                f"illegal action {action} (seed={self._episode_seed}, step={self._steps})"
-            )
+    def step(
+        self, action: int | np.ndarray
+    ) -> tuple[dict[str, np.ndarray], float, bool, bool, dict[str, Any]]:
+        if self.action_version == 1:
+            mask = self.action_masks()
+            if not mask[action]:
+                # A masked policy can never select these; reaching here means a
+                # wiring bug (stale mask, wrong env pairing) -- fail loudly
+                # rather than teach the agent that illegal actions no-op.
+                raise ValueError(
+                    f"illegal action {action} (seed={self._episode_seed}, step={self._steps})"
+                )
 
         engine_action = self._to_engine_action(action)
         self._adapter.step(engine_action)
@@ -557,10 +588,9 @@ class HandPlayGymEnv(gymnasium.Env):
         won = terminated and self._adapter.won
         reward = 1.0 if won else 0.0
 
-        info: dict[str, Any] = {
-            "episode_seed": self._episode_seed,
-            "action_mask": self.action_masks(),
-        }
+        info: dict[str, Any] = {"episode_seed": self._episode_seed}
+        if self.action_version == 1:
+            info["action_mask"] = self.action_masks()
         if terminated or truncated:
             info["balatro/cleared"] = won
             info["balatro/hands_left"] = gs.get("current_round", {}).get("hands_left", 0)
@@ -573,11 +603,52 @@ class HandPlayGymEnv(gymnasium.Env):
         Terminal phases return all-False; MaskablePPO never queries a done
         env, but that beats a stale mask.
         """
+        if self.action_version == 2:
+            raise AttributeError("action_version=2 has no env-side action masks")
         return hand_action_mask(self._adapter.raw_state)
 
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
 
-    def _to_engine_action(self, action: int) -> EnginePlayHand | EngineDiscard:
-        return action_to_engine_action(action, self._adapter.raw_state)
+    def _to_engine_action(self, action: int | np.ndarray) -> EnginePlayHand | EngineDiscard:
+        if self.action_version == 1:
+            return action_to_engine_action(int(action), self._adapter.raw_state)
+
+        vector = np.asarray(action)
+        if vector.shape != (1 + POINTER_MAX_PICKS,):
+            raise ValueError(f"pointer action must have shape (6,), got {vector.shape}")
+        if not np.issubdtype(vector.dtype, np.integer):
+            raise ValueError("pointer action tokens must be integers")
+        action_type = int(vector[0])
+        if action_type not in (int(ActionType.PlayHand), int(ActionType.Discard)):
+            raise ValueError(f"pointer action type {action_type} is illegal")
+
+        padded = vector[1:].astype(np.int64, copy=False)
+        stop_positions = np.flatnonzero(padded == POINTER_STOP_INDEX)
+        length = int(stop_positions[0]) if len(stop_positions) else POINTER_MAX_PICKS
+        if length < 1:
+            raise ValueError("pointer action must select at least one card")
+        if np.any(padded[length:] != POINTER_STOP_INDEX):
+            raise ValueError("pointer action padding must trail the first STOP_INDEX")
+        combo = tuple(int(index) for index in padded[:length])
+        if any(
+            index < 0 or index >= len(self._adapter.raw_state.get("hand", []))
+            for index in combo
+        ):
+            raise ValueError("pointer action contains a dead hand index")
+        if any(left >= right for left, right in zip(combo, combo[1:])):
+            raise ValueError("pointer action card indices must be strictly ascending")
+
+        gs = self._adapter.raw_state
+        if gs.get("phase") != GamePhase.SELECTING_HAND:
+            raise ValueError("pointer action is only legal during hand selection")
+        current_round = gs.get("current_round", {})
+        budget = (
+            current_round.get("hands_left", 0)
+            if action_type == int(ActionType.PlayHand)
+            else current_round.get("discards_left", 0)
+        )
+        if budget < 1:
+            raise ValueError(f"pointer action type {action_type} has no remaining budget")
+        return _selected_cards_to_engine_action(ActionType(action_type), combo, gs)

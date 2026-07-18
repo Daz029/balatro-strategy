@@ -16,6 +16,7 @@ import copy
 
 import numpy as np
 import pytest
+from gymnasium import spaces
 
 from jackdaw.agents.hand_action_space import (
     NUM_COMBOS,
@@ -465,3 +466,62 @@ class TestObservationV2:
         obs = build_observation_v2(gs)
         assert int(obs["consumable_mask"].sum()) == MAX_CONSUMABLES_V2
         assert env.observation_space.contains(obs)
+
+
+def test_pointer_action_version_requires_v2_observations_and_has_no_env_mask():
+    with pytest.raises(ValueError, match="action_version=2 requires obs_version=2"):
+        _no_joker_env(action_version=2)
+    env = _no_joker_env(obs_version=2, action_version=2)
+    _obs, info = env.reset(seed=0)
+    assert env.action_space == spaces.MultiDiscrete([2] + [41] * 5)
+    assert "action_mask" not in info
+    with pytest.raises(AttributeError, match="no env-side action masks"):
+        env.action_masks()
+
+
+def test_pointer_action_version_matches_v1_execution_for_same_seed():
+    env_v1 = HandPlayGymEnv(config=HandPlayConfig(), seed_prefix="POINTER_EQ")
+    env_v2 = HandPlayGymEnv(
+        config=HandPlayConfig(),
+        obs_version=2,
+        action_version=2,
+        seed_prefix="POINTER_EQ",
+    )
+    env_v1.reset(seed=7)
+    env_v2.reset(seed=7)
+    v1_result = env_v1.step(combo_to_action(ActionType.PlayHand, (0,)))
+    pointer_action = np.array([0, 0, 40, 40, 40, 40], dtype=np.int64)
+    v2_result = env_v2.step(pointer_action)
+    assert v2_result[1:4] == v1_result[1:4]
+
+
+@pytest.mark.parametrize(
+    "action,match",
+    [
+        ([0, 1, 0, 40, 40, 40], "strictly ascending"),
+        ([0, 40, 40, 40, 40, 40], "at least one card"),
+        ([0, 39, 40, 40, 40, 40], "dead hand index"),
+    ],
+)
+def test_pointer_action_version_rejects_invalid_vectors(action, match):
+    env = HandPlayGymEnv(
+        config=HandPlayConfig(),
+        obs_version=2,
+        action_version=2,
+        seed_prefix="POINTER_BAD",
+    )
+    env.reset(seed=0)
+    with pytest.raises(ValueError, match=match):
+        env.step(np.asarray(action, dtype=np.int64))
+
+
+def test_pointer_action_version_rejects_type_without_budget():
+    env = HandPlayGymEnv(
+        config=HandPlayConfig(discards_range=(0, 0)),
+        seed_prefix="POINTER_BAD_TYPE",
+        obs_version=2,
+        action_version=2,
+    )
+    env.reset(seed=0)
+    with pytest.raises(ValueError, match="no remaining budget"):
+        env.step(np.array([1, 0, 40, 40, 40, 40], dtype=np.int64))
