@@ -1111,10 +1111,28 @@ forces a second regen.
       regen (in progress on the 9700X) inherits it automatically (it lives
       in hand_solver.py); the stage2 relabel re-runs. Discriminating
       regression in `test_hand_solver_discard_cap.py::TestDiscardLowerBound`
-      (fails pre-clamp `assert 0 >= 1`). The stage2 discard-density SWEEP
-      that just completed was measured PRE-clamp — the clamp removes illegal
-      candidates from both arms symmetrically, so expected movement is
-      small, but confirm against the numbers before trusting it.
+      (fails pre-clamp `assert 0 >= 1`).
+    - **Discard-density SWEEP RE-RUN post-clamp (2026-07-18,
+      `data/discard_sweep_stage2.json`)** — the K-spec discard-side kicker
+      tripwire, on stage2 density, 200 states / n_samples=80, joker-aware B7
+      vs jokerless. VERDICT: tripwire NOT triggered — kicker discard-side
+      extension stays DEFERRED. B7 is strongly net-positive and matches the
+      LOCKED stage3 sweep's structure exactly: helped 71/65/59/38 vs
+      regress 16/18/16/8 at k=4/6/8/12, mean_help 0.108 (>> help_threshold
+      0.0635 = 1.33x noise_floor 0.0477), all regressions localize to the
+      truncation boundary and collapse to 0 disagreements at k=64 (the
+      provable-no-op union endpoint). Stage2 helps MORE than stage3
+      (mean_help 0.108 vs 0.048) — its 21-joker curated pool is joker-denser
+      in action-changing ways; the deeper worst_paired (-0.45 vs -0.2) is a
+      single joker-dense worst case obeying the same depth-gate law. The
+      regressions are B7's documented threshold-blind boundary class
+      (PPO-correctable), NOT the "value lives in kickers/held cards"
+      directional signature the tripwire watches for. CAVEAT: the directional
+      arm is confirmed at AGGREGATE only — the JSON stores per-k max_help/
+      min_paired, not board content, and dumping the ~16 regressor boards is
+      a multi-hour re-solve the clean aggregate doesn't justify. Clamp effect
+      on the sweep: it strips illegal empty-discard candidates from BOTH arms
+      symmetrically, so the comparison is unbiased by it.
 
 ### h1 architecture — Candidate B COMMITTED (autoregressive pointer head)
 
