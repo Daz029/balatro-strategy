@@ -16,11 +16,8 @@ Instead this module clones the state (the same RNG-exact pickle round-trip
 ``ShopRunAdapter.snapshot_state``/``restore_state`` uses) and drives the
 CLONE through the engine's own ``CashOut`` handler, then discards it and
 keeps only the resulting dollar total. Whatever the engine's actual
-money-vs-interest ordering is — including the double-counted end-of-round
-joker payout documented in
-``tests/engine/test_cashout_ordering.py::TestJokerEndOfRoundDollarsDiscrepancy``
-— this mirror reproduces it exactly, because it IS that computation, not a
-re-implementation of it.
+money-vs-interest ordering is, this mirror reproduces it exactly, because
+it IS that computation, not a re-implementation of it.
 """
 
 from __future__ import annotations

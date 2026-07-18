@@ -1520,8 +1520,14 @@ def _round_won(gs: dict[str, Any]) -> None:
         joker_count=len(jokers),
     )
     eor = on_end_of_round(jokers, game_snap, rng)
-    # Apply joker end-of-round dollars
-    gs["dollars"] = gs.get("dollars", 0) + eor.get("dollars_earned", 0)
+    # eor["dollars_earned"] (Golden Joker, Rocket, Cloud 9, Satellite,
+    # Delayed Gratification) is deliberately NOT applied here: it flows once
+    # through calculate_round_earnings(joker_dollars=...) into
+    # earnings.total, applied at CashOut — vanilla pays these as cash-out
+    # rows AFTER interest is computed on the pre-payout balance
+    # (state_events.lua:1175 vs :1191). Applying it here as well
+    # double-counted the payout and leaked it into interest (inherited
+    # upstream bug; pinned in tests/engine/test_cashout_ordering.py).
     # Remove self-destructed jokers (Popcorn, Turtle Bean, etc.)
     for removed_joker in eor.get("jokers_removed", []):
         if removed_joker in jokers:

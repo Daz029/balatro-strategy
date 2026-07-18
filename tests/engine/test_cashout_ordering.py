@@ -23,11 +23,8 @@ interest and must not affect it — same rule class as the already-verified
 "Investment pays after interest" (``TestInvestmentTag`` in
 ``test_tag_wiring.py``).
 
-**Finding**: the first half holds. The second half does NOT — see
-``TestJokerEndOfRoundDollarsDiscrepancy`` below, which pins the actual (buggy) engine
-behavior instead of the expected one, per this task's instruction not to
-silently "fix" the engine. Reported in full at the top level of this
-change; treat as an open engine bug, not a spec.
+Both halves now hold: ``TestJokerEndOfRoundPaysAfterInterest`` guards the
+payout ordering restored by the ``game.py::_round_won`` fix.
 """
 
 from __future__ import annotations
@@ -100,73 +97,43 @@ class TestInBlindEarningsBeforeInterest:
 
 
 # ---------------------------------------------------------------------------
-# End-of-round joker payouts (Golden Joker, Rocket) — DISCREPANCY
+# End-of-round joker payouts (Golden Joker, Rocket) pay once, after interest
 # ---------------------------------------------------------------------------
 
 
-class TestJokerEndOfRoundDollarsDiscrepancy:
-    """PINS the engine's ACTUAL behavior, which contradicts the expected
-    ordering documented in ``docs/post-regen-training-plan.md`` section 3 and
-    the module docstring above.
-
-    Root cause (both symptoms trace to the same two lines):
-
-    1. ``jackdaw/engine/game.py::_round_won`` fires ``on_end_of_round`` and
-       applies its ``dollars_earned`` (Golden Joker $4, Rocket, etc.)
-       directly to ``gs["dollars"]`` (~L1524) BEFORE calling
-       ``calculate_round_earnings`` (~L1651) with
-       ``money=gs.get("dollars", 0)`` — so the joker payout is already
-       folded into the balance ``calculate_round_earnings`` uses to compute
-       ``effective_money`` for interest (``economy.py`` step 6). A Golden
-       Joker payout that crosses a $5 bracket THEREFORE DOES bump interest,
-       the opposite of "pays after interest, does not affect it".
-    2. ``calculate_round_earnings``'s ``total`` formula
-       (``economy.py`` ~L239-246) unconditionally re-adds the same
-       ``joker_dollars`` amount, and ``_handle_cash_out`` (~L980) applies
-       ``earnings.total`` on top of ``gs["dollars"]`` — which already
-       contains that payout from step 1. The joker payout is therefore
-       counted TWICE in the final bank balance.
-
-    Do not "fix" this here (out of scope for this task and it changes
-    game-wide economy behavior); the cashout mirror in
-    ``jackdaw/env/cashout_mirror.py`` must reproduce this arithmetic exactly
-    (bug included) since it clones and replays the engine's own functions.
+class TestJokerEndOfRoundPaysAfterInterest:
+    """Golden Joker's payout flows once, via ``earnings.total`` at cash-out,
+    strictly after interest — regression for the inherited double-count /
+    interest-leak bug fixed in ``game.py::_round_won``.
     """
 
-    def test_golden_joker_payout_leaks_into_interest_and_is_double_counted(self):
+    def test_golden_joker_pays_once_and_never_bumps_interest(self):
         gs = _init_gs()
         gs["jokers"].append(create_joker("j_golden"))
         step(gs, SelectBlind())
         gs["blind"].chips = 1
-        gs["dollars"] = 1  # below $5 alone; +$4 Golden Joker crosses it
+        gs["dollars"] = 1  # +$4 payout would cross the $5 bracket if it leaked
         dollars_before_round = gs["dollars"]
 
         step(gs, PlayHand(card_indices=(0, 1, 2, 3, 4)))
 
         golden_payout = 4  # Golden Joker: +$4/round, card.lua:1658
-        # Symptom 1: the payout already landed, before cash-out even runs.
-        assert gs["dollars"] == dollars_before_round + golden_payout
+        # Not pre-applied: the balance is untouched until cash-out.
+        assert gs["dollars"] == dollars_before_round
 
         earnings = gs["round_earnings"]
         assert earnings.joker_dollars == golden_payout
-        # Symptom 2 (interest leak): effective_money used for interest is
-        # gs["dollars"] AFTER the joker payout (5), not the pre-round
-        # balance (1) -- under the expected ordering this bracket would
-        # never be crossed and interest would be 0.
-        assert dollars_before_round < 5 <= dollars_before_round + golden_payout
-        assert earnings.interest == 1
+        # Interest is computed on the pre-payout balance ($1): no leak.
+        assert earnings.interest == 0
 
-        pre_cashout_dollars = gs["dollars"]
         step(gs, CashOut())
-        # Symptom 3 (double count): earnings.total re-adds joker_dollars on
-        # top of a balance that already includes it once.
-        assert gs["dollars"] == pre_cashout_dollars + earnings.total
-        assert gs["dollars"] == dollars_before_round + 2 * golden_payout + (
+        # Paid exactly once, through the total.
+        assert gs["dollars"] == dollars_before_round + earnings.total
+        assert earnings.total == (
             earnings.blind_reward
             + earnings.unused_hands_bonus
             + earnings.unused_discards_bonus
-            + earnings.interest
-            - earnings.rental_cost
+            + golden_payout
         )
 
 
