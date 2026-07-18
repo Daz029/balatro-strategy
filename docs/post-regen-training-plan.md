@@ -50,6 +50,41 @@ laptop-single-worker scaling.
   distribution, sequence NLL, and action/set disagreement by true sequence-length
   stratum. This is a gate review input and risk check; it does not silently replace
   the pinned greedy deployment convention with beam search.
+- **Pre-registered thresholds (2026-07-18, locked with the user BEFORE any gate
+  run; no threshold may be edited after the first gate run):**
+  - **Stratum definitions, fixed here to kill boundary drift**: "flat-compatible"
+    = every label index ≤ 7 (exactly the loader's `flat_compatible` flag,
+    `max(selected) < MAX_HAND_CARDS` — the 8 positions the flat head can
+    express); "wide" = any label index ≥ 8. Set-size strata = true set size 1–5;
+    play/discard reported separately.
+  - **Control design**: the flat control uses the SAME v3 trunk as B — the two
+    arms differ ONLY in the head (flat 436 softmax vs autoregressive pointer),
+    isolating the architecture question the gate exists to answer. The existing
+    v1-trunk flat model is a free third reference readout, not a gate arm.
+  - (a) Shared flat-compatible support, head-to-head: B joint NLL ≤ 1.05× flat
+    aggregate AND ≤ 1.10× flat per set-size stratum; B exact-set-match ≥ flat
+    − 1 pt aggregate AND ≥ flat − 2 pts per stratum.
+  - (b) B-only: free-running INVALID rate = 0 HARD (masks make invalid
+    impossible; nonzero is a bug). Forced-termination rate = 0 HARD, defined as
+    **overrun terminations**: decode terminated by the mask (5-pick cap or
+    pick-exhaustion) where the emitted set is LARGER than the true set — the
+    model never chose stop when it should have. Every occurrence is dumped and
+    investigated, none waved through. Benign cap-terminations (emitted size ==
+    true set size: true 5-pick plays, play/discard-the-whole-small-hand) are
+    structurally mask-terminated and are counted/reported separately, split by
+    true set size — they are not defects. Stop-token accuracy ≥ 85% per stratum
+    (teacher-forced); type-token accuracy ≥ flat's type-marginal accuracy − 1 pt.
+  - (c) p_clear-head MSE: B ≤ 1.10× flat.
+  - (d) Wide stratum (B alone — flat cannot be scored there): B per-pick NLL
+    ≤ 1.5× B's own flat-compatible per-pick NLL (no wide-hand cliff).
+  - (e) Memorization canary: MEAN NON-PADDING per-token CE < 0.05 on the
+    ~50-example overfit set (padding steps excluded from the mean; a
+    sum-over-steps CE would reward short sequences).
+  - **Gate data**: pipeline smoke + direction check NOW on stage2_k3_relabel +
+    the regenerated v3 stage3 shards (transferred from the 9600X; the v3
+    stage1 shards are STALE — never load them). The RECORDED verdict re-runs
+    on the full regen pool once it lands; BC at these sizes is minutes-scale,
+    so the re-run is nearly free.
 - **Winrate = reference readout only**, never the gate. Rejected as primary on two
   grounds: statistical power (BC clear rates run 4–20% with median label p_clear 0.0
   — resolving a 2-point difference needs thousands of episodes per arm) and
