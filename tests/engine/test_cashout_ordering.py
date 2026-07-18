@@ -243,3 +243,35 @@ class TestHeldGoldCardMoney:
         gs = self._win_with_held_card(sealed, dollars=2)
         assert gs["dollars"] == 2
         assert gs["round_earnings"].interest == 0
+
+    def _play_high_card_with_seal_on(self, seal_index: int):
+        """Play [A, 2, 3, 4, 6] offsuit (High Card: only the Ace scores)
+        with a Gold Seal on ``played[seal_index]``; return gs."""
+        gs = _init_gs()
+        step(gs, SelectBlind())
+        played = [
+            create_playing_card(Suit.HEARTS, Rank.ACE),
+            create_playing_card(Suit.SPADES, Rank.TWO),
+            create_playing_card(Suit.CLUBS, Rank.THREE),
+            create_playing_card(Suit.DIAMONDS, Rank.FOUR),
+            create_playing_card(Suit.SPADES, Rank.SIX),
+        ]
+        played[seal_index].set_seal("Gold")
+        gs["hand"][0:5] = played
+        gs["blind"].chips = 1
+        gs["dollars"] = 2  # +$3 seal -> 5, crossing the bracket
+        step(gs, PlayHand(card_indices=(0, 1, 2, 3, 4)))
+        return gs
+
+    def test_scored_gold_seal_pays_in_blind(self):
+        # The seal's $3 pays when the card SCORES (get_p_dollars via
+        # scoring), in-blind: it counts toward interest.
+        gs = self._play_high_card_with_seal_on(0)  # the scoring Ace
+        assert gs["dollars"] == 2 + 3
+        assert gs["round_earnings"].interest == 1
+
+    def test_played_but_unscored_gold_seal_pays_nothing(self):
+        # Scored, not played: a seal on an unscoring kicker never fires.
+        gs = self._play_high_card_with_seal_on(1)  # the unscoring Two
+        assert gs["dollars"] == 2
+        assert gs["round_earnings"].interest == 0
