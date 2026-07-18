@@ -208,11 +208,13 @@ class TestPerishableCountdown:
 
 
 class TestRentalCharges:
-    def test_rental_costs_3_dollars(self):
+    def test_rental_tallied_not_deducted(self):
+        # The single deduction happens via calculate_round_earnings;
+        # deducting here too double-charged rental.
         j = _lifecycle_joker(rental=True)
         gs = _lifecycle_gs(dollars=20)
         result = process_round_end_cards([j], gs)
-        assert gs["dollars"] == 17
+        assert gs["dollars"] == 20
         assert result.rental_cost == 3
         assert result.rental_cards == [j]
 

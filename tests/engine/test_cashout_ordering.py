@@ -172,3 +172,41 @@ class TestInvestmentPaysAfterInterest:
 
         payout = TAGS["tag_investment"].config["dollars"]
         assert gs["dollars"] == pre_cashout_dollars + earnings.total + payout
+
+
+# ---------------------------------------------------------------------------
+# Rental: charged once, before interest
+# ---------------------------------------------------------------------------
+
+
+class TestRentalChargedOnceBeforeInterest:
+    """Rental's $3 lands once (via ``earnings.total``) and shrinks the
+    interest bracket — regression for the inherited double-deduction.
+    """
+
+    def test_single_charge_interest_on_post_rental_balance(self):
+        gs = _init_gs()
+        joker = create_joker("j_joker")
+        joker.set_rental(True)
+        gs["jokers"].append(joker)
+        _beat_blind_at(gs, dollars=20)
+
+        # Not deducted directly at round end.
+        assert gs["dollars"] == 20
+        earnings = gs["round_earnings"]
+        assert earnings.rental_cost == 3
+        assert earnings.interest == (20 - 3) // 5  # post-rental bracket
+
+        step(gs, CashOut())
+        assert gs["dollars"] == 20 + earnings.total
+
+    def test_debuffed_rental_still_charges(self):
+        # Rental is a sticker, not an ability: no debuff gate in vanilla.
+        gs = _init_gs()
+        joker = create_joker("j_joker")
+        joker.set_rental(True)
+        joker.set_debuff(True)
+        gs["jokers"].append(joker)
+        _beat_blind_at(gs, dollars=0)
+        assert gs["round_earnings"].rental_cost == 3
+

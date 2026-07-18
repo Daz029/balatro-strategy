@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from jackdaw.engine.rng import PseudoRandom
 
 from jackdaw.engine.jokers import GameSnapshot, on_end_of_round
+from jackdaw.engine.round_lifecycle import is_rental
 
 # ---------------------------------------------------------------------------
 # RoundEarnings — per-round cash-out descriptor
@@ -178,7 +179,7 @@ def calculate_round_earnings(
     # calculate_rental() → ease_dollars(-G.GAME.rental_rate) per rental joker
     # Fires BEFORE evaluate_round; effective_money is used for interest.
     # ------------------------------------------------------------------
-    rental_cost = sum(rental_rate for j in jokers if not j.debuff and j.ability.get("rental"))
+    rental_cost = sum(rental_rate for j in jokers if is_rental(j))
     effective_money = money - rental_cost
 
     # ------------------------------------------------------------------

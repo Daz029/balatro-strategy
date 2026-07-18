@@ -12,7 +12,7 @@ for each joker in order.
 * **Perishable countdown**: ``perish_tally`` decrements each round;
   when it hits 0 the card is permanently debuffed.
 * **Rental charges**: each rental card costs ``rental_rate`` ($3) per round,
-  deducted directly from ``game_state["dollars"]``.
+  tallied here and charged once via ``calculate_round_earnings``.
 
 Glass Card behaviour: only shatters during scoring (Phase 11), not at
 round end.
@@ -56,7 +56,7 @@ class RoundEndResult:
     """Jokers whose ``perish_tally`` hit 0 this round and became debuffed."""
 
     rental_cost: int = 0
-    """Total dollars deducted for rental cards this round."""
+    """Total rental dollars charged this round (applied via earnings)."""
 
     rental_cards: list[Card] = field(default_factory=list)
     """Cards that incurred a rental charge."""
@@ -89,8 +89,9 @@ def process_round_end_cards(
         Active joker cards.  Mutated in place (``perish_tally``,
         ``debuff`` fields).
     game_state:
-        Mutable run-state dict.  ``game_state["dollars"]`` is decremented
-        by rental charges.  Reads ``game_state.get("rental_rate", 3)``.
+        Run-state dict.  Reads ``game_state.get("rental_rate", 3)``;
+        never mutates dollars (rental is charged via
+        ``calculate_round_earnings``).
 
     Returns
     -------
@@ -103,9 +104,11 @@ def process_round_end_cards(
     for joker in jokers:
         # ---------------------------------------------------------------
         # calculate_rental — card.lua:2271-2276
+        # Tallied for reporting only: the single deduction happens via
+        # calculate_round_earnings (effective_money / total) — deducting
+        # here too charged rental twice and shrank the interest bracket.
         # ---------------------------------------------------------------
-        if _is_rental(joker):
-            game_state["dollars"] = game_state.get("dollars", 0) - rental_rate
+        if is_rental(joker):
             result.rental_cost += rental_rate
             result.rental_cards.append(joker)
 
@@ -134,7 +137,10 @@ def process_round_end_cards(
 # self.ability.perishable).  We check both for robustness.
 
 
-def _is_rental(card: Card) -> bool:
+def is_rental(card: Card) -> bool:
+    """Vanilla ``calculate_rental`` has no debuff gate — rental is a
+    sticker, not an ability, so debuffed rentals still charge. Shared with
+    ``economy.calculate_round_earnings`` so the two can't drift."""
     if getattr(card, "rental", False):
         return True
     ability = getattr(card, "ability", None)
