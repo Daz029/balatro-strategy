@@ -58,6 +58,29 @@ never enter a pending state with zero legal targets: there is no cancel
 action, so that would deadlock the episode). Currently one rule: Aura
 requires an editionless target (vanilla disables it otherwise; the engine
 handler would happily re-edition the card).
+
+**s1 schema** (``ShopRunConfig(s1_schema=True)``, opt-in, default OFF --
+CLAUDE.md "s1" / "MAX_JOKER_ROWS" open items, DECIDED 2026-07-16;
+docs/post-regen-training-plan.md sections 6-7): with the flag off, every
+observation array, mask, and the action space itself (``Discrete(686)``)
+are byte-identical to pre-s1 -- the s0 checkpoint and every existing
+consumer keep working untouched. With the flag on:
+
+* The action space widens to ``Discrete(694)``: one cold ``SkipBlind`` row
+  (canonical 686) and seven cold ``SellJoker`` rows for obs joker rows
+  8-14 (``[687, 694)`` -- see ``sell_joker_action``/
+  ``joker_row_for_sell_action`` in ``shop_action_space.py``).
+* Non-boss blind-select stops being auto-resolved
+  (:meth:`ShopRunAdapter._advance`) and becomes a real two-action decision:
+  ``SkipBlind`` (686) or "select/proceed", which REUSES the ``NextRound``
+  canonical row rather than spending a fresh index on it -- the two are
+  never simultaneously legal (``NextRound`` is SHOP-only, this reuse is
+  BLIND_SELECT-only), so one row safely means "leave the shop" in one
+  phase and "accept this blind" in the other. Boss blind-select keeps
+  auto-resolving (SkipBlind is illegal there — no real choice, vanilla-
+  consistent).
+* The obs joker block widens 8 -> 15 rows and ``shop_context`` gains the
+  offered-tag one-hot (see ``shop_obs.py``).
 """
 
 from __future__ import annotations
@@ -74,8 +97,10 @@ from jackdaw.agents.shop_action_space import (
     FAMILY_OFFSETS,
     MAX_PACK_CARDS,
     NUM_TOTAL_ACTIONS,
+    NUM_TOTAL_ACTIONS_S1,
     ShopActionFamily,
     decode_shop_action,
+    joker_row_for_sell_action,
     select_target_mask,
     shop_action_mask,
     target_combo_for_action,
@@ -89,7 +114,9 @@ from jackdaw.engine.actions import (
     PickPackCard,
     RedeemVoucher,
     Reroll,
+    SelectBlind,
     SellCard,
+    SkipBlind,
     SkipPack,
     UseConsumable,
 )
@@ -208,7 +235,9 @@ class ShopGymEnv(gymnasium.Env):
         (default: a fresh ``GreedyHandPolicy`` — the permanent scripted
         baseline; pass an h0/h1 checkpoint wrapper for real training).
     config:
-        :class:`ShopRunConfig`; ``win_ante`` is the horizon-curriculum knob.
+        :class:`ShopRunConfig`; ``win_ante`` is the horizon-curriculum
+        knob, ``s1_schema`` is the opt-in flag for this build (default
+        False = byte-identical s0 behavior; see module docstring).
     seed_prefix:
         Prefix for auto-generated episode seed strings. ``EVAL_`` is
         reserved for the fixed evaluation suite and must never be trained on.
@@ -235,6 +264,11 @@ class ShopGymEnv(gymnasium.Env):
             from jackdaw.agents.greedy_hand_policy import GreedyHandPolicy
 
             hand_policy = GreedyHandPolicy()
+        config = config or ShopRunConfig()
+        # Single source of truth for the flag: the adapter (auto-resolve
+        # behavior) and this env (obs/action-space sizing, mask/decode)
+        # both read it off the SAME config, so they can never disagree.
+        self._s1_schema = config.s1_schema
         self._adapter = ShopRunAdapter(hand_policy, config)
         self._seed_prefix = seed_prefix
         self._max_steps = max_steps
@@ -244,9 +278,10 @@ class ShopGymEnv(gymnasium.Env):
         self._steps = 0
         self._pending: PendingTarget | None = None
         self._last_round = 0
+        self._num_actions = NUM_TOTAL_ACTIONS_S1 if self._s1_schema else NUM_TOTAL_ACTIONS
 
-        self.observation_space = observation_space()
-        self.action_space = spaces.Discrete(NUM_TOTAL_ACTIONS)
+        self.observation_space = observation_space(s1_schema=self._s1_schema)
+        self.action_space = spaces.Discrete(self._num_actions)
 
     # ------------------------------------------------------------------
     # Gymnasium API
@@ -300,7 +335,7 @@ class ShopGymEnv(gymnasium.Env):
         self._steps = 0
         gs = self._adapter.raw_state
         self._last_round = gs.get("round", 0)
-        return build_shop_observation(gs, self._pending), {
+        return build_shop_observation(gs, self._pending, s1_schema=self._s1_schema), {
             "episode_seed": self._episode_seed,
             "action_mask": self.action_masks(),
         }
@@ -350,7 +385,13 @@ class ShopGymEnv(gymnasium.Env):
             info["balatro/ante"] = gs.get("round_resets", {}).get("ante", 1)
             info["balatro/round"] = gs.get("round", 0)
 
-        return build_shop_observation(gs, self._pending), reward, terminated, truncated, info
+        return (
+            build_shop_observation(gs, self._pending, s1_schema=self._s1_schema),
+            reward,
+            terminated,
+            truncated,
+            info,
+        )
 
     def action_masks(self) -> np.ndarray:
         """Legality mask over the canonical space for MaskablePPO."""
@@ -362,6 +403,7 @@ class ShopGymEnv(gymnasium.Env):
                 len(hand),
                 self._pending.min_cards,
                 self._pending.max_cards,
+                s1_schema=self._s1_schema,
             )
             carrier_key = getattr(self._pending_carrier(), "center_key", "")
             if carrier_key in _CONSTRAINED_TARGET_KEYS:
@@ -371,12 +413,35 @@ class ShopGymEnv(gymnasium.Env):
                         mask[a] = False
             return mask
 
-        if self._adapter.done or gs.get("phase") not in DECISION_PHASES:
-            return np.zeros(NUM_TOTAL_ACTIONS, dtype=bool)
+        if self._adapter.done:
+            return np.zeros(self._num_actions, dtype=bool)
 
-        mask = shop_action_mask(get_action_mask(gs))
+        phase = gs.get("phase")
 
-        if gs.get("phase") == GamePhase.PACK_OPENING:
+        if phase == GamePhase.BLIND_SELECT and self._s1_schema:
+            # s1 only -- the adapter never stops in BLIND_SELECT otherwise
+            # (see ShopRunAdapter._advance), and it only stops here for a
+            # non-boss blind (boss has no real choice and stays
+            # auto-resolved). The on_deck check is defense-in-depth: two
+            # legal actions on a non-boss blind (SkipBlind 686, or
+            # "select/proceed" which REUSES the NextRound row rather than
+            # spending a fresh canonical index on it, see module
+            # docstring); a boss on_deck falls through to "not a decision"
+            # below even though the adapter is not supposed to stop here
+            # for one.
+            on_deck = gs.get("blind_on_deck", "Small")
+            if on_deck in ("Small", "Big"):
+                mask = np.zeros(self._num_actions, dtype=bool)
+                mask[FAMILY_OFFSETS[ShopActionFamily.SkipBlind]] = True
+                mask[FAMILY_OFFSETS[ShopActionFamily.NextRound]] = True
+                return mask
+
+        if phase not in DECISION_PHASES:
+            return np.zeros(self._num_actions, dtype=bool)
+
+        mask = shop_action_mask(get_action_mask(gs), s1_schema=self._s1_schema)
+
+        if phase == GamePhase.PACK_OPENING:
             # Rebuild the PickPackCard rows env-side (see module docstring:
             # engine picks are unvalidated, and the engine mask's Spectral
             # blanket-skip was a balatrobot limitation).
@@ -460,6 +525,10 @@ class ShopGymEnv(gymnasium.Env):
             return OpenBooster(card_index=slot)
         if family is ShopActionFamily.SellJoker:
             return SellCard(area="jokers", card_index=slot)
+        if family is ShopActionFamily.SellJokerExt:
+            # s1: obs joker rows 8-14 -- inverse of sell_joker_action, the
+            # single k->index/index->k mapping shared with the mask builder.
+            return SellCard(area="jokers", card_index=joker_row_for_sell_action(action))
         if family is ShopActionFamily.SellConsumable:
             return SellCard(area="consumables", card_index=slot)
         if family is ShopActionFamily.UseConsumable:
@@ -472,7 +541,14 @@ class ShopGymEnv(gymnasium.Env):
         if family is ShopActionFamily.Reroll:
             return Reroll()
         if family is ShopActionFamily.NextRound:
+            if self._s1_schema and gs.get("phase") == GamePhase.BLIND_SELECT:
+                # s1: this row is reused as "select/proceed" at a non-boss
+                # blind-select decision (see module docstring) rather than
+                # spending a fresh canonical index on SelectBlind.
+                return SelectBlind()
             return NextRound()
+        if family is ShopActionFamily.SkipBlind:
+            return SkipBlind()
         if family is ShopActionFamily.PickPackCard:
             card = gs.get("pack_cards", [])[slot]
             min_cards, max_cards, needs_targets = consumable_target_info(card)

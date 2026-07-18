@@ -5,7 +5,13 @@ the shop agent only ever sees its own decision points (SHOP, PACK_OPENING);
 everything else is auto-resolved inside :meth:`ShopRunAdapter.step`:
 
 * ``BLIND_SELECT`` -> ``SelectBlind`` (SkipBlind deliberately not exposed in
-  s0 — see the decision record; appended at s1 once tag economics matter),
+  s0 — see the decision record; appended at s1 once tag economics matter).
+  ``ShopRunConfig.s1_schema=True`` flips this: on a non-boss blind
+  (Small/Big) the adapter STOPS here instead of auto-resolving, handing
+  control back to the shop agent (``ShopGymEnv`` turns it into a genuine
+  SkipBlind-vs-proceed decision — see that module). Boss blind-select has
+  no real choice (SkipBlind is illegal) and always stays auto-resolved,
+  s1_schema or not.
 * ``SELECTING_HAND`` -> the injected ``hand_policy`` callable
   (``game_state -> engine Action``): :class:`GreedyHandPolicy` for tests
   and ablation baselines, a trained h-agent wrapper for real training,
@@ -50,9 +56,15 @@ class ShopRunConfig:
         Beating this ante's boss ends the episode as a win (the engine's
         own ``won`` check reads ``gs["win_ante"]``). The horizon-curriculum
         knob: 2 -> 4 -> 8.
+    s1_schema:
+        Opt-in flag (default False, preserving s0's exact auto-resolve
+        behavior byte-for-byte) that exposes non-boss blind-select as a
+        real agent decision instead of auto-resolving it. See
+        :meth:`ShopRunAdapter._advance` and ``shop_gym.py``.
     """
 
     win_ante: int = 8
+    s1_schema: bool = False
 
 
 class ShopRunAdapter:
@@ -144,6 +156,12 @@ class ShopRunAdapter:
             if phase in DECISION_PHASES:
                 return
             if phase == GamePhase.BLIND_SELECT:
+                on_deck = self._gs.get("blind_on_deck", "Small")
+                if self._config.s1_schema and on_deck in ("Small", "Big"):
+                    # s1: expose skip-vs-proceed as an agent decision
+                    # instead of auto-resolving (boss stays auto -- no
+                    # real choice, SkipBlind is illegal there).
+                    return
                 engine_step(self._gs, SelectBlind())
             elif phase == GamePhase.SELECTING_HAND:
                 engine_step(self._gs, self._hand_policy(self._gs))

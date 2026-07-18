@@ -24,6 +24,26 @@ at the merge pure reuse. Entity lists longer than their block are clipped
 The pending-target state (two-step targeting, grilled decision) must be
 OBSERVABLE, not mask-only: ``shop_context`` carries the pending flag and
 min/max target counts, and the carrier row gets a ``selected`` bit.
+
+s1 append (CLAUDE.md "s1" / "MAX_JOKER_ROWS" open items, DECIDED
+2026-07-16; docs/post-regen-training-plan.md sections 6-7), opt-in via
+``s1_schema=True`` on :func:`build_shop_observation` / :func:`observation_space`
+-- default OFF is byte-for-byte the pre-s1 schema:
+
+* Joker rows widen 8 -> ``MAX_JOKER_ROWS_S1`` (15, cross-pinned to the
+  hand-side ``MAX_JOKERS_V2``): real jokers up to 15 including negatives
+  are encoded; a genuine non-negative overfill still raises loudly (same
+  dual-counter discipline as ``hand_play_gym._check_joker_overfill``).
+* ``shop_context`` widens by ``NUM_TAGS`` (24): a one-hot of the tag
+  you'd receive by skipping the block-select decision AT HAND right now
+  -- all-zero outside BLIND_SELECT for a non-boss blind (mid-shop, boss
+  blinds, or no tag context at all).
+
+Both widenings are pure superset extensions: slicing a widened array back
+down to the s0 shapes (joker rows 15->8, drop the tag one-hot columns)
+reproduces the default-path arrays byte-identical (pinned in
+``tests/env/test_shop_obs.py``) -- the property the s1 Phi-shaping
+truncation design (docs/post-regen-training-plan.md section 8) relies on.
 """
 
 from __future__ import annotations
@@ -34,13 +54,17 @@ from typing import Any
 import numpy as np
 from gymnasium import spaces
 
+from jackdaw.engine.actions import GamePhase
 from jackdaw.engine.data.prototypes import BOOSTERS, CENTER_POOLS, JOKERS
+from jackdaw.env.hand_play_gym import MAX_JOKERS_V2
 from jackdaw.env.observation import (
+    _TAG_IDX,
     D_CONSUMABLE,
     D_GLOBAL,
     D_JOKER,
     D_PLAYING_CARD,
     NUM_CENTER_KEYS,
+    NUM_TAGS,
     center_key_id,
     encode_consumable,
     encode_global_context,
@@ -49,7 +73,10 @@ from jackdaw.env.observation import (
 )
 
 MAX_HAND_ROWS = 8
-MAX_JOKER_ROWS = 8  # matches SellJoker family size
+MAX_JOKER_ROWS = 8  # matches SellJoker family size (s0, FROZEN)
+# s1: obs joker rows widen 8 -> 15, matching MAX_JOKER_ROWS_S1 in
+# shop_action_space.py -- imported (not re-declared) so they can't drift.
+MAX_JOKER_ROWS_S1 = MAX_JOKERS_V2
 MAX_CONSUMABLE_ROWS = 3  # matches Sell/UseConsumable family size
 MAX_SHOP_ITEM_ROWS = 4  # matches BuyCard family size
 MAX_VOUCHER_ROWS = 4  # matches RedeemVoucher family size
@@ -61,6 +88,7 @@ D_ITEM = 16
 D_VOUCHER_ROW = 4
 D_BOOSTER_ROW = 8
 D_SHOP_CONTEXT = 12
+D_SHOP_CONTEXT_S1 = D_SHOP_CONTEXT + NUM_TAGS  # + offered-tag one-hot
 
 _EDITION_ORD = {"foil": 1, "holo": 2, "polychrome": 3, "negative": 4}
 _ENHANCEMENT_ORD = {k: i + 1 for i, k in enumerate(CENTER_POOLS.get("Enhanced", []))}
@@ -159,11 +187,56 @@ def _ids(cards: list, max_n: int) -> np.ndarray:
     return out
 
 
+def _check_joker_overfill(gs: dict[str, Any], jokers: list, max_rows: int) -> None:
+    """Loud raise on a GENUINE overfill only (s1 only; never called on the
+    default path). Mirrors ``hand_play_gym._check_joker_overfill``'s dual-
+    counter discipline: negative-edition jokers and slot-expanding
+    vouchers legitimately push the physical joker count above ``max_rows``
+    -- only a non-negative count exceeding ``joker_slots`` is a
+    Riff-raff-class engine bug worth staying loud about.
+    """
+    if len(jokers) > max_rows:
+        negatives = sum(
+            1 for j in jokers if getattr(j, "edition", None) and j.edition.get("negative")
+        )
+        joker_slots = gs.get("joker_slots", 5)
+        if len(jokers) - negatives > joker_slots:
+            raise ValueError(
+                f"{len(jokers)} jokers ({negatives} negative) exceeds "
+                f"joker_slots={joker_slots}: non-negative overfill (engine bug)"
+            )
+
+
+def _offered_tag_key(gs: dict[str, Any]) -> str | None:
+    """The tag key you'd receive by skipping the blind-select decision AT
+    HAND right now -- ``None`` (encoded all-zero) everywhere else,
+    including mid-shop and boss blinds: "held tags are already one-hot in
+    GC [135:159]; only the OFFERED tag was missing" (CLAUDE.md s1 section)
+    is about the live decision, not a standing property of the ante.
+    """
+    phase = gs.get("phase")
+    phase_str = getattr(phase, "value", phase)
+    if phase_str != GamePhase.BLIND_SELECT.value:
+        return None
+    on_deck = gs.get("blind_on_deck", "Small")
+    if on_deck not in ("Small", "Big"):
+        return None  # boss: SkipBlind illegal, no tag offered
+    return gs.get("round_resets", {}).get("blind_tags", {}).get(on_deck)
+
+
 def build_shop_observation(
     gs: dict[str, Any],
     pending: PendingTarget | None = None,
+    *,
+    s1_schema: bool = False,
 ) -> dict[str, np.ndarray]:
-    """Encode the full shop-agent observation from a live engine state."""
+    """Encode the full shop-agent observation from a live engine state.
+
+    ``s1_schema=False`` (default) reproduces the pre-s1 schema exactly --
+    byte-identical joker rows (8) and ``shop_context`` (12). ``s1_schema=
+    True`` widens joker rows to :data:`MAX_JOKER_ROWS_S1` (15) and appends
+    the offered-tag one-hot to ``shop_context`` (see module docstring).
+    """
     cr = gs.get("current_round", {})
     rr = gs.get("round_resets", {})
     phase = gs.get("phase")
@@ -174,9 +247,13 @@ def build_shop_observation(
     hand_arr = encode_playing_cards_batch(hand, gs)
     hand_cards, hand_mask = _pad_rows(list(hand_arr), MAX_HAND_ROWS, D_PLAYING_CARD)
 
-    jokers: list = gs.get("jokers", [])[:MAX_JOKER_ROWS]
+    max_joker_rows = MAX_JOKER_ROWS_S1 if s1_schema else MAX_JOKER_ROWS
+    all_jokers: list = gs.get("jokers", [])
+    if s1_schema:
+        _check_joker_overfill(gs, all_jokers, max_joker_rows)
+    jokers: list = all_jokers[:max_joker_rows]
     joker_arr = encode_jokers_batch(jokers, gs)
-    joker_rows, joker_mask = _pad_rows(list(joker_arr), MAX_JOKER_ROWS, D_JOKER)
+    joker_rows, joker_mask = _pad_rows(list(joker_arr), max_joker_rows, D_JOKER)
 
     consumables: list = gs.get("consumables", [])[:MAX_CONSUMABLE_ROWS]
     cons_rows = []
@@ -231,7 +308,7 @@ def build_shop_observation(
     booster_block, booster_mask = _pad_rows(booster_rows, NUM_BOOSTER_ROWS, D_BOOSTER_ROW)
 
     # -- shop context ----------------------------------------------------------
-    ctx = np.zeros(D_SHOP_CONTEXT, dtype=np.float32)
+    ctx = np.zeros(D_SHOP_CONTEXT_S1 if s1_schema else D_SHOP_CONTEXT, dtype=np.float32)
     ctx[0] = dollars / 50.0
     ctx[1] = cr.get("reroll_cost", 5) / 10.0
     ctx[2] = float(cr.get("free_rerolls", 0) > 0)
@@ -244,6 +321,12 @@ def build_shop_observation(
         ctx[9] = pending.max_cards / 5.0
     ctx[10] = gs.get("win_ante", 8) / 8.0
     ctx[11] = float(phase_str == "pack_opening")
+    if s1_schema:
+        offered = _offered_tag_key(gs)
+        if offered is not None:
+            ti = _TAG_IDX.get(offered)
+            if ti is not None:
+                ctx[D_SHOP_CONTEXT + ti] = 1.0
 
     return {
         "global_context": encode_global_context(gs),
@@ -252,7 +335,7 @@ def build_shop_observation(
         "hand_mask": hand_mask,
         "jokers": joker_rows,
         "joker_mask": joker_mask,
-        "joker_ids": _ids(jokers, MAX_JOKER_ROWS),
+        "joker_ids": _ids(jokers, max_joker_rows),
         "consumables": cons_block,
         "consumable_mask": cons_mask,
         "consumable_ids": _ids(consumables, MAX_CONSUMABLE_ROWS),
@@ -271,7 +354,12 @@ def build_shop_observation(
     }
 
 
-def observation_space() -> spaces.Dict:
+def observation_space(*, s1_schema: bool = False) -> spaces.Dict:
+    """``s1_schema=False`` (default) is byte-for-byte the pre-s1 schema --
+    every existing consumer (s0's checkpoint, ``ShopFeaturesExtractor``
+    default construction) keeps getting exactly this space.
+    """
+
     def box(*shape: int) -> spaces.Box:
         return spaces.Box(-np.inf, np.inf, shape=shape, dtype=np.float32)
 
@@ -281,15 +369,18 @@ def observation_space() -> spaces.Dict:
     def ids(n: int) -> spaces.Box:
         return spaces.Box(0, NUM_CENTER_KEYS, shape=(n,), dtype=np.int64)
 
+    joker_rows = MAX_JOKER_ROWS_S1 if s1_schema else MAX_JOKER_ROWS
+    ctx_dim = D_SHOP_CONTEXT_S1 if s1_schema else D_SHOP_CONTEXT
+
     return spaces.Dict(
         {
             "global_context": box(D_GLOBAL),
-            "shop_context": box(D_SHOP_CONTEXT),
+            "shop_context": box(ctx_dim),
             "hand_cards": box(MAX_HAND_ROWS, D_PLAYING_CARD),
             "hand_mask": mask(MAX_HAND_ROWS),
-            "jokers": box(MAX_JOKER_ROWS, D_JOKER),
-            "joker_mask": mask(MAX_JOKER_ROWS),
-            "joker_ids": ids(MAX_JOKER_ROWS),
+            "jokers": box(joker_rows, D_JOKER),
+            "joker_mask": mask(joker_rows),
+            "joker_ids": ids(joker_rows),
             "consumables": box(MAX_CONSUMABLE_ROWS, D_CONSUMABLE_ROW),
             "consumable_mask": mask(MAX_CONSUMABLE_ROWS),
             "consumable_ids": ids(MAX_CONSUMABLE_ROWS),

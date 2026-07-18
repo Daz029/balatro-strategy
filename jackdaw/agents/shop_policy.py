@@ -25,6 +25,24 @@ VOCABULARY FREEZE: embedding rows are keyed by ``center_key_id``, which is
 built from sorted ``centers.json`` keys. Changing that file reorders ids and
 silently corrupts every shop checkpoint — pinned by tests in
 ``tests/agents/test_shop_policy.py``.
+
+s1 seam (``s1_schema=True``, opt-in, default OFF — CLAUDE.md "s1" /
+docs/post-regen-training-plan.md section 6): the widened
+``shop_context`` carries the offered-tag one-hot appended AFTER the
+original 12 dims (``shop_obs.D_SHOP_CONTEXT_S1``). Naively concatenating
+those 24 new dims into the shared ``LayerNorm`` (as with every other
+block) would shift its mean/variance denominator for EVERY feature, even
+on old-schema states where the tag one-hot is all-zero — breaking the
+"byte-identical on old states" migration guarantee documented at
+``jackdaw/agents/checkpoint_migration.py``. Instead the tag one-hot rides
+ADDITIVELY: the base ``LayerNorm``+``Linear`` trunk only ever sees the
+original 12-dim slice (so its parameter shapes — and therefore the
+weight-copy in the migration script — are IDENTICAL between s0 and s1),
+and a separate zero-initialized ``Linear(NUM_TAGS, features_dim, bias=
+False)`` is applied to the tag slice and summed into the trunk's output.
+Zero-init makes a freshly-migrated model's tag term contribute exactly 0
+regardless of the tag one-hot's value; it only starts learning once PPO
+trains it.
 """
 
 from __future__ import annotations
@@ -36,7 +54,7 @@ from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 
 from jackdaw.agents.hand_policy import _entity_mlp, masked_pool
 from jackdaw.agents.joker_descriptors import DESCRIPTOR_DIM, DESCRIPTOR_MATRIX
-from jackdaw.env.observation import NUM_CENTER_KEYS
+from jackdaw.env.observation import NUM_CENTER_KEYS, NUM_TAGS
 
 LATENT_DIM = 256
 EMBED_DIM = 16
@@ -52,14 +70,24 @@ class ShopFeaturesExtractor(BaseFeaturesExtractor):
     separately so the trunk still sees them as distinct context.
     """
 
-    def __init__(self, observation_space: spaces.Dict, features_dim: int = LATENT_DIM) -> None:
+    def __init__(
+        self,
+        observation_space: spaces.Dict,
+        features_dim: int = LATENT_DIM,
+        s1_schema: bool = False,
+    ) -> None:
         super().__init__(observation_space, features_dim)
+        self.s1_schema = s1_schema
 
         self.embedding = nn.Embedding(NUM_CENTER_KEYS + 1, EMBED_DIM, padding_idx=0)
         self.register_buffer("descriptors", torch.as_tensor(DESCRIPTOR_MATRIX, dtype=torch.float32))
 
         d_global = observation_space["global_context"].shape[0]
         d_ctx = observation_space["shop_context"].shape[0]
+        # The trunk below only ever sees the ORIGINAL (s0) shop_context
+        # width -- see the module docstring's s1 seam note for why the
+        # offered-tag slice rides additively instead.
+        self._d_ctx_base = d_ctx - NUM_TAGS if s1_schema else d_ctx
         d_card = observation_space["hand_cards"].shape[1]
         d_joker = observation_space["jokers"].shape[1]
         d_cons = observation_space["consumables"].shape[1]
@@ -82,7 +110,7 @@ class ShopFeaturesExtractor(BaseFeaturesExtractor):
 
         concat_dim = (
             256  # global
-            + d_ctx  # shop context, raw
+            + self._d_ctx_base  # shop context, raw (s0 width, always)
             + 2 * 64  # hand pool
             + 2 * 64  # joker pool
             + 2 * 32  # consumable pool
@@ -98,6 +126,12 @@ class ShopFeaturesExtractor(BaseFeaturesExtractor):
             nn.Linear(256, features_dim),
             nn.ReLU(),
         )
+
+        if s1_schema:
+            # Offered-tag one-hot rides ADDITIVELY -- see module docstring.
+            # Zero-init so a freshly-migrated model is truly inert on it.
+            self.tag_encoder = nn.Linear(NUM_TAGS, features_dim, bias=False)
+            nn.init.zeros_(self.tag_encoder.weight)
 
     def _aug(self, rows: torch.Tensor, ids: torch.Tensor) -> torch.Tensor:
         """Append [embedding | descriptor] identity channels to entity rows."""
@@ -131,11 +165,13 @@ class ShopFeaturesExtractor(BaseFeaturesExtractor):
             obs["booster_mask"],
         )
         global_ctx = self.global_encoder(obs["global_context"])
-        return self.trunk(
+        ctx = obs["shop_context"]
+        ctx_base = ctx[:, : self._d_ctx_base]
+        base = self.trunk(
             torch.cat(
                 [
                     global_ctx,
-                    obs["shop_context"],
+                    ctx_base,
                     hand,
                     jokers,
                     cons,
@@ -147,3 +183,7 @@ class ShopFeaturesExtractor(BaseFeaturesExtractor):
                 dim=-1,
             )
         )
+        if self.s1_schema:
+            tag_onehot = ctx[:, self._d_ctx_base :]
+            return base + self.tag_encoder(tag_onehot)
+        return base
