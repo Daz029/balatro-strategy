@@ -1095,9 +1095,18 @@ forces a second regen.
       Verified: 0/7998 rows across the brute corpus + the relabel output
       have a zero-card label. The residual it DOES leave is legal-but-
       STARVED labels (the phantom took a slot, then lost to play-now) — no
-      failure flags those, so the stage2 relabel is being RE-RUN with the
-      clamp; only FF/Shortcut hands are affected, so the clean 2555 are
-      untouched.
+      failure flags those, so the stage2 relabel was RE-RUN with the clamp;
+      only FF/Shortcut hands are affected, so the clean 2555 are untouched.
+    - **MEASURED blast radius (2026-07-18, post-clamp relabel vs the
+      pre-clamp backup, 4000 rows):** exactly FOUR rows moved. 2 seeds
+      RECOVERED (`00001650`, `00001508` — the illegal empty discards that
+      GenerationError'd pre-clamp, dropped to failures.jsonl, never rows;
+      now legal) + 2 legal-but-STARVED labels improved (the class no failure
+      flags: `00001650` discard (0,6,7) p=0.055 -> (0,1,2,4) p=0.176;
+      `00001508` (5,6,7) p=0.781 -> (0,1,4,5,6) p=0.829). 0 action_type
+      flips, 0 zero-card labels, all 4 FF/Shortcut discards, all in the safe
+      direction. The other 3996 labels are byte-identical — the clamp is a
+      genuine no-op off the phantom class, exactly as predicted.
     - **LABEL-SEMANTICS change — every stage regenerates with it.** stage3/4
       regen (in progress on the 9700X) inherits it automatically (it lives
       in hand_solver.py); the stage2 relabel re-runs. Discriminating
