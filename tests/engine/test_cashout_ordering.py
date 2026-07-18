@@ -210,3 +210,36 @@ class TestRentalChargedOnceBeforeInterest:
         _beat_blind_at(gs, dollars=0)
         assert gs["round_earnings"].rental_cost == 3
 
+# ---------------------------------------------------------------------------
+# Held gold cards pay h_dollars before interest; a held Gold Seal pays nothing
+# ---------------------------------------------------------------------------
+
+
+class TestHeldGoldCardMoney:
+    """Gold Card enhancement pays $3 per held card at round end, before
+    interest; Gold Seal pays on play only — regression for the inherited
+    seal/enhancement mix-up (held seals paid, held gold cards never did).
+    """
+
+    def _win_with_held_card(self, card, dollars: int):
+        gs = _init_gs()
+        step(gs, SelectBlind())
+        gs["hand"][5] = card  # held: played indices are 0-4
+        gs["blind"].chips = 1
+        gs["dollars"] = dollars
+        step(gs, PlayHand(card_indices=(0, 1, 2, 3, 4)))
+        return gs
+
+    def test_held_gold_card_pays_and_crosses_interest_bracket(self):
+        gold = create_playing_card(Suit.HEARTS, Rank.KING)
+        gold.set_ability("m_gold")
+        gs = self._win_with_held_card(gold, dollars=2)
+        assert gs["dollars"] == 2 + 3
+        assert gs["round_earnings"].interest == 1
+
+    def test_held_gold_seal_pays_nothing(self):
+        sealed = create_playing_card(Suit.HEARTS, Rank.KING)
+        sealed.set_seal("Gold")
+        gs = self._win_with_held_card(sealed, dollars=2)
+        assert gs["dollars"] == 2
+        assert gs["round_earnings"].interest == 0

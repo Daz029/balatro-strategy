@@ -1539,14 +1539,20 @@ def _round_won(gs: dict[str, Any]) -> None:
     process_round_end_cards(jokers, gs)
 
     # ------------------------------------------------------------------
-    # 3. Gold Seal: +$3 per held card with Gold Seal in hand
+    # 3. Gold Card enhancement: +h_dollars ($3) per held gold card
+    #    (card.lua:1093). Keyed on ability["h_dollars"], NOT the Gold
+    #    Seal — the seal pays on play via get_p_dollars, never when held.
+    #    Lands before calculate_round_earnings, so it counts toward
+    #    interest (in-blind money class).
     # ------------------------------------------------------------------
     hand: list = gs.get("hand", [])
-    gold_seal_dollars = sum(
-        3 for c in hand if getattr(c, "seal", None) == "Gold" and not getattr(c, "debuff", False)
+    held_gold_dollars = sum(
+        c.ability.get("h_dollars", 0)
+        for c in hand
+        if isinstance(getattr(c, "ability", None), dict) and not getattr(c, "debuff", False)
     )
-    if gold_seal_dollars:
-        gs["dollars"] = gs.get("dollars", 0) + gold_seal_dollars
+    if held_gold_dollars:
+        gs["dollars"] = gs.get("dollars", 0) + held_gold_dollars
 
     # ------------------------------------------------------------------
     # 3b. Blue Seal: create Planet for most-played hand type
