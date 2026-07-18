@@ -31,6 +31,25 @@ laptop-single-worker scaling.
   cannot be CE-scored there); the flat control's dropped-label fraction (the recorded
   rider); p_clear-head MSE for both models; a memorization canary (sequence CE → ~0
   on ~50 examples) as the smoke check.
+- **Sequence-length stratification is part of the gate, not a diagnostic appendix.**
+  Every gate run must emit tables by true emitted sequence length and the
+  corresponding true set-size stratum; these must not be silently pooled into one
+  aggregate. Required metrics are: type-token accuracy; stop-token accuracy;
+  per-pick-position NLL; predicted versus true set-size distributions;
+  invalid/forced-termination rate under free-running decoding; and entropy by
+  decoding step. Pick and entropy tables retain step indices, and free-running
+  tables are stratified by the true length of the decoded example.
+- **Gate verdict rule:** aggregate NLL and exact-set match remain required, but
+  they cannot pass the gate by themselves. The gate is incomplete/fails if any
+  required length stratum or metric is missing or only reported in aggregate.
+  Candidate B is judged against pre-registered per-stratum thresholds (and against
+  the flat control where comparable), with teacher-forced and free-running
+  semantics labelled explicitly.
+- **Offline decode check:** on a representative held-out subset, compare the locked
+  greedy decoder against beam search. Record sequence validity, predicted set-size
+  distribution, sequence NLL, and action/set disagreement by true sequence-length
+  stratum. This is a gate review input and risk check; it does not silently replace
+  the pinned greedy deployment convention with beam search.
 - **Winrate = reference readout only**, never the gate. Rejected as primary on two
   grounds: statistical power (BC clear rates run 4–20% with median label p_clear 0.0
   — resolving a 2-point difference needs thousands of episodes per arm) and
@@ -194,6 +213,29 @@ Locked 2026-07-16 (CLAUDE.md "In-blind merge" section): pointer subsumes
 targeting goes live, tarot-targeting policy learned at the merge. Out of near-term
 scope; nothing changed by this grill.
 
+## Ablation checkpoints
+
+Record these as named, resumable checkpoints on the same held-out evaluation
+seeds. Each checkpoint should isolate the newly added component from the prior
+one, while preserving the BC-gate tables and the standard eval readouts:
+
+1. **B BC versus flat BC** — the Wave 1 architecture/control comparison and BC
+   gate baseline.
+2. **B PPO without the terminal-dollar term** — the h1 PPO baseline.
+3. **Add the terminal-dollar term** — isolate the value of the V_curve-based
+   terminal contribution.
+4. **Add the restored-state mixture** — isolate restored-state coverage from the
+   fresh-start sampler.
+5. **Replace the old partner with h1** — isolate the partner-policy change.
+6. **Enable the full s1 schema and shaping** — evaluate the widened observation,
+   SkipBlind, and Φ-shaping package as the final s1 step.
+
+Do not collapse these into one before/after result: retain the checkpoint,
+configuration, seed split, and metric delta for every transition.
+Short test runs are sufficient for these ablations; they are implementation and
+direction checks, not claims of final training performance. Reserve full-scale
+training for the checkpoint that survives the relevant gate.
+
 ## Ordered build plan
 
 **Wave 0 — now, during the regen window (all parallel, no gates):**
@@ -243,6 +285,11 @@ scope; nothing changed by this grill.
 1. v3-consuming encoder (embedding-gather card encoder, trigger-match
    fixed-weight cross-attention).
 2. B head + compound autoregressive distribution + monotone-mask machinery.
+   The Wave 1 gate must record, by true sequence-length/set-size stratum:
+   type-token accuracy, stop-token accuracy, per-pick-position NLL, predicted
+   versus true set-size distribution, invalid/forced-termination rate under
+   free-running decoding, and entropy by step. These are gate inputs, not optional
+   diagnostics; no verdict may be recorded from aggregate NLL alone.
 3. Sequence-CE BC trainer; mask-parity harness (call sites #1–3: BC/PPO/eval).
 4. BC gate (item 1 above): NLL + exact-set-match vs flat control on ≤8 support;
    ≥8 stratum + dropped fraction reported; winrate reference only.
