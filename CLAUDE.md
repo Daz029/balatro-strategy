@@ -1136,6 +1136,20 @@ forces a second regen.
       a multi-hour re-solve the clean aggregate doesn't justify. Clamp effect
       on the sweep: it strips illegal empty-discard candidates from BOTH arms
       symmetrically, so the comparison is unbiased by it.
+  - **WARNING — kicker fill shapes the BC set-size distribution (2026-07-19,
+    user call at the wave-1 BC smoke)**: the kicker-variant emitter
+    systematically FILLS lines out to 5 cards, so solver labels run ~80%
+    size-5 and B's BC policy inherits a strong "fill to 5" prior. The wave-1
+    gate's free-running signatures — the size-3/4 -> 5 prediction leak and
+    the ~8.7%-at-convergence overrun residual — are THIS prior, not a label
+    -distribution defect and not a head defect. Expected to be unlearned in
+    PPO against real reward (an overrun/overfill is a legal single-step
+    action, the A3 "training problem, not labels" class). If h1's set sizes
+    still look wrong after PPO (over-full plays/discards, kickers played into
+    thin boards), look HERE first — the label-side kicker fill — before
+    touching the pointer head or the gate bars. Gate-side handling is the
+    2026-07-19 amendment in docs/post-regen-training-plan.md (overrun/stop
+    bars demoted to diagnostics).
 
 ### h1 architecture — Candidate B COMMITTED (autoregressive pointer head)
 

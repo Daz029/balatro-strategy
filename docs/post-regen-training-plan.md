@@ -80,6 +80,25 @@ laptop-single-worker scaling.
   - (e) Memorization canary: MEAN NON-PADDING per-token CE < 0.05 on the
     ~50-example overfit set (padding steps excluded from the mean; a
     sum-over-steps CE would reward short sequences).
+  - **AMENDMENT (2026-07-19, user ruling on the smoke evidence, before the
+    recorded full-pool run)**: (1) the overrun hard-0 bar was an overcall —
+    overrun rate and the stop-accuracy sub-bar DEMOTE to reported diagnostics
+    (full case dump retained). Rationale: at genuine convergence (60-epoch
+    smoke, early-stopped) overrun plateaus at ~8.7%, driven by the size-5
+    class imbalance (~80% of labels carry no stop step; root cause is the
+    kicker-variant emitter filling lines to 5 — a faithful label property,
+    not a defect; see the WARNING at CLAUDE.md's kicker section); the
+    residual is the PPO-correctable class (an overrun is a legal single-step
+    action against the real env). Invalid-rate = 0 and the type-accuracy bar stay HARD.
+    (2) Bar (d) behaved as predicted and DEMOTES to a reported diagnostic:
+    the ratio fails when flat-compatible NLL improves faster than wide NLL
+    even while absolute wide NLL improves monotonically (1.08 → 0.87 → 0.71
+    across 10/30/60 epochs). The realistic remedy is MORE LARGE-HAND SAMPLES
+    in the BC pool — the B1 hand-size-tail knob (raise `--hand-size-tail-prob`
+    at a future regen) is the named lever; not pursued now. Smoke evidence at
+    convergence: B beats the flat control on every head-to-head bar
+    (NLL 2.41 vs 3.30, exact-set-match 0.445 vs 0.275, p_clear MSE 0.042 vs
+    0.052) with invalid rate 0.
   - **Gate data**: pipeline smoke + direction check NOW on stage2_k3_relabel +
     the regenerated v3 stage3 shards (transferred from the 9600X; the v3
     stage1 shards are STALE — never load them). The RECORDED verdict re-runs
@@ -329,6 +348,64 @@ training for the checkpoint that survives the relevant gate.
 4. BC gate (item 1 above): NLL + exact-set-match vs flat control on ≤8 support;
    ≥8 stratum + dropped fraction reported; winrate reference only.
 5. `KLToBCMaskablePPO` rewrite — in the shadow of the BC runs.
+
+**Wave 1 BUILD DONE 2026-07-18/19** (branch `wave-1`, one commit per ticket;
+implementation by Codex under architect review, all diffs inspected and
+independently re-verified):
+- Item 1 = `jackdaw/agents/hand_policy_v3.py` (`HandPlayFeaturesExtractorV3`:
+  fresh hand-net embedding over the frozen vocab ⊕ 24-d descriptors as
+  identity channels, trigger_match as fixed cross-attention weights gated by
+  joker_mask, copy fields on the joker rows; returns per-card latents — the
+  pointer seam — plus the pooled 256-d latent; `FlatV3BCModel` control rides
+  in the same file).
+- Item 2 = `jackdaw/agents/hand_pointer_head.py` (type-conditioned GRU
+  pointer decoder; monotone-ascent mask ⇒ one reachable sequence per set ⇒
+  NLL comparable to a flat softmax; 5-pick sequences terminate by
+  construction; forced-stop steps contribute exactly 0; the two mask
+  functions are the sole legality machinery = the parity contract).
+- Item 3 = `scripts/train_bc_v3.py` (one trainer, `--head pointer|flat` the
+  only arm difference; per-step legal-set smoothing; flat arm records the
+  dropped-wide rider — measured 8.3% on the smoke pool) +
+  `tests/agents/test_mask_parity.py` (call sites #1–3, PPO added as #2 by
+  item 5).
+- Item 4 harness = `scripts/eval_bc_gate.py` (executable pre-registration:
+  every stratified table, verdict block, overrun dump, greedy-vs-beam
+  review check; empty strata ⇒ INCOMPLETE, never pooled).
+- Item 5 = `KLToBCPointerPPO` in `scripts/train_hand_ppo_b.py` +
+  `jackdaw/agents/pointer_ppo_policy.py` + `HandPlayGymEnv action_version=2`
+  (MultiDiscrete([2]+[41]×5), STOP-padded, one shared engine path, v1
+  byte-identical; NO env-side masks — policy-side via the shared functions;
+  sequence-log-prob ratio; teacher-forced per-step categorical KL leash with
+  the template's adaptive multiplier/decay/watchdogs; 256-step integration
+  test green).
+
+**Wave 1 SMOKE FINDINGS (2026-07-18/19, pool = stage2_k3_relabel +
+stage3_full_v3, 24k examples; recorded verdict still pends the full regen
+pool):**
+- Budget sweep 10/30/60 epochs; the pointer arm reached genuine convergence
+  only at 60 (early stop epoch 50). At convergence **B beats the flat
+  control on every head-to-head bar**: shared-support NLL 2.41 vs 3.30
+  (better in every set-size stratum — size-4: 3.30 vs 4.94), exact-set-match
+  0.445 vs 0.275 (size-4: 0.30 vs 0.086), p_clear MSE 0.042 vs 0.052,
+  type-token 0.919 vs 0.911, invalid rate 0.0 across all free-running
+  decodes. Bars (a)/(c) PASS decisively.
+- Overrun terminations plateau at ~8.7% at convergence (14.6% → 9.9% → 8.7%);
+  stop accuracy 82% aggregate, discards 92% vs plays 75%. Root cause is the
+  kicker-fill label property (~80% size-5 labels), NOT a distribution or head
+  defect — see the 2026-07-19 amendment above and the CLAUDE.md kicker-section
+  WARNING (where to look if h1's set sizes stay wrong after PPO).
+- Bar (d) failed exactly as predicted by its ratio form: absolute wide
+  per-pick NLL improved monotonically (1.08 → 0.87 → 0.71) while
+  flat-compatible improved faster. Demoted to diagnostic per the amendment;
+  the future lever is more large-hand samples (B1 hand-size tail).
+- Distributional eyeball (all healthy): set-size marginals near-matched with
+  diagonal dominance everywhere except true-size-3 (24% diagonal, leaks to
+  5 — the kicker-fill prior); per-pick NLL monotone-decreasing along steps
+  (no late-step GRU degradation); entropy peaks at pick 1 and stays 0.4–0.7
+  nats late (partial convergence preserved PPO headroom); greedy-vs-beam:
+  both 100% valid, beam NLL 1.34 vs greedy 1.53, action disagreement 22.7%
+  peaking at size-3, beam shifts slightly toward smaller sets — the pinned
+  greedy convention holds, no structural pathology.
 
 **Wave 2 — h1 PPO (gated on wave 1 + regen done):**
 6. Terminal $ term wired into the `HandPlayGymEnv` hook (V_curve lookup;
