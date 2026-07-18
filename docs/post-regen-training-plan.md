@@ -55,6 +55,20 @@ rewrite).
   thresholds; end-of-round payouts (Golden Joker, Rocket) land AFTER and must not
   affect it (same rule class as the verified "Investment pays after interest") —
   THEN unit-test our cashout mirror against the engine's ordering.
+  **DONE 2026-07-18 — and the verification found FOUR inherited economy bugs**
+  (the expected ordering was violated in the live engine): joker end-of-round
+  payouts double-counted and leaking into interest; rental double-charged with
+  interest on the doubly-reduced balance; held Gold-Seal cards wrongly paid $3;
+  Gold Card `h_dollars` stored but never read (held gold cards paid $0). All four
+  fixed as separate commits; full record in `docs/engine_changes.md`. Ordering is
+  pinned through the real `step()` path in `tests/engine/test_cashout_ordering.py`;
+  the mirror (`jackdaw/env/cashout_mirror.py::dollars_after_cashout`) replays the
+  engine's own `CashOut` on an RNG-exact clone, so it tracks any future economy
+  change by construction. RIDER: s0 (and the harvest, and therefore the V_curve)
+  was trained/captured in the PRE-fix economy — payout-joker builds were ~2x as
+  lucrative and rentals cheaper-then-costlier than vanilla — so the V_curve is
+  mildly optimistic about payout-build money states; s1's own critic retrains in
+  the fixed economy, same second-order class as the other partner-era distortions.
 - **Sweeps edit engine state, never observation vectors.** Dollars is derived into
   ≥5 obs feature families (`shop_obs.py:207/213/235` — voucher affordability, raw
   shop_context dollars; `observation.py:544/735/887-924` — per-item affordability,
@@ -184,14 +198,26 @@ scope; nothing changed by this grill.
 
 **Wave 0 — now, during the regen window (all parallel, no gates):**
 - Interest-ordering verification (engine first, then the cashout mirror test).
+  DONE 2026-07-18 — four inherited economy bugs found and fixed en route
+  (see section 3 and `docs/engine_changes.md`).
 - V_curve extraction harness (blob restore → dollars edit → full re-encode →
   frozen s0 critic) + curve artifact + gut-checks (hard/soft split above).
+  HARNESS BUILT + smoke-run 2026-07-18 (`scripts/extract_v_curve.py`,
+  lookup in `jackdaw/agents/v_curve.py`); the full det-corpus extraction run
+  (17,967 shop states) is still queued.
 - v3 smoke pass: local low-depth shards incl. a few C1-manifest records through
   the C2 front-end and back through `train_bc.py`'s loader — closes the last
   C-phase gate. Re-time per-example cost after K merges.
 - Build (not fire) the s1 code: SkipBlind row 686, offered-tag one-hot, joker
   rows 8→15 + SellJoker [687,694), load shims, byte-identical-on-old-states
   tests, split k→action-index mapping pins.
+  DONE 2026-07-18 behind opt-in `ShopRunConfig.s1_schema` (default OFF =
+  byte-identical s0, pinned incl. exact `torch.equal` on the real a4_v4
+  checkpoint through `checkpoint_migration.widen_s0_checkpoint`); blind-select
+  "proceed" reuses the NextRound row; the tag one-hot rides additively through
+  a zero-init Linear (concat into the shared LayerNorm would break
+  byte-identity). Not yet wired into `train_shop_ppo.py` — that is the
+  s1-kickoff step.
 
 **Wave 1 — the B stack (critical path):**
 1. v3-consuming encoder (embedding-gather card encoder, trigger-match
