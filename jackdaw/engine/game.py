@@ -1445,7 +1445,7 @@ def _round_won(gs: dict[str, Any]) -> None:
 
     1. Fire joker ``end_of_round`` context (economy + scaling)
     2. Process perishable/rental (round_lifecycle)
-    3. Gold Seal: +$3 per held card with Gold Seal
+    3. Gold Card enhancement: +h_dollars per held card
     4. Return all cards to deck (hand + played + discard)
     5. Un-debuff all playing cards (blind debuffs don't persist)
     6. Track unused discards (for Garbage Tag)
@@ -1475,8 +1475,9 @@ def _round_won(gs: dict[str, Any]) -> None:
         joker_count=len(jokers),
     )
     eor = on_end_of_round(jokers, game_snap, rng)
-    # Apply joker end-of-round dollars
-    gs["dollars"] = gs.get("dollars", 0) + eor.get("dollars_earned", 0)
+    # End-of-round joker dollars flow once through calculate_round_earnings
+    # and are applied at CashOut, after interest. Applying them here too
+    # double-counts the payout and incorrectly lets it affect interest.
     # Remove self-destructed jokers (Popcorn, Turtle Bean, etc.)
     for removed_joker in eor.get("jokers_removed", []):
         if removed_joker in jokers:
@@ -1488,14 +1489,17 @@ def _round_won(gs: dict[str, Any]) -> None:
     process_round_end_cards(jokers, gs)
 
     # ------------------------------------------------------------------
-    # 3. Gold Seal: +$3 per held card with Gold Seal in hand
+    # 3. Gold Card enhancement: +h_dollars per held gold card. Gold Seal
+    # pays when a card scores, not while it is held.
     # ------------------------------------------------------------------
     hand: list = gs.get("hand", [])
-    gold_seal_dollars = sum(
-        3 for c in hand if getattr(c, "seal", None) == "Gold" and not getattr(c, "debuff", False)
+    held_gold_dollars = sum(
+        c.ability.get("h_dollars", 0)
+        for c in hand
+        if isinstance(getattr(c, "ability", None), dict) and not getattr(c, "debuff", False)
     )
-    if gold_seal_dollars:
-        gs["dollars"] = gs.get("dollars", 0) + gold_seal_dollars
+    if held_gold_dollars:
+        gs["dollars"] = gs.get("dollars", 0) + held_gold_dollars
 
     # ------------------------------------------------------------------
     # 3b. Blue Seal: create Planet for most-played hand type
