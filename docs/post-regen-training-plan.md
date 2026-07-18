@@ -11,6 +11,11 @@ Timing anchor: 5 stage3_full examples, single worker, laptop (i5-1340P) = 237.68
 (v3 encode, trigger matrix, prescreen, B7 gate). RIDER: gate K changed per-example
 cost at n=8 (prescreen now runs at every hand size) — **re-time after K merges**
 before trusting any wall-clock plan for the regen (~42k examples, 9600X).
+RE-TIMED POST-K (2026-07-18, same machine/config + `--dollar-marginals`): 119.15s
+for 5 = **23.8s/example, 5/5 generated, 0 failures** — K roughly HALVED per-example
+cost (the 218→~15 prescreen cut at n=8 outweighs the kicker-variant fan-out). The
+wall-clock plan for the remaining regen stages can be built on ~24s/example
+laptop-single-worker scaling.
 
 ## The nine items, resolved
 
