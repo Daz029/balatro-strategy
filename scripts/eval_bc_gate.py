@@ -1,8 +1,11 @@
 """Execute the pre-registered Candidate-B BC gate.
 
 This script is the executable pre-registration: thresholds are transcribed from
-the plan document and MUST NOT be edited after the first gate run. Empty strata
-mean INCOMPLETE, never silent pooling.
+the plan document and MUST NOT be edited after the first gate run. The dated
+2026-07-19 AMENDMENT in docs/post-regen-training-plan.md records the user's
+ruling that the (b) overrun/stop bars and (d) wide-NLL ratio are diagnostics;
+this is a recorded amendment, not a silent edit. Empty strata mean INCOMPLETE,
+never silent pooling.
 
 The evaluator deliberately keeps the pointer decoder's teacher-forced and
 free-running paths separate.  It uses the pointer module's legality functions
@@ -844,6 +847,19 @@ def _verdict(
             }
         )
 
+    def add_diagnostic(
+        check_id: str, description: str, measured: Any, threshold: str
+    ) -> None:
+        checks.append(
+            {
+                "id": check_id,
+                "description": description,
+                "status": "DIAGNOSTIC",
+                "measured": measured,
+                "threshold": threshold,
+            }
+        )
+
     def required(values: list[Any]) -> bool:
         return bool(values) and all(value is not None for value in values)
 
@@ -885,29 +901,34 @@ def _verdict(
     stop_values = [stop["by_set_size"][str(size)].get("accuracy") for size in range(1, MAX_PICKS)]
     b_type = type_table["aggregate"].get("B_accuracy")
     flat_type = type_table["aggregate"].get("flat_accuracy")
-    b_parts = [invalid, overrun, b_type, flat_type, *stop_values]
+    b_parts = [invalid, b_type, flat_type]
     b_pass = None
-    if invalid not in (None, 0) or overrun not in (None, 0):
+    if invalid not in (None, 0):
         b_pass = False
     elif required(b_parts):
-        b_pass = (
-            invalid == 0
-            and overrun == 0
-            and all(value >= 0.85 for value in stop_values)
-            and b_type >= flat_type - 0.01
-        )
+        b_pass = invalid == 0 and b_type >= flat_type - 0.01
     add(
         "(b) free_running_and_tokens",
-        "B free-running structural and teacher-forced token thresholds",
+        "B invalid-rate and type-token hard thresholds",
         b_pass,
         {
             "invalid_rate": invalid,
-            "overrun_rate": overrun,
             "B_type": b_type,
             "flat_type": flat_type,
-            "stop_by_size": stop_values,
         },
-        "invalid = 0, overrun = 0, stop >= 0.85 for sizes 1-4, B type >= flat - 0.01",
+        "invalid = 0 HARD, B type >= flat - 0.01 HARD",
+    )
+    add_diagnostic(
+        "(b) overrun_rate",
+        "B overrun termination rate",
+        {"overrun_rate": overrun},
+        "reported diagnostic; excluded from the overall verdict",
+    )
+    add_diagnostic(
+        "(b) stop_token_accuracy",
+        "B teacher-forced stop-token accuracy by true set size",
+        {"stop_by_size": stop_values},
+        "reported diagnostic; 0.85 reference for sizes 1-4, excluded from the overall verdict",
     )
 
     b_mse = pclear["aggregate"].get("B_value_mse")
@@ -922,12 +943,17 @@ def _verdict(
 
     wide_pick = wide["aggregate"].get("wide_per_pick_nll")
     flat_pick = wide["aggregate"].get("B_flat_compatible_per_pick_nll")
-    add(
+    wide_ratio = None
+    if required([wide_pick, flat_pick]) and flat_pick != 0:
+        wide_ratio = wide_pick / flat_pick
+    add_diagnostic(
         "(d) wide_per_pick_nll",
         "B wide-stratum per-pick NLL versus B flat-compatible per-pick NLL",
-        None if not required([wide_pick, flat_pick]) else wide_pick <= 1.5 * flat_pick,
-        {"wide": wide_pick, "B_flat_compatible": flat_pick},
-        "wide <= 1.5x B flat-compatible",
+        {"wide": wide_pick, "ratio": wide_ratio, "B_flat_compatible": flat_pick},
+        (
+            "reported diagnostic; wide <= 1.5x B flat-compatible reference, "
+            "excluded from the overall verdict"
+        ),
     )
 
     canary = _canary(pointer_metadata)
@@ -943,7 +969,7 @@ def _verdict(
         }
     )
     incomplete = tables.get("incomplete_requirements", [])
-    structural_fail = invalid not in (None, 0) or overrun not in (None, 0)
+    structural_fail = invalid not in (None, 0)
     any_fail = any(check["status"] == "FAIL" for check in checks)
     any_incomplete = bool(incomplete) or any(
         check["status"] in {"INCOMPLETE", "NOT_RUN"} for check in checks

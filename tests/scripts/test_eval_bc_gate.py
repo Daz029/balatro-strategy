@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
 
 import numpy as np
@@ -125,7 +126,7 @@ def test_empty_wide_stratum_is_incomplete(artifacts, monkeypatch, tmp_path):
     assert report["verdict"]["overall"] == "INCOMPLETE"
 
 
-def test_overrun_is_dumped_and_fails_verdict(artifacts, monkeypatch, tmp_path):
+def test_overrun_is_dumped_as_diagnostic(artifacts, monkeypatch, tmp_path):
     real_pointer_logits = PointerActionHead._pointer_logits
 
     def pick_favoring_logits(self, state, card_latents):
@@ -146,10 +147,54 @@ def test_overrun_is_dumped_and_fails_verdict(artifacts, monkeypatch, tmp_path):
     cases = report["tables"]["free_running_termination_audit"]["overrun_cases"]
     assert cases and {"seed", "true_label", "decoded_action"} <= set(cases[0])
     assert any(
-        check["id"] == "(b) free_running_and_tokens" and check["status"] == "FAIL"
+        check["id"] == "(b) overrun_rate" and check["status"] == "DIAGNOSTIC"
         for check in report["verdict"]["checks"]
     )
-    assert report["verdict"]["overall"] == "FAIL"
+    assert report["verdict"]["overall"] == artifacts["report"]["verdict"]["overall"]
+
+
+def test_amended_diagnostics_are_excluded_but_hard_b_bars_gate(artifacts):
+    baseline_tables = deepcopy(artifacts["report"]["tables"])
+    baseline_tables["incomplete_requirements"] = []
+    baseline_metadata = {"memorization_canary": 0.0}
+    baseline = gate._verdict(baseline_tables, baseline_metadata, {})
+
+    diagnostic_tables = deepcopy(baseline_tables)
+    diagnostic_tables["free_running_termination_audit"]["aggregate"][
+        "overrun_termination_rate"
+    ] = 0.5
+    for row in diagnostic_tables["stop_token_accuracy"]["by_set_size"].values():
+        row["accuracy"] = 0.0
+    diagnostic_tables["wide"]["aggregate"]["wide_per_pick_nll"] = 100.0
+    diagnostic_tables["wide"]["aggregate"]["B_flat_compatible_per_pick_nll"] = 1.0
+    diagnostic = gate._verdict(diagnostic_tables, baseline_metadata, {})
+    checks = {check["id"]: check for check in diagnostic["checks"]}
+
+    assert checks["(b) overrun_rate"]["status"] == "DIAGNOSTIC"
+    assert checks["(b) stop_token_accuracy"]["status"] == "DIAGNOSTIC"
+    assert checks["(d) wide_per_pick_nll"]["status"] == "DIAGNOSTIC"
+    assert checks["(d) wide_per_pick_nll"]["measured"] == {
+        "wide": 100.0,
+        "ratio": 100.0,
+        "B_flat_compatible": 1.0,
+    }
+    assert diagnostic["overall"] == baseline["overall"]
+
+    invalid_tables = deepcopy(baseline_tables)
+    invalid_tables["free_running_termination_audit"]["aggregate"]["invalid_rate"] = 0.01
+    invalid = gate._verdict(invalid_tables, baseline_metadata, {})
+    invalid_b = next(
+        check for check in invalid["checks"] if check["id"] == "(b) free_running_and_tokens"
+    )
+    assert invalid_b["status"] == "FAIL"
+
+    type_tables = deepcopy(baseline_tables)
+    type_table = type_tables["type_token_accuracy"]["aggregate"]
+    type_table["B_accuracy"] = type_table["flat_accuracy"] - 0.02
+    type_verdict = gate._verdict(type_tables, baseline_metadata, {})
+    assert next(
+        check for check in type_verdict["checks"] if check["id"] == "(b) free_running_and_tokens"
+    )["status"] == "FAIL"
 
 
 def test_beam_width_one_equals_greedy(artifacts, tmp_path):
