@@ -567,6 +567,8 @@ class DiscardChoice:
 
 
 # --- Big-hand play prescreen ------------------------------------------------
+# Stage 1 datasets may contain non-exhaustive labels from this prescreen; for
+# the no-joker curriculum, exhaustive labels remain computationally feasible.
 #
 # `best_immediate_play` is C(n,5) exact evaluations per call: 56 subsets at
 # n=8, ~4.4k at n=16 -- and it runs at every recursion node of
