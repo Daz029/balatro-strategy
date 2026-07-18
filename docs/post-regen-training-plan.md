@@ -202,9 +202,17 @@ scope; nothing changed by this grill.
   (see section 3 and `docs/engine_changes.md`).
 - V_curve extraction harness (blob restore → dollars edit → full re-encode →
   frozen s0 critic) + curve artifact + gut-checks (hard/soft split above).
-  HARNESS BUILT + smoke-run 2026-07-18 (`scripts/extract_v_curve.py`,
-  lookup in `jackdaw/agents/v_curve.py`); the full det-corpus extraction run
-  (17,967 shop states) is still queued.
+  DONE 2026-07-18 (`scripts/extract_v_curve.py`, lookup in
+  `jackdaw/agents/v_curve.py`): full det-corpus run — 17,967/17,967 shop
+  states, 1.46M critic forwards, 0 failures, ~12.5 min → `data/v_curve.json`
+  (gitignored; copy to the training machine with the checkpoint). Gut-checks:
+  interest-bracket structure clearly captured (sawtooth dips of ≤0.009
+  immediately after each $5 multiple — the 102 "monotonicity violations" ARE
+  the bracket nonlinearity, not defects; curve flattens past ~$25-30,
+  matching the engine's $25 interest cap); ante 7 flagged sparse (18 states —
+  consumers should clamp/smooth there); 5.3% of raw critic outputs fall
+  outside [0,1] (unclamped regression head, means stored as-is). The
+  pre-fix-economy rider in section 3 applies to this artifact.
 - v3 smoke pass: local low-depth shards incl. a few C1-manifest records through
   the C2 front-end and back through `train_bc.py`'s loader — closes the last
   C-phase gate. Re-time per-example cost after K merges.
