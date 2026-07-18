@@ -662,9 +662,12 @@ forces a second regen.
     exception type, counted and logged (a big count under ONE tag = a
     systematic fault eating a whole CLASS of states); >3% failure stops the run
     rather than shipping a thinned stage.
-  Next: the wider smoke run + loading a harvested shard back through
-  `train_bc.py`'s loader (the one C-phase gate not yet covered end-to-end),
-  then the regen itself on the 9600X.
+  The wider smoke run + harvested-shard-through-loader gate CLOSED 2026-07-18
+  (wave-0 v3 smoke pass, branch `wave-1`; full record in
+  `docs/post-regen-training-plan.md` wave 0): 11 manifest records incl. 3
+  consumable-carrying, 0 failures, all loader validations pass, real
+  consumable block verified non-empty end-to-end. Next: the regen itself on
+  the 9600X.
   ### Kicker variants + prescreen-at-n=8 — GRILLED AND LOCKED (2026-07-16)
   Decision record for `docs/bruteforce_speedup_and_kicker_design.md` (findings
   doc; measurements live there — the 17x budget overrun, the 0.845 capture /

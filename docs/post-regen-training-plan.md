@@ -216,6 +216,18 @@ scope; nothing changed by this grill.
 - v3 smoke pass: local low-depth shards incl. a few C1-manifest records through
   the C2 front-end and back through `train_bc.py`'s loader — closes the last
   C-phase gate. Re-time per-example cost after K merges.
+  DONE 2026-07-18 (laptop, branch `wave-1`): 11 C1-manifest records (8 head-of-
+  manifest 6 det + 2 sampled, plus 3 deliberately consumable-carrying found by
+  scanning restored blobs) labeled via `--manifest` + `--allow-sha-mismatch`,
+  11/11 written, 0 failures. All shards load through `train_bc.py::load_dataset`
+  with every validation passing: schema v3, 11/11 flat-compatible, index labels
+  legal under reconstructed masks, hand block up-padded to width 40, and — the
+  2026-07-13 rider verified end-to-end — the real consumable block comes through
+  non-empty (1/2/1 rows, nonzero features) on the consumable-carrying records.
+  Pooling with the 4,000-row stage2_k3_relabel brute corpus works (4,011
+  examples, per-stage weights applied). Sample rider: all 11 hands were width 8
+  (early-ante s0 states); the >8-width loader path rests on the B4 test suite,
+  not this sample. Re-time was already done post-K (23.8s/example, header note).
 - Build (not fire) the s1 code: SkipBlind row 686, offered-tag one-hot, joker
   rows 8→15 + SellJoker [687,694), load shims, byte-identical-on-old-states
   tests, split k→action-index mapping pins.
