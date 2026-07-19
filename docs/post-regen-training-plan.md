@@ -420,6 +420,70 @@ pool):**
 8. h1 PPO on the 9600X; evals include the discard-bias fingerprint re-run and
    archetype decomposition (calibration, not gates).
 
+**Wave 2 BUILD DONE 2026-07-19** (branch `wave-2`, one commit per ticket;
+implementation by Codex under architect review, all diffs inspected and
+independently re-verified; regen was DONE and the full-pool BC gate RUNNING
+at build time — the h1 PPO kickoff waits only on that gate's verdict):
+- Item 6 = `HandPlayGymEnv(v_curve=...)`: a clear pays
+  `1.0 + V_curve(ante, dollars_after_cashout(gs))`; losses/truncations pay
+  0.0 (clearing dominates); undecayed and unscaled by design. The lookup
+  ante is read from the TERMINAL state's `round_resets.ante` — `_round_won`
+  has already advanced it on a boss clear, which matches the shop-state
+  convention the V_curve artifact was extracted under (no off-by-one at
+  boss blinds). The cashout mirror is only invoked when a curve is set;
+  terminal `info` carries `balatro/v_curve_term` +
+  `balatro/dollars_after_cashout` for run analysis.
+- Item 7 env side = `HandPlayAdapter.snapshot_state/restore_state`
+  (RNG-exact pickle, continuation pinned byte-identical by test) +
+  `start_state_sampler` hook on `HandPlayGymEnv` mirroring the shop env
+  (`() -> bytes | None`, None = config-sample, `options["snapshot"]` pin
+  wins). Restore applies NOTHING (blob fidelity; the injection/restore
+  inversion of item 4); guard raises on any non-SELECTING_HAND blob. The
+  recorded consumable-tolerance test landed: restored real consumables
+  encode non-empty under v2 and stay zero-padding under v1; >5-joker
+  negative builds encode under v2 (15 rows) and truncate under v1.
+- Item 7 training side = `scripts/harvest_snapshot_sampler.py`
+  (`HarvestSnapshotSampler`): USER-LOCKED 2026-07-19 — snapshot pool is ALL
+  hand records, det + sampled uniform (reward is honest, so coverage bias
+  is the only risk and the anchor handles it — the shop-reservoir
+  argument); config-anchor default 0.5 (the shop fresh-run-anchor
+  precedent), validated strictly inside (0,1). Repair-on-restore goes
+  through `harvest_restore.restore_state`. STALENESS GREP (item-7 process
+  requirement, run 2026-07-19): every engine commit since harvest capture
+  — the K3 hand-eval fixes, all four economy fixes, blueprint_compat, O(n)
+  get_x_same — changes COMPUTATION, inherited free on restore (verified:
+  `h_dollars` was stored at card creation from the earliest commits; the
+  rental/payout fixes live in post-decision code). The Idol id cache
+  remains the ONLY stored-state skew, already repaired. Re-run the grep
+  for any engine fix landing before the actual h1 PPO run.
+- Item 8 prep = `train_hand_ppo_b.py --v-curve / --harvest-dir /
+  --config-anchor-frac` (independent flags — ablation checkpoints 2-4 fall
+  out of toggling them); ONE shared seeded sampler across the DummyVecEnv
+  workers (single-process, sequential resets). The EVAL env stays clean —
+  no sampler, no v_curve — so the fixed EVAL_ clear-rate yardstick stays
+  comparable across h0.5/h1 and the ablation ladder. Real-corpus smoke:
+  38,268 eligible hand records, 23/23 sampled blobs restored into the v2
+  env.
+- Item 8 evals = `eval_hand_policy.py` + `fingerprint_discard_bias.py` are
+  pointer-aware: dispatch reads checkpoint CONTENT (BC `metadata.head`,
+  SB3 `policy_class`), decode reuses the pinned greedy convention
+  (`predict_deterministic` / `HandPointerBCModel.decode`) — no second
+  decode implementation; fingerprint first-discard reads the type token on
+  v2. GC feature indices survive on v2 (the 21 potential dims are
+  APPENDED).
+- **h1 PPO kickoff (9600X, once the full-pool BC gate verdict is in;
+  transfer `data/v_curve.json`, `data/harvest_s0/`, and the gate-passing
+  BC checkpoint alongside the repo)**:
+  `uv run python scripts/train_hand_ppo_b.py --bc-checkpoint <gate-passing
+  pointer BC .pt> --v-curve data/v_curve.json --harvest-dir
+  data/harvest_s0 --config-anchor-frac 0.5 --total-timesteps 2000000
+  --log-dir runs/hand_ppo_b/h1 --seed 0`
+  then `eval_hand_policy.py --policy <best_model.zip>` and
+  `fingerprint_discard_bias.py --policy <best_model.zip> --data-dir <v3
+  shard pool>` (both load pointer checkpoints directly). Per the ablation
+  ladder, run checkpoint 2 (no flags) before 3 (`--v-curve`) before 4
+  (`--v-curve --harvest-dir`) as short runs first.
+
 **Wave 3 — s1 (gated on h1):**
 9. B-decoding `HandCheckpointPolicy` (item 5 above).
 10. s1 kickoff: widened obs + SkipBlind live; Φ shaping via truncation +
