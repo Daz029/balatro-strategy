@@ -30,3 +30,14 @@ def test_s1_schema_flag_reaches_run_suite(monkeypatch):
     eval_shop_policy.main()
 
     assert captured["s1_schema"] is True
+
+
+def test_partner_money_ordering_requires_hand_policy(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["eval_shop_policy.py", "--policy", "nextround", "--partner-money-ordering"],
+    )
+
+    with pytest.raises(SystemExit):
+        eval_shop_policy.main()

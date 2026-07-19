@@ -31,6 +31,7 @@ from train_shop_ppo import (  # noqa: E402
     ShopRewardWrapper,
     TrainingSchedules,
     build_model,
+    load_hand_policy,
     make_train_env,
     parse_args,
 )
@@ -304,6 +305,31 @@ class TestLearnSmoke:
 
 
 class TestS1Wiring:
+    def test_load_hand_policy_threads_money_ordering(self, monkeypatch, tmp_path):
+        captured = {}
+
+        class FakeHandCheckpointPolicy:
+            def __init__(self, *args, **kwargs):
+                captured["args"] = args
+                captured["kwargs"] = kwargs
+
+        monkeypatch.setattr(
+            "jackdaw.agents.hand_checkpoint_policy.HandCheckpointPolicy",
+            FakeHandCheckpointPolicy,
+        )
+        path = tmp_path / "hand.pt"
+        result = load_hand_policy(path, money_aware_ordering=True)
+
+        assert isinstance(result, FakeHandCheckpointPolicy)
+        assert captured == {
+            "args": (str(path),),
+            "kwargs": {"money_aware_ordering": True},
+        }
+
+    def test_partner_money_ordering_requires_hand_policy(self):
+        with pytest.raises(SystemExit):
+            parse_args(["--partner-money-ordering"])
+
     def test_fresh_s1_model_has_widened_spaces(self):
         model, _ = build_model(
             win_ante=1,

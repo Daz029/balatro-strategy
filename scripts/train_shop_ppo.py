@@ -408,7 +408,7 @@ class ShopRewardWrapper(gymnasium.Wrapper):
 # ---------------------------------------------------------------------------
 
 
-def load_hand_policy(path: Path | None):
+def load_hand_policy(path: Path | None, *, money_aware_ordering: bool = False):
     """Build the shop episode's hand partner from a checkpoint path.
 
     ``None`` -> greedy baseline (env default). A ``.pt``/``.zip`` path ->
@@ -419,7 +419,7 @@ def load_hand_policy(path: Path | None):
         return None
     from jackdaw.agents.hand_checkpoint_policy import HandCheckpointPolicy
 
-    return HandCheckpointPolicy(str(path))
+    return HandCheckpointPolicy(str(path), money_aware_ordering=money_aware_ordering)
 
 
 def make_train_env(
@@ -703,6 +703,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="hand-partner checkpoint (.pt BC / .zip PPO); omit for the greedy baseline",
     )
+    parser.add_argument(
+        "--partner-money-ordering",
+        action="store_true",
+        help="use clear-gated money-aware copy-joker ordering with the hand partner",
+    )
     parser.add_argument("--total-timesteps", type=int, default=500_000)
     parser.add_argument("--log-dir", type=str, default="runs/shop_ppo/default")
     parser.add_argument("--seed", type=int, default=0)
@@ -742,6 +747,8 @@ def build_parser() -> argparse.ArgumentParser:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.partner_money_ordering and args.hand_policy is None:
+        parser.error("--partner-money-ordering requires --hand-policy")
     if args.phi_checkpoint is not None and not args.s1_schema:
         parser.error("--phi-checkpoint requires --s1-schema")
     if (
@@ -780,7 +787,9 @@ def main() -> None:
         )
     # Shared partner instance — same one drives training and eval so the eval
     # win rate is measured against the real hand policy, not the greedy baseline.
-    hand_policy = load_hand_policy(args.hand_policy)
+    hand_policy = load_hand_policy(
+        args.hand_policy, money_aware_ordering=args.partner_money_ordering
+    )
     model, schedules = build_model(
         args.win_ante,
         schedules=schedules,
@@ -833,6 +842,8 @@ def main() -> None:
     ]
 
     partner_desc = str(args.hand_policy) if args.hand_policy is not None else "greedy (baseline)"
+    if args.partner_money_ordering:
+        partner_desc += " + money-aware ordering"
     print(
         f"Training shop agent: win_ante={args.win_ante}, "
         f"{args.total_timesteps} timesteps (seed={args.seed}), partner={partner_desc}..."

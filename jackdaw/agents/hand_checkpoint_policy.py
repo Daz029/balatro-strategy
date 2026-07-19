@@ -23,6 +23,7 @@ from typing import Any
 
 import numpy as np
 
+from jackdaw.agents.ordering_objective import make_clear_gated_money_objective
 from jackdaw.engine.actions import Action
 from jackdaw.env.hand_play_gym import (
     action_to_engine_action,
@@ -108,13 +109,24 @@ class HandCheckpointPolicy:
     device:
         Torch device string (default ``"cpu"`` -- the partner runs inline in
         the shop env's step loop).
+    money_aware_ordering:
+        If true, build a clear-gated money objective fresh for every call and
+        pass it to both decoder paths; the factory must snapshot the current
+        banked chips for that hand-turn decision. Defaults to false.
     """
 
-    def __init__(self, checkpoint_path: str | Path, device: str = "cpu") -> None:
+    def __init__(
+        self,
+        checkpoint_path: str | Path,
+        device: str = "cpu",
+        *,
+        money_aware_ordering: bool = False,
+    ) -> None:
         import torch
 
         self._torch = torch
         self._device = device
+        self._money_aware_ordering = money_aware_ordering
         path = Path(checkpoint_path)
 
         if path.suffix.lower() == ".zip":
@@ -160,10 +172,17 @@ class HandCheckpointPolicy:
             raise ValueError(f"unrecognized BC checkpoint head {head!r}: {path}")
 
     def __call__(self, game_state: dict[str, Any]) -> Action:
+        ordering_objective = (
+            make_clear_gated_money_objective(game_state)
+            if self._money_aware_ordering
+            else None
+        )
         if self._kind in {"pointer_bc", "pointer_ppo"}:
             obs = build_observation_v2(game_state)
             action = self._infer_pointer(obs)
-            return pointer_action_to_engine_action(action, game_state)
+            return pointer_action_to_engine_action(
+                action, game_state, ordering_objective=ordering_objective
+            )
 
         mask = hand_action_mask(game_state)
         if not mask.any():
@@ -172,7 +191,7 @@ class HandCheckpointPolicy:
             raise ValueError("HandCheckpointPolicy called with no legal hand action")
         obs = build_observation(game_state)
         action = self._infer(obs, mask)
-        return action_to_engine_action(action, game_state)
+        return action_to_engine_action(action, game_state, ordering_objective=ordering_objective)
 
     def _infer_pointer(self, obs: dict[str, np.ndarray]) -> np.ndarray:
         from jackdaw.agents.pointer_ppo_policy import _action_vector_from_decode
