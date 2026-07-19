@@ -15,6 +15,7 @@ hand-agent in isolation from shop") for the training design this supports.
 
 from __future__ import annotations
 
+import pickle
 import random
 from dataclasses import dataclass
 from typing import Any
@@ -514,6 +515,29 @@ class HandPlayAdapter:
         from jackdaw.engine.game import step as engine_step
 
         engine_step(self._gs, action)
+        return snapshot(self._gs)
+
+    # -- snapshot / restore (start-state reservoir substrate) ------------------
+
+    def snapshot_state(self) -> bytes:
+        """Serialize the complete engine state, RNG included.
+
+        The bytes are self-contained: restoring them into any adapter
+        instance (same code version) continues the run byte-identically.
+        Pickle is fine here -- snapshots are internal training artifacts,
+        never untrusted input.
+        """
+        return pickle.dumps(self._gs, protocol=pickle.HIGHEST_PROTOCOL)
+
+    def restore_state(self, blob: bytes) -> GameState:
+        """Restore a snapshot taken by :meth:`snapshot_state`.
+
+        Restoring applies no acquisition passives or randomization: the blob
+        already contains every effect present at capture time. Capture-skew
+        repair belongs to the training-side sampler, which supplies repaired
+        blobs to this adapter.
+        """
+        self._gs = pickle.loads(blob)
         return snapshot(self._gs)
 
     def get_legal_actions(self) -> list[Action]:

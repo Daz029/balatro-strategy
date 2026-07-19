@@ -412,6 +412,42 @@ pool):**
   peaking at size-3, beam shifts slightly toward smaller sets — the pinned
   greedy convention holds, no structural pathology.
 
+**Wave 1 RECORDED GATE — ADJUDICATED PASS (2026-07-19, joint ruling):**
+- Run: 9700 at ab868ec, full regen pool `data/hand_agent_demos_v4` (stage1
+  2,000 / stage2 4,000 / stage3 20,000 / stage4 8,000 / stage5_harvested
+  7,891 = 41,891 rows; val n=4,045 via the CRC32 split), `--seed 0
+  --max-epochs 100`; artifacts `runs/bc_v3_full/` (pointer best epoch 22,
+  val sequence NLL 2.588; flat control best epoch 21, val CE 3.017; report
+  at `runs/bc_v3_full/gate/report.{json,md}`).
+- **Every substantive bar PASSED, B dominating flat on all of them**:
+  (a) shared NLL 2.494 vs 3.017 and exact-set-match 0.425 vs 0.329 (B wins
+  every set-size stratum; largest gap size-4: 0.468 vs 0.104; discards
+  0.248 vs 0.145); (b) invalid rate 0 HARD, type accuracy 0.922 vs 0.913;
+  (c) p_clear MSE 0.038 vs 0.060. Flat dropped-wide rider: n=275 val
+  labels (6.8%).
+- Diagnostics matched the smoke signatures: overrun 8.3% (the kicker-fill
+  prior, per the amendment); stop-by-size 0.66/0.82/0.72/0.89; wide
+  per-pick ratio 1.54 on n=275; empty strata all structural (per-pick
+  positions beyond set size; wide sizes 1 and 3).
+- The ONLY failing check was **(e) memorization canary: 0.296 vs < 0.05**,
+  after exhausting the probe's 200-epoch budget. ADJUDICATED a
+  probe-budget artifact, not a defect, on reproduced evidence: the canary
+  set is deterministic (CRC32 split ⇒ the first ~50 non-val
+  stage1_no_jokers rows; verified 50 unique obs, 0 conflicting labels),
+  and an extended re-run of the exact set (same seed, fresh probe) was
+  still steadily descending at step 200 and memorized fully — CE < 0.05
+  by ~step 290, < 0.01 at step 375. Root cause: the canary is full-batch
+  (1 optimizer step per epoch) and the full pool's first-50 are 47/50
+  size-5 labels (kicker fill), ~5× the pick tokens of the smoke-era
+  canary set that passed at 0.0490. The learning pathway the canary
+  exists to certify is healthy; the budget was mis-sized. Correction
+  ticket raises the probe's step cap (early break keeps healthy runs
+  cheap); the 0.05 bar and the mean-non-padding-token-CE metric are
+  unchanged. The gate report itself is kept verbatim (pre-registration
+  discipline) — this block is the adjudication record.
+- `runs/bc_v3_full/pointer/bc_v3_pointer.pt` is the h1 BC artifact for
+  wave-2 PPO; `bc_v3_flat.pt` is retained as the ablation control.
+
 **Wave 2 — h1 PPO (gated on wave 1 + regen done):**
 6. Terminal $ term wired into the `HandPlayGymEnv` hook (V_curve lookup;
    clear-gated; no decay).
@@ -419,6 +455,70 @@ pool):**
    tolerance, terminal guard, staleness grep).
 8. h1 PPO on the 9600X; evals include the discard-bias fingerprint re-run and
    archetype decomposition (calibration, not gates).
+
+**Wave 2 BUILD DONE 2026-07-19** (branch `wave-2`, one commit per ticket;
+implementation by Codex under architect review, all diffs inspected and
+independently re-verified; regen was DONE and the full-pool BC gate RUNNING
+at build time — the h1 PPO kickoff waits only on that gate's verdict):
+- Item 6 = `HandPlayGymEnv(v_curve=...)`: a clear pays
+  `1.0 + V_curve(ante, dollars_after_cashout(gs))`; losses/truncations pay
+  0.0 (clearing dominates); undecayed and unscaled by design. The lookup
+  ante is read from the TERMINAL state's `round_resets.ante` — `_round_won`
+  has already advanced it on a boss clear, which matches the shop-state
+  convention the V_curve artifact was extracted under (no off-by-one at
+  boss blinds). The cashout mirror is only invoked when a curve is set;
+  terminal `info` carries `balatro/v_curve_term` +
+  `balatro/dollars_after_cashout` for run analysis.
+- Item 7 env side = `HandPlayAdapter.snapshot_state/restore_state`
+  (RNG-exact pickle, continuation pinned byte-identical by test) +
+  `start_state_sampler` hook on `HandPlayGymEnv` mirroring the shop env
+  (`() -> bytes | None`, None = config-sample, `options["snapshot"]` pin
+  wins). Restore applies NOTHING (blob fidelity; the injection/restore
+  inversion of item 4); guard raises on any non-SELECTING_HAND blob. The
+  recorded consumable-tolerance test landed: restored real consumables
+  encode non-empty under v2 and stay zero-padding under v1; >5-joker
+  negative builds encode under v2 (15 rows) and truncate under v1.
+- Item 7 training side = `scripts/harvest_snapshot_sampler.py`
+  (`HarvestSnapshotSampler`): USER-LOCKED 2026-07-19 — snapshot pool is ALL
+  hand records, det + sampled uniform (reward is honest, so coverage bias
+  is the only risk and the anchor handles it — the shop-reservoir
+  argument); config-anchor default 0.5 (the shop fresh-run-anchor
+  precedent), validated strictly inside (0,1). Repair-on-restore goes
+  through `harvest_restore.restore_state`. STALENESS GREP (item-7 process
+  requirement, run 2026-07-19): every engine commit since harvest capture
+  — the K3 hand-eval fixes, all four economy fixes, blueprint_compat, O(n)
+  get_x_same — changes COMPUTATION, inherited free on restore (verified:
+  `h_dollars` was stored at card creation from the earliest commits; the
+  rental/payout fixes live in post-decision code). The Idol id cache
+  remains the ONLY stored-state skew, already repaired. Re-run the grep
+  for any engine fix landing before the actual h1 PPO run.
+- Item 8 prep = `train_hand_ppo_b.py --v-curve / --harvest-dir /
+  --config-anchor-frac` (independent flags — ablation checkpoints 2-4 fall
+  out of toggling them); ONE shared seeded sampler across the DummyVecEnv
+  workers (single-process, sequential resets). The EVAL env stays clean —
+  no sampler, no v_curve — so the fixed EVAL_ clear-rate yardstick stays
+  comparable across h0.5/h1 and the ablation ladder. Real-corpus smoke:
+  38,268 eligible hand records, 23/23 sampled blobs restored into the v2
+  env.
+- Item 8 evals = `eval_hand_policy.py` + `fingerprint_discard_bias.py` are
+  pointer-aware: dispatch reads checkpoint CONTENT (BC `metadata.head`,
+  SB3 `policy_class`), decode reuses the pinned greedy convention
+  (`predict_deterministic` / `HandPointerBCModel.decode`) — no second
+  decode implementation; fingerprint first-discard reads the type token on
+  v2. GC feature indices survive on v2 (the 21 potential dims are
+  APPENDED).
+- **h1 PPO kickoff (9600X, once the full-pool BC gate verdict is in;
+  transfer `data/v_curve.json`, `data/harvest_s0/`, and the gate-passing
+  BC checkpoint alongside the repo)**:
+  `uv run python scripts/train_hand_ppo_b.py --bc-checkpoint <gate-passing
+  pointer BC .pt> --v-curve data/v_curve.json --harvest-dir
+  data/harvest_s0 --config-anchor-frac 0.5 --total-timesteps 2000000
+  --log-dir runs/hand_ppo_b/h1 --seed 0`
+  then `eval_hand_policy.py --policy <best_model.zip>` and
+  `fingerprint_discard_bias.py --policy <best_model.zip> --data-dir <v3
+  shard pool>` (both load pointer checkpoints directly). Per the ablation
+  ladder, run checkpoint 2 (no flags) before 3 (`--v-curve`) before 4
+  (`--v-curve --harvest-dir`) as short runs first.
 
 **Wave 3 — s1 (gated on h1):**
 9. B-decoding `HandCheckpointPolicy` (item 5 above).

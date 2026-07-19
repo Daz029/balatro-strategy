@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -31,6 +32,7 @@ for _path in (str(_SCRIPTS_DIR), str(_REPO_ROOT)):
 
 import torch as th  # noqa: E402
 from generate_hand_demos import stage_presets  # noqa: E402
+from harvest_snapshot_sampler import HarvestSnapshotSampler  # noqa: E402
 from stable_baselines3 import PPO  # noqa: E402
 from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback  # noqa: E402
 from stable_baselines3.common.utils import explained_variance  # noqa: E402
@@ -43,6 +45,7 @@ from jackdaw.agents.pointer_ppo_policy import (  # noqa: E402
     load_bc_model,
     load_bc_weights,
 )
+from jackdaw.agents.v_curve import VCurve, load_v_curve  # noqa: E402
 from jackdaw.env.hand_play_adapter import HandPlayConfig  # noqa: E402
 from jackdaw.env.hand_play_gym import HandPlayGymEnv  # noqa: E402
 
@@ -230,7 +233,12 @@ def resolve_stage_configs(stages: list[str]) -> list[HandPlayConfig]:
 
 
 def make_vec_env(
-    configs: HandPlayConfig | list[HandPlayConfig], seed_prefix: str, n_envs: int
+    configs: HandPlayConfig | list[HandPlayConfig],
+    seed_prefix: str,
+    n_envs: int,
+    *,
+    v_curve: VCurve | None = None,
+    start_state_sampler: Callable[[], bytes | None] | None = None,
 ) -> DummyVecEnv:
     if isinstance(configs, HandPlayConfig):
         configs = [configs]
@@ -242,6 +250,8 @@ def make_vec_env(
             seed_prefix=f"{seed_prefix}{rank}",
             obs_version=2,
             action_version=2,
+            v_curve=v_curve,
+            start_state_sampler=start_state_sampler,
         )
 
     return DummyVecEnv([factory(rank) for rank in range(n_envs)])
@@ -261,8 +271,18 @@ def build_model(
     learning_rate: float = 3e-5,
     ent_coef: float = 0.01,
     device: str = "auto",
+    v_curve: VCurve | None = None,
+    start_state_sampler: Callable[[], bytes | None] | None = None,
 ) -> KLToBCPointerPPO:
-    env = make_vec_env(config, seed_prefix=f"HANDPPO_B_S{seed}_R", n_envs=n_envs)
+    # DummyVecEnv is single-process and resets workers sequentially, so one
+    # seeded sampler stream is shared intentionally across every training env.
+    env = make_vec_env(
+        config,
+        seed_prefix=f"HANDPPO_B_S{seed}_R",
+        n_envs=n_envs,
+        v_curve=v_curve,
+        start_state_sampler=start_state_sampler,
+    )
     bc_model = load_bc_model(bc_checkpoint, device="cpu")
     model = KLToBCPointerPPO(
         PointerPPOPolicy,
@@ -306,12 +326,23 @@ def main() -> None:
     parser.add_argument("--eval-freq", type=int, default=20_000)
     parser.add_argument("--checkpoint-freq", type=int, default=100_000)
     parser.add_argument("--device", default="auto")
+    parser.add_argument("--v-curve", type=Path, default=None)
+    parser.add_argument("--harvest-dir", type=Path, default=None)
+    parser.add_argument("--config-anchor-frac", type=float, default=0.5)
     args = parser.parse_args()
 
     stages = [args.stage] if args.stage is not None else [s for s in args.stages.split(",") if s]
     configs = resolve_stage_configs(stages)
     log_path = Path(args.log_dir)
     log_path.mkdir(parents=True, exist_ok=True)
+    v_curve = load_v_curve(args.v_curve) if args.v_curve is not None else None
+    sampler = None
+    if args.harvest_dir is not None and args.config_anchor_frac != 1.0:
+        sampler = HarvestSnapshotSampler(
+            args.harvest_dir,
+            config_anchor_frac=args.config_anchor_frac,
+            seed=args.seed,
+        )
     model = build_model(
         args.bc_checkpoint,
         configs,
@@ -324,7 +355,11 @@ def main() -> None:
         learning_rate=args.learning_rate,
         ent_coef=args.ent_coef,
         device=args.device,
+        v_curve=v_curve,
+        start_state_sampler=sampler,
     )
+    # Keep EVAL clean: the fixed EVAL_ suite's clear-rate yardstick must stay
+    # comparable across h0.5/h1 and across the ablation checkpoints.
     eval_env = make_vec_env(configs, seed_prefix=EVAL_SEED_PREFIX, n_envs=len(configs))
     eval_callback = EvalCallback(
         eval_env,

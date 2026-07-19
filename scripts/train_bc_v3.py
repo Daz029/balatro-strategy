@@ -317,10 +317,16 @@ def _run_pointer_memorization_canary(
     device: torch.device,
     seed: int,
     lr: float,
-    max_epochs: int = 200,
+    max_epochs: int = 1000,
     target_ce: float = 0.05,
 ) -> dict[str, float | int | bool]:
-    """Overfit a fresh pointer model on the first 50 training examples."""
+    """Overfit a fresh pointer model on the first 50 training examples.
+
+    The canary is full-batch (one optimizer step per epoch), and the
+    size-5-heavy 50-example set needed about 375 steps to memorize in the
+    2026-07-19 v4 full-pool measurement. The early break at ``target_ce``
+    keeps healthy runs cheap; the cap is only paid by genuine failures.
+    """
 
     canary_set = train_set.slice(torch.arange(min(50, len(train_set))))
     if not len(canary_set):

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import pickle
 import sys
 from pathlib import Path
 
@@ -14,6 +16,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 import stable_baselines3  # noqa: E402
+from harvest_snapshot_sampler import HarvestSnapshotSampler  # noqa: E402
 from train_hand_ppo_b import (  # noqa: E402
     KLToBCPointerPPO,
     build_model,
@@ -21,7 +24,8 @@ from train_hand_ppo_b import (  # noqa: E402
 )
 
 from jackdaw.agents.hand_pointer_head import HandPointerBCModel  # noqa: E402
-from jackdaw.env.hand_play_adapter import HandPlayConfig  # noqa: E402
+from jackdaw.agents.v_curve import VCurve  # noqa: E402
+from jackdaw.env.hand_play_adapter import HandPlayAdapter, HandPlayConfig  # noqa: E402
 from jackdaw.env.hand_play_gym import observation_space_v2  # noqa: E402
 
 
@@ -46,6 +50,27 @@ def _tiny_model(checkpoint: Path, *, n_steps: int = 8, n_envs: int = 2):
         n_steps=n_steps,
         batch_size=n_steps * n_envs,
         device="cpu",
+    )
+
+
+def _single_snapshot_harvest(path: Path) -> None:
+    """Write one post-fix synthetic hand record."""
+    blob_dir = path / "blobs"
+    blob_dir.mkdir(parents=True)
+    adapter = HandPlayAdapter(
+        HandPlayConfig(ante_range=(1, 1), hands_range=(1, 1), discards_range=(0, 0))
+    )
+    adapter.reset("b_red", 1, "TRAINING_SYNTHETIC")
+    raw_state = adapter.raw_state
+    assert "id" in raw_state["current_round"]["idol_card"]
+    record_id = "run_0"
+    (blob_dir / "run.pkl").write_bytes(pickle.dumps({record_id: adapter.snapshot_state()}))
+    (path / "metadata.jsonl").write_text(
+        json.dumps(
+            {"record_id": record_id, "run_seed": "run", "kind": "hand", "source": "det"}
+        )
+        + "\n",
+        encoding="utf-8",
     )
 
 
@@ -88,3 +113,51 @@ def test_pointer_ppo_short_run_logs_kl_and_round_trips_checkpoint(bc_checkpoint,
     original_action = model.policy.predict(comparison_obs, deterministic=True)[0]
     loaded_action = loaded.policy.predict(comparison_obs, deterministic=True)[0]
     assert np.array_equal(original_action, loaded_action)
+
+
+def test_build_model_keeps_training_knobs_out_of_eval(bc_checkpoint):
+    """Training envs carry both optional inputs; eval defaults carry neither."""
+    curve = VCurve({1: {0: 0.25}}, dollar_min=0, dollar_max=50)
+
+    def sampler():
+        return None
+
+    model = build_model(
+        bc_checkpoint,
+        HandPlayConfig(),
+        seed=32,
+        n_envs=2,
+        n_steps=8,
+        batch_size=16,
+        device="cpu",
+        v_curve=curve,
+        start_state_sampler=sampler,
+    )
+
+    assert all(env._v_curve is curve for env in model.env.envs)
+    assert all(env._sampler is sampler for env in model.env.envs)
+
+    eval_env = make_vec_env(HandPlayConfig(), seed_prefix="EVAL", n_envs=2)
+    assert all(env._v_curve is None for env in eval_env.envs)
+    assert all(env._sampler is None for env in eval_env.envs)
+
+
+def test_pointer_ppo_short_run_with_harvest_sampler_and_v_curve(bc_checkpoint, tmp_path):
+    """A short PPO rollout tolerates repaired snapshot starts and terminal value."""
+    harvest_dir = tmp_path / "harvest"
+    _single_snapshot_harvest(harvest_dir)
+    sampler = HarvestSnapshotSampler(harvest_dir, seed=33)
+    curve = VCurve({1: {0: 0.25}}, dollar_min=0, dollar_max=50)
+    model = build_model(
+        bc_checkpoint,
+        HandPlayConfig(),
+        seed=33,
+        n_envs=2,
+        n_steps=8,
+        batch_size=16,
+        device="cpu",
+        v_curve=curve,
+        start_state_sampler=sampler,
+    )
+
+    model.learn(total_timesteps=128)
