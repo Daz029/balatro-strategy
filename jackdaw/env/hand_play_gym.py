@@ -31,11 +31,13 @@ ante-play track), deliberately NOT reusing ``BalatroGymnasiumEnv``:
     critic. Deliberately no shaping (see CLAUDE.md: potential-based only,
     if ever).
 
-    FUTURE HOOK (h1 fine-tune stage): once the shop-agent's critic exists,
-    unused hands/dollars gain a terminal value term --
-    ``1{clear} + f(hands_left, dollars)`` from the marginal-value-of-$1
-    curve (CLAUDE.md "Money/dollar handling"). That is a deliberate
-    objective change made here, at the terminal reward, not shaping.
+    Terminal dollar term (h1 fine-tune stage): when a shop-agent critic's
+    ``V_curve`` is supplied, a clear receives
+    ``1.0 + V_curve(ante, dollars_after_cashout)``. The term is clear-gated
+    because clearing dominates money in this isolated objective: losses and
+    truncations pay 0.0. It is deliberately undecayed and unscaled; this is
+    an objective change at the terminal reward, not shaping (CLAUDE.md
+    "Money/dollar handling").
 
 Seeding: episode seeds are strings ``f"{seed_prefix}_{n:08d}"`` fed to
 ``HandPlayAdapter`` (fully deterministic per seed). ``reset(seed=n)`` jumps
@@ -57,6 +59,7 @@ from jackdaw.agents.hand_action_space import (
     action_to_combo,
     legal_action_mask,
 )
+from jackdaw.agents.v_curve import VCurve
 from jackdaw.engine.actions import Discard as EngineDiscard
 from jackdaw.engine.actions import GamePhase
 from jackdaw.engine.actions import PlayHand as EnginePlayHand
@@ -67,6 +70,7 @@ from jackdaw.engine.play_ordering import (
     needs_permutation_search,
 )
 from jackdaw.env.action_space import ActionType
+from jackdaw.env.cashout_mirror import dollars_after_cashout
 from jackdaw.env.hand_play_adapter import HandPlayAdapter, HandPlayConfig
 from jackdaw.env.observation import (
     D_CONSUMABLE,
@@ -502,6 +506,9 @@ class HandPlayGymEnv(gymnasium.Env):
         Action encoding version. 1 (default) is the frozen Discrete(436)
         space. 2 requires ``obs_version=2`` and uses the policy-masked
         ``MultiDiscrete([2] + [41] * 5)`` pointer encoding.
+    v_curve:
+        Optional shop-critic dollar-value lookup used only on won terminal
+        episodes.
     """
 
     metadata: dict[str, Any] = {"render_modes": []}
@@ -513,6 +520,7 @@ class HandPlayGymEnv(gymnasium.Env):
         max_steps: int = DEFAULT_MAX_STEPS,
         obs_version: int = 1,
         action_version: int = 1,
+        v_curve: VCurve | None = None,
     ) -> None:
         super().__init__()
         if obs_version not in (1, 2):
@@ -529,6 +537,7 @@ class HandPlayGymEnv(gymnasium.Env):
         self._steps = 0
         self._episode_seed = ""
         self.action_version = action_version
+        self._v_curve = v_curve
         self._build_obs = build_observation if obs_version == 1 else build_observation_v2
 
         self.observation_space = observation_space() if obs_version == 1 else observation_space_v2()
@@ -586,7 +595,16 @@ class HandPlayGymEnv(gymnasium.Env):
         terminated = self._adapter.done
         truncated = not terminated and self._steps >= self._max_steps
         won = terminated and self._adapter.won
-        reward = 1.0 if won else 0.0
+        v_curve_term = 0.0
+        dollars_after: int | None = None
+        if won and self._v_curve is not None:
+            dollars_after = dollars_after_cashout(gs)
+            # Read the terminal ante after _round_won bookkeeping: a boss
+            # clear has already advanced it to the shop-state convention used
+            # when the V_curve artifact was extracted.
+            ante = gs["round_resets"]["ante"]
+            v_curve_term = self._v_curve.value(ante, dollars_after)
+        reward = 1.0 + v_curve_term if won else 0.0
 
         info: dict[str, Any] = {"episode_seed": self._episode_seed}
         if self.action_version == 1:
@@ -594,6 +612,9 @@ class HandPlayGymEnv(gymnasium.Env):
         if terminated or truncated:
             info["balatro/cleared"] = won
             info["balatro/hands_left"] = gs.get("current_round", {}).get("hands_left", 0)
+            info["balatro/v_curve_term"] = v_curve_term
+            if dollars_after is not None:
+                info["balatro/dollars_after_cashout"] = dollars_after
 
         return self._build_obs(gs), reward, terminated, truncated, info
 
