@@ -48,6 +48,7 @@ reserved for it and must never be used for training).
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 import gymnasium
@@ -509,6 +510,13 @@ class HandPlayGymEnv(gymnasium.Env):
     v_curve:
         Optional shop-critic dollar-value lookup used only on won terminal
         episodes.
+    start_state_sampler:
+        Optional ``() -> bytes | None`` called on every reset (unless a
+        snapshot is pinned via ``options``). Returning a snapshot restores it
+        as the episode start; returning ``None`` starts a config-sampled
+        episode. The mixture policy lives in the training script, not here.
+        Capture-skew repair is likewise training-side; this env receives
+        already-repaired blobs and does not repair or re-randomize them.
     """
 
     metadata: dict[str, Any] = {"render_modes": []}
@@ -521,6 +529,7 @@ class HandPlayGymEnv(gymnasium.Env):
         obs_version: int = 1,
         action_version: int = 1,
         v_curve: VCurve | None = None,
+        start_state_sampler: Callable[[], bytes | None] | None = None,
     ) -> None:
         super().__init__()
         if obs_version not in (1, 2):
@@ -536,6 +545,7 @@ class HandPlayGymEnv(gymnasium.Env):
         self._episode_counter = 0
         self._steps = 0
         self._episode_seed = ""
+        self._sampler = start_state_sampler
         self.action_version = action_version
         self._v_curve = v_curve
         self._build_obs = build_observation if obs_version == 1 else build_observation_v2
@@ -560,13 +570,30 @@ class HandPlayGymEnv(gymnasium.Env):
         super().reset(seed=seed)
         if seed is not None:
             self._episode_counter = seed
-        if options and "episode_seed" in options:
+
+        blob: bytes | None = None
+        if options and "snapshot" in options:
+            blob = options["snapshot"]
+        elif self._sampler is not None:
+            blob = self._sampler()
+
+        if blob is not None:
+            state = self._adapter.restore_state(blob)
+            if state.phase != GamePhase.SELECTING_HAND:
+                raise ValueError(
+                    "snapshot is not a SELECTING_HAND state "
+                    f"(phase={state.phase!r})"
+                )
+            self._episode_seed = "<restored>"
+        elif options and "episode_seed" in options:
             self._episode_seed = str(options["episode_seed"])
         else:
             self._episode_seed = f"{self._seed_prefix}_{self._episode_counter:08d}"
             self._episode_counter += 1
 
-        self._adapter.reset(BACK_KEY, STAKE, self._episode_seed)
+        if blob is None:
+            self._adapter.reset(BACK_KEY, STAKE, self._episode_seed)
+
         self._steps = 0
         gs = self._adapter.raw_state
         info: dict[str, Any] = {"episode_seed": self._episode_seed}

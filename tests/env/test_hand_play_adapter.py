@@ -114,6 +114,21 @@ def test_reset_is_deterministic_given_same_seed() -> None:
     assert hand_a == hand_b
 
 
+def test_snapshot_restore_roundtrips_into_fresh_adapter() -> None:
+    adapter = HandPlayAdapter(HandPlayConfig(hands_range=(3, 3)))
+    adapter.reset(BACK, STAKE, SEED)
+    blob = adapter.snapshot_state()
+
+    expected = adapter.step(PlayHand(card_indices=(0,)))
+
+    restored = HandPlayAdapter()
+    state = restored.restore_state(blob)
+    assert state.phase == GamePhase.SELECTING_HAND
+    actual = restored.step(PlayHand(card_indices=(0,)))
+
+    assert actual == expected
+
+
 def test_no_blind_select_or_shop_phase_reached() -> None:
     adapter = HandPlayAdapter()
     adapter.reset(BACK, STAKE, SEED)
