@@ -650,14 +650,20 @@ PPO checkpoint existing — this wave is the code seam only):
     which fires at its own slot, and that slot is adjacency-coupled to
     its target — a Polychrome Blueprint wanting a late slot must drag
     its TARGET late, an order today's candidate set never proposes. When
-    any joker edition is present the compile enumerates orderings
-    EXHAUSTIVELY (edition boards are rare and small — ~5-6 permuted
-    units ≈ 120-720 cheap fixed-order evals — so provably-complete
-    search is affordable exactly where the coupling bites; the
-    brute-force-cap degrade pattern applies past the cap). Editionless
-    boards keep the closed-form partition + insertion argmax (provably
-    optimal there; exposing it to the agent stays null-direction
-    entropy). The SAME coupling gap exists TODAY in v1 — accepted
+    a HOLO or POLYCHROME joker edition is present the compile enumerates
+    orderings EXHAUSTIVELY — Foil is chips-only and Negative is
+    non-scoring, both order-insensitive, so neither triggers it —
+    (holo/poly boards are rare and small — ~5-6 permuted units ≈ 120-720
+    cheap fixed-order evals — so provably-complete search is affordable
+    exactly where the coupling bites; the brute-force-cap degrade
+    pattern applies past the cap). EXACT ALGORITHM NOT YET IRONED OUT
+    (noted 2026-07-19): what "exhaustive" enumerates under the adjacency
+    constraints (permuted units vs chain blocks, cap behavior, when the
+    trigger check itself must look at copies' resolved targets) has a
+    lot of edge cases — lock the concrete algorithm at the merge seam,
+    not before. Boards without holo/poly keep the closed-form partition
+    + insertion argmax (provably optimal there; exposing it to the agent
+    stays null-direction entropy). The SAME coupling gap exists TODAY in v1 — accepted
     second-order (the engine scores whatever we submit; best-of-an-
     incomplete-candidate-set, not dishonesty), documented at
     play_ordering.py's "Known approximations" block. Reorder-actions in

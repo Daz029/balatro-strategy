@@ -285,8 +285,11 @@ def candidate_orderings(
 #     x-mult edition by moving its TARGET into the late block (Polychrome
 #     Blueprint + early-additive target) is never proposed. Second-order
 #     for the same reason as above; the in-blind-merge compile layer
-#     closes it with exhaustive ordering search on edition boards (see
-#     the ordering_objective v2 record in docs/post-regen-training-plan.md).
+#     closes it with exhaustive ordering search on Holo/Polychrome boards
+#     (Foil is chips-only, Negative non-scoring -- order-insensitive;
+#     exact algorithm deliberately TBD at the merge, edge cases abound --
+#     see the ordering_objective v2 record in
+#     docs/post-regen-training-plan.md).
 
 # Center keys whose handler can return Xmult_mod in the joker_main context
 # (Phase 9b) -- i.e. jokers that MULTIPLY at their own list position. Kept
