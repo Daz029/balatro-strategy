@@ -28,11 +28,9 @@ Usage::
 from __future__ import annotations
 
 import argparse
-import base64
 import json
 import sys
 import time
-import zipfile
 from pathlib import Path
 
 import numpy as np
@@ -43,6 +41,10 @@ for _p in (str(_SCRIPTS_DIR), str(_REPO_ROOT)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from jackdaw.agents.hand_checkpoint_policy import (  # noqa: E402,F401
+    _pointer_class_record,
+    _zip_policy_kind,
+)
 from jackdaw.env.hand_play_adapter import HandPlayConfig  # noqa: E402
 from jackdaw.env.hand_play_gym import HandPlayGymEnv, observation_space  # noqa: E402
 
@@ -142,47 +144,6 @@ class _PointerPPOPolicy:
         obs_tensor, _ = policy.obs_to_tensor(obs)
         action = policy.predict_deterministic(obs_tensor)
         return action.squeeze(0).detach().cpu().numpy().astype(np.int64, copy=False)
-
-
-def _pointer_class_record(data: dict) -> str:
-    """Return the serialized policy-class record used for dispatch."""
-
-    record = data.get("policy_class")
-    if isinstance(record, str):
-        return record
-    if not isinstance(record, dict):
-        return ""
-
-    parts = [str(record.get(key, "")) for key in ("__name__", "__qualname__", "__module__")]
-    serialized = record.get(":serialized:")
-    if isinstance(serialized, str):
-        try:
-            parts.append(base64.b64decode(serialized).decode("latin1"))
-        except Exception:  # noqa: BLE001 -- malformed metadata is handled below
-            pass
-    return " ".join(parts)
-
-
-def _zip_policy_kind(policy_path: Path) -> str:
-    try:
-        with zipfile.ZipFile(policy_path) as archive:
-            data = json.loads(archive.read("data"))
-    except (
-        OSError,
-        KeyError,
-        TypeError,
-        UnicodeDecodeError,
-        json.JSONDecodeError,
-        zipfile.BadZipFile,
-    ) as exc:
-        raise ValueError(f"invalid SB3 checkpoint archive: {policy_path}") from exc
-
-    class_record = _pointer_class_record(data)
-    if "PointerPPOPolicy" in class_record:
-        return "pointer"
-    if "Maskable" in class_record:
-        return "v1"
-    raise ValueError(f"unrecognized SB3 policy class in {policy_path}: {class_record!r}")
 
 
 def load_policy(policy_path: Path, device: str):

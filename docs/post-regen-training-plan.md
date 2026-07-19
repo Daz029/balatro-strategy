@@ -526,4 +526,97 @@ at build time — the h1 PPO kickoff waits only on that gate's verdict):
     Φ(terminal)=0 + decay, replacing `c_ante`; floor re-baselined vs h1;
     `--init-from` + `--init-reservoir`.
 
+**Wave 3 BUILD DONE 2026-07-19** (branch `wave-3`, one commit per ticket;
+implementation by Codex under architect review, all diffs inspected and
+independently re-verified; the s1 kickoff RUN itself still gates on the h1
+PPO checkpoint existing — this wave is the code seam only):
+- Item 9 = pointer-aware `HandCheckpointPolicy`: content-based dispatch
+  mirroring `eval_hand_policy.load_policy` exactly (`.pt` metadata
+  `head=="pointer"` → pointer BC via `load_bc_model`; `.zip` policy-class
+  record → pointer PPO via `KLToBCPointerPPO` / v1 MaskablePPO; the zip
+  helpers now live in the wrapper module and eval imports them — ONE
+  dispatch implementation). Pointer path: `build_observation_v2` → the
+  pinned greedy decode (`HandPointerBCModel.decode` /
+  `predict_deterministic`, no reimplementation) → the env's
+  `action_version=2` branch, LIFTED to module-level
+  `pointer_action_to_engine_action` so partner and env share one engine
+  path (the `action_to_engine_action` precedent). Mask-parity call site
+  #4 pinned by call-recording test; v1 checkpoint paths byte-identical
+  (unknown suffixes/heads now raise, matching eval's contract). DEFERRED,
+  recorded: the money-aware `ordering_objective` for partner copy-joker
+  placement (docstring upgrade path at `action_to_engine_action`) has no
+  locked concrete spec — the partner passes `None` (score-only ordering)
+  until that objective is designed. This deferral now has a DEADLINE —
+  see the "MUST BE LOCKED BEFORE THE s1 KICKOFF" item below.
+- Item 10 obs/Φ side = `jackdaw/agents/phi_shaping.py`: `truncate_s1_obs`
+  (joker rows/mask/ids 15→8 prefix, `shop_context` S1→12 prefix; strict —
+  s0-shaped input raises) with the PINNED inverse property
+  `truncate(widened_obs(s)) == old_obs(s)` byte-identical across fresh,
+  >8-joker, and offered-tag states (test asserts the tag one-hot is
+  nonzero so the case isn't vacuous); `S0CriticPhi` loads the frozen s0
+  critic (eval mode, all grads off, optimizer stripped, action-width 686
+  enforced — an s1-width critic is refused), accepts either schema and
+  truncates internally, `predict_values` → float.
+- Item 10 script side = `train_shop_ppo.py --s1-schema` (threads
+  `ShopRunConfig(s1_schema=True)` + extractor kwargs into train AND eval
+  envs; default OFF byte-identical), `--init-from` auto-widening (686-width
+  checkpoint → `widen_s0_checkpoint`, rollout buffer/n_envs/lr rebuilt
+  against the real train env — `model.learning_rate` kept in sync with the
+  rebuilt schedule so an s1 resume doesn't silently revert the LR;
+  694-width resumes load verbatim; any other width refused loudly, and a
+  694 checkpoint without `--s1-schema` gets a pointed error), and
+  `--phi-checkpoint`/`--phi-beta0`: Φ shaping in `ShopRewardWrapper`
+  (`phi_term = phi_beta * (Φ(s') − Φ(s))`, Φ(terminal)≡0 on BOTH
+  terminated and truncated ends — an episode boundary is an episode
+  boundary for the telescoping argument; `phi_beta` decays with progress
+  like every soft signal). REPLACEMENT, not addition: `--phi-checkpoint`
+  requires `--s1-schema` and forces the `c_ante` blend to zero (explicit
+  nonzero `--blend-beta0` alongside it is an argparse error). Telescoping
+  pinned by test: sum of phi terms over an episode == −Φ(s₀), terminal
+  term == −Φ(s_last). `eval_shop_policy.py --s1-schema` added for s1
+  checkpoint evals and the h1-partner nextround floor re-baseline.
+- [ ] **MUST BE LOCKED BEFORE THE s1 KICKOFF — money-aware
+  `ordering_objective` for the partner (decide it either way; added
+  2026-07-19).** The h1 partner currently deploys with `objective=None`:
+  `best_joker_order`'s copy-placement argmax is raw score, so the partner
+  never points Blueprint/Brainstorm at a money target (Business Card /
+  Golden Joker class) even when that is the better run decision, and s1's
+  values for copy-joker + money-joker builds are "given a partner that
+  never does that."
+  - **Why the deadline is the s1 kickoff, not earlier and not never**:
+    s1's values are "given how the partner plays" (the same argument that
+    scheduled the joker-row widening at s1), so whatever objective the
+    partner deploys with must be FIXED before s1 trains against it —
+    flipping it on afterward changes the partner's induced distribution
+    under s1's feet. The s1 run already gates on the h1 checkpoint, so
+    the decision window is open now.
+  - **Why it is a decision, not a build blocker**: it is a deploy-time
+    knob on the wrapper only — solver labels stay score-only (locked
+    2026-07-15), h1 itself is untouched, no retraining anywhere. The
+    affected intersection is narrow (copy joker owned AND a money target
+    in the copyable set AND the money line truly better).
+  - **Design sketch to grill, not yet locked**: V_curve now provides a
+    dollars→P(win) conversion, so `score + λ(ante,$)·dollars_earned`
+    (λ from the V_curve marginal) is definable without inventing a scale
+    by hand; `ScoreResult.dollars_earned` already exists for exactly this
+    (`play_ordering.py`).
+  - **Fallback if it slips**: ship s1 with score-only ordering, land the
+    objective at the next partner swap (h2/s2) — one bootstrap iteration
+    of mild undervaluation of copy+money builds, the same accepted
+    second-order class as the V_curve pre-fix-economy rider. Slipping is
+    acceptable; deciding by default is not — record the ruling here
+    either way.
+- **s1 kickoff command (once the h1 PPO checkpoint exists; transfer it +
+  s0_a4_v4 + its reservoir to the training machine):**
+  `uv run python scripts/train_shop_ppo.py --s1-schema --win-ante 8
+  --init-from runs/shop_ppo/s0_a4/best_model/best_model.zip
+  --init-reservoir runs/shop_ppo/s0_a4/reservoir.pkl
+  --phi-checkpoint runs/shop_ppo/s0_a4/best_model/best_model.zip
+  --hand-policy <h1 pointer .zip> --total-timesteps 2000000
+  --log-dir runs/shop_ppo/s1 --seed 0`
+  then re-baseline the floor with `eval_shop_policy.py --policy nextround
+  --s1-schema --hand-policy <h1 pointer .zip>` and eval the trained model
+  with the same partner/flags (match the partner to what s1 trained
+  against).
+
 **Wave 4 — in-blind merge** (post-s1, as locked).

@@ -482,6 +482,53 @@ def action_to_engine_action(
     return _selected_cards_to_engine_action(ActionType(action_type), combo, gs, ordering_objective)
 
 
+def pointer_action_to_engine_action(
+    action: np.ndarray, gs: dict[str, Any], ordering_objective: Any = None
+) -> EnginePlayHand | EngineDiscard:
+    """Use the single shared engine path for pointer actions.
+
+    This is the canonical decoder for both ``HandPlayGymEnv.step`` and the
+    checkpoint partner: it validates the pointer vector, then routes the
+    selected cards through the same engine action path as the v1 decoder.
+    """
+
+    vector = np.asarray(action)
+    if vector.shape != (1 + POINTER_MAX_PICKS,):
+        raise ValueError(f"pointer action must have shape (6,), got {vector.shape}")
+    if not np.issubdtype(vector.dtype, np.integer):
+        raise ValueError("pointer action tokens must be integers")
+    action_type = int(vector[0])
+    if action_type not in (int(ActionType.PlayHand), int(ActionType.Discard)):
+        raise ValueError(f"pointer action type {action_type} is illegal")
+
+    padded = vector[1:].astype(np.int64, copy=False)
+    stop_positions = np.flatnonzero(padded == POINTER_STOP_INDEX)
+    length = int(stop_positions[0]) if len(stop_positions) else POINTER_MAX_PICKS
+    if length < 1:
+        raise ValueError("pointer action must select at least one card")
+    if np.any(padded[length:] != POINTER_STOP_INDEX):
+        raise ValueError("pointer action padding must trail the first STOP_INDEX")
+    combo = tuple(int(index) for index in padded[:length])
+    if any(index < 0 or index >= len(gs.get("hand", [])) for index in combo):
+        raise ValueError("pointer action contains a dead hand index")
+    if any(left >= right for left, right in zip(combo, combo[1:])):
+        raise ValueError("pointer action card indices must be strictly ascending")
+
+    if gs.get("phase") != GamePhase.SELECTING_HAND:
+        raise ValueError("pointer action is only legal during hand selection")
+    current_round = gs.get("current_round", {})
+    budget = (
+        current_round.get("hands_left", 0)
+        if action_type == int(ActionType.PlayHand)
+        else current_round.get("discards_left", 0)
+    )
+    if budget < 1:
+        raise ValueError(f"pointer action type {action_type} has no remaining budget")
+    return _selected_cards_to_engine_action(
+        ActionType(action_type), combo, gs, ordering_objective
+    )
+
+
 class HandPlayGymEnv(gymnasium.Env):
     """Isolated hand-play episodes with versioned action encodings.
 
@@ -662,41 +709,4 @@ class HandPlayGymEnv(gymnasium.Env):
     def _to_engine_action(self, action: int | np.ndarray) -> EnginePlayHand | EngineDiscard:
         if self.action_version == 1:
             return action_to_engine_action(int(action), self._adapter.raw_state)
-
-        vector = np.asarray(action)
-        if vector.shape != (1 + POINTER_MAX_PICKS,):
-            raise ValueError(f"pointer action must have shape (6,), got {vector.shape}")
-        if not np.issubdtype(vector.dtype, np.integer):
-            raise ValueError("pointer action tokens must be integers")
-        action_type = int(vector[0])
-        if action_type not in (int(ActionType.PlayHand), int(ActionType.Discard)):
-            raise ValueError(f"pointer action type {action_type} is illegal")
-
-        padded = vector[1:].astype(np.int64, copy=False)
-        stop_positions = np.flatnonzero(padded == POINTER_STOP_INDEX)
-        length = int(stop_positions[0]) if len(stop_positions) else POINTER_MAX_PICKS
-        if length < 1:
-            raise ValueError("pointer action must select at least one card")
-        if np.any(padded[length:] != POINTER_STOP_INDEX):
-            raise ValueError("pointer action padding must trail the first STOP_INDEX")
-        combo = tuple(int(index) for index in padded[:length])
-        if any(
-            index < 0 or index >= len(self._adapter.raw_state.get("hand", []))
-            for index in combo
-        ):
-            raise ValueError("pointer action contains a dead hand index")
-        if any(left >= right for left, right in zip(combo, combo[1:])):
-            raise ValueError("pointer action card indices must be strictly ascending")
-
-        gs = self._adapter.raw_state
-        if gs.get("phase") != GamePhase.SELECTING_HAND:
-            raise ValueError("pointer action is only legal during hand selection")
-        current_round = gs.get("current_round", {})
-        budget = (
-            current_round.get("hands_left", 0)
-            if action_type == int(ActionType.PlayHand)
-            else current_round.get("discards_left", 0)
-        )
-        if budget < 1:
-            raise ValueError(f"pointer action type {action_type} has no remaining budget")
-        return _selected_cards_to_engine_action(ActionType(action_type), combo, gs)
+        return pointer_action_to_engine_action(action, self._adapter.raw_state)

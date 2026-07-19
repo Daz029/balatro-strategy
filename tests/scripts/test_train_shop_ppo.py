@@ -20,9 +20,10 @@ import pytest
 pytest.importorskip("torch")
 pytest.importorskip("sb3_contrib")
 
+import gymnasium  # noqa: E402
 import torch  # noqa: E402
-
 from eval_shop_policy import NextRoundPolicy, eval_seeds, load_policy, run_suite  # noqa: E402
+from gymnasium import spaces  # noqa: E402
 from train_shop_ppo import (  # noqa: E402
     CountBonus,
     ScheduleCallback,
@@ -30,9 +31,17 @@ from train_shop_ppo import (  # noqa: E402
     ShopRewardWrapper,
     TrainingSchedules,
     build_model,
+    make_train_env,
+    parse_args,
 )
 
-from jackdaw.agents.shop_action_space import ShopActionFamily, shop_action  # noqa: E402
+from jackdaw.agents.phi_shaping import S0CriticPhi  # noqa: E402
+from jackdaw.agents.shop_action_space import (  # noqa: E402
+    NUM_TOTAL_ACTIONS,
+    NUM_TOTAL_ACTIONS_S1,
+    ShopActionFamily,
+    shop_action,
+)
 from jackdaw.env.shop_gym import ShopGymEnv, blind_clear_bonus  # noqa: E402
 from jackdaw.env.shop_run_adapter import ShopRunConfig  # noqa: E402
 
@@ -46,10 +55,12 @@ class TestSchedules:
     def test_decay_to_exact_zero(self):
         s = TrainingSchedules(blend_beta0=1.0, count_beta0=0.05)
         assert s.blend_beta == 1.0 and s.count_beta == 0.05
+        assert s.phi_beta == 1.0
         s.progress_remaining = 0.5
         assert s.blend_beta == 0.5
+        assert s.phi_beta == 0.5
         s.progress_remaining = 0.0
-        assert s.blend_beta == 0.0 and s.count_beta == 0.0
+        assert s.blend_beta == 0.0 and s.count_beta == 0.0 and s.phi_beta == 0.0
 
 
 class TestCountBonus:
@@ -195,6 +206,64 @@ class TestRewardWrapper:
         assert info["episode_seed"] == "<restored>"
         assert info["action_mask"].any()
 
+    def test_phi_terms_telescope_to_negative_initial_potential(self):
+        class StubEnv(gymnasium.Env):
+            observation_space = spaces.Dict({"state": spaces.Box(0, 10, (1,), dtype=np.float32)})
+            action_space = spaces.Discrete(1)
+
+            def __init__(self):
+                self.raw_state = {"jokers": [], "round_resets": {"ante": 1}}
+                self.pending = None
+                self._step = 0
+
+            def reset(self, **kwargs):
+                self._step = 0
+                return {"state": np.array([2], dtype=np.float32)}, {
+                    "action_mask": np.ones(1, dtype=bool),
+                    "reward_components": {"blind_bonus": 0.0, "win": 0.0},
+                }
+
+            def step(self, action):
+                self._step += 1
+                terminated = self._step == 3
+                return (
+                    {"state": np.array([2 + self._step * 2], dtype=np.float32)},
+                    0.0,
+                    terminated,
+                    False,
+                    {
+                        "action_mask": np.ones(1, dtype=bool),
+                        "reward_components": {"blind_bonus": 0.0, "win": 0.0},
+                    },
+                )
+
+            def action_masks(self):
+                return np.ones(1, dtype=bool)
+
+        schedules = TrainingSchedules(blend_beta0=0.0, count_beta0=0.0, phi_beta0=1.0)
+        env = ShopRewardWrapper(
+            StubEnv(), schedules, CountBonus(), phi=lambda obs: float(obs["state"][0])
+        )
+        env.reset()
+        phi_terms = []
+        for _ in range(3):
+            _, _, terminated, truncated, info = env.step(0)
+            phi_terms.append(info["reward_components"]["phi_term"])
+            if terminated or truncated:
+                break
+
+        assert sum(phi_terms) == pytest.approx(-2.0)
+        assert phi_terms[-1] == pytest.approx(-6.0)
+        assert info["reward_components"]["phi_beta"] == 1.0
+
+    def test_phi_none_keeps_s0_reward_path(self):
+        env, schedules, _, _ = self._make()
+        _, reward, _, _, info = env.step(shop_action(ShopActionFamily.NextRound))
+        rc = info["reward_components"]
+        expected = rc["win"] + schedules.blend_beta * rc["blind_bonus"] + rc["count_bonus"]
+        assert reward == pytest.approx(expected)
+        assert "phi_term" not in rc
+
 
 class TestLearnSmoke:
     @pytest.fixture(scope="class")
@@ -233,6 +302,130 @@ class TestLearnSmoke:
             assert 0.0 <= result["win_rate"] <= 1.0
             assert result["mean_steps"] >= 1.0
 
+
+class TestS1Wiring:
+    def test_fresh_s1_model_has_widened_spaces(self):
+        model, _ = build_model(
+            win_ante=1,
+            schedules=TrainingSchedules(),
+            reservoir=ShopReservoir(seed=0),
+            seed=0,
+            n_envs=1,
+            n_steps=8,
+            batch_size=8,
+            device="cpu",
+            s1_schema=True,
+        )
+        assert model.action_space.n == NUM_TOTAL_ACTIONS_S1
+        assert model.policy.observation_space["jokers"].shape[0] == 15
+
+    def test_s0_checkpoint_is_auto_widened_weight_preserving(self, tmp_path):
+        old_model, _ = build_model(
+            win_ante=1,
+            schedules=TrainingSchedules(),
+            reservoir=ShopReservoir(seed=0),
+            seed=0,
+            n_envs=1,
+            n_steps=8,
+            batch_size=8,
+            device="cpu",
+        )
+        checkpoint = tmp_path / "s0.zip"
+        old_model.save(str(checkpoint))
+        old_weight = old_model.policy.action_net.weight.detach().clone()
+        old_bias = old_model.policy.action_net.bias.detach().clone()
+
+        new_model, _ = build_model(
+            win_ante=1,
+            schedules=TrainingSchedules(blend_beta0=0.0),
+            reservoir=ShopReservoir(seed=0),
+            init_from=checkpoint,
+            seed=0,
+            n_envs=2,
+            n_steps=8,
+            batch_size=8,
+            device="cpu",
+            s1_schema=True,
+        )
+        assert new_model.action_space.n == NUM_TOTAL_ACTIONS_S1
+        assert torch.equal(new_model.policy.action_net.weight[:NUM_TOTAL_ACTIONS], old_weight)
+        assert torch.equal(new_model.policy.action_net.bias[:NUM_TOTAL_ACTIONS], old_bias)
+
+    def test_s1_checkpoint_resumes_without_widening(self, tmp_path):
+        model, _ = build_model(
+            win_ante=1,
+            schedules=TrainingSchedules(),
+            reservoir=ShopReservoir(seed=0),
+            seed=0,
+            n_envs=1,
+            n_steps=8,
+            batch_size=8,
+            device="cpu",
+            s1_schema=True,
+        )
+        checkpoint = tmp_path / "s1.zip"
+        model.save(str(checkpoint))
+        resumed, _ = build_model(
+            win_ante=1,
+            schedules=TrainingSchedules(),
+            reservoir=ShopReservoir(seed=0),
+            init_from=checkpoint,
+            seed=0,
+            n_envs=1,
+            n_steps=8,
+            batch_size=8,
+            device="cpu",
+            s1_schema=True,
+        )
+        assert resumed.action_space.n == NUM_TOTAL_ACTIONS_S1
+
+    def test_phi_requires_s1_and_replaces_nonzero_blend(self):
+        with pytest.raises(SystemExit):
+            parse_args(["--phi-checkpoint", "critic.zip"])
+        with pytest.raises(SystemExit):
+            parse_args(
+                [
+                    "--s1-schema",
+                    "--phi-checkpoint",
+                    "critic.zip",
+                    "--blend-beta0",
+                    "0.1",
+                ]
+            )
+
+    def test_real_s0_phi_runs_on_s1_env(self, tmp_path):
+        s0_model, _ = build_model(
+            win_ante=1,
+            schedules=TrainingSchedules(),
+            reservoir=ShopReservoir(seed=0),
+            seed=0,
+            n_envs=1,
+            n_steps=8,
+            batch_size=8,
+            device="cpu",
+        )
+        checkpoint = tmp_path / "s0_phi.zip"
+        s0_model.save(str(checkpoint))
+        phi = S0CriticPhi(checkpoint)
+        env = make_train_env(
+            1,
+            TrainingSchedules(blend_beta0=0.0),
+            CountBonus(),
+            None,
+            n_envs=1,
+            harvest_prob=0.0,
+            s1_schema=True,
+            phi=phi,
+        )
+        obs = env.reset()
+        assert obs is not None
+        for _ in range(3):
+            _, _, dones, infos = env.step([shop_action(ShopActionFamily.NextRound)])
+            if np.isfinite(infos[0]["reward_components"]["phi_term"]):
+                break
+            if dones[0]:
+                break
+        assert np.isfinite(infos[0]["reward_components"]["phi_term"])
 
 class TestFiniteGradGuard:
     def test_nonfinite_gradient_is_sanitized(self):

@@ -50,6 +50,15 @@ Usage::
     uv run python scripts/train_shop_ppo.py \
         --win-ante 4 --init-from runs/shop_ppo/stage_a2/shop_ppo_final.zip \
         --log-dir runs/shop_ppo/stage_a4 --seed 0
+
+    uv run python scripts/train_shop_ppo.py \
+        --s1-schema --init-from <s0_a4_v4.zip> \
+        --init-reservoir <s0 reservoir.pkl> \
+        --phi-checkpoint <s0_a4_v4.zip> \
+        --hand-policy <h1 pointer ckpt>
+
+    ``--phi-checkpoint`` replaces the ``c_ante`` blend; the two density
+    signals are alternatives, not additive terms.
 """
 
 from __future__ import annotations
@@ -75,9 +84,16 @@ import torch  # noqa: E402
 from sb3_contrib import MaskablePPO  # noqa: E402
 from sb3_contrib.common.maskable.callbacks import MaskableEvalCallback  # noqa: E402
 from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback  # noqa: E402
+from stable_baselines3.common.utils import FloatSchedule  # noqa: E402
 from stable_baselines3.common.vec_env import DummyVecEnv  # noqa: E402
 
-from jackdaw.agents.shop_action_space import target_combo_for_action  # noqa: E402
+from jackdaw.agents.checkpoint_migration import widen_s0_checkpoint  # noqa: E402
+from jackdaw.agents.phi_shaping import S0CriticPhi  # noqa: E402
+from jackdaw.agents.shop_action_space import (  # noqa: E402
+    NUM_TOTAL_ACTIONS,
+    NUM_TOTAL_ACTIONS_S1,
+    target_combo_for_action,
+)
 from jackdaw.agents.shop_policy import ShopFeaturesExtractor  # noqa: E402
 from jackdaw.engine.actions import GamePhase  # noqa: E402
 from jackdaw.env.shop_gym import ShopGymEnv  # noqa: E402
@@ -100,9 +116,15 @@ class TrainingSchedules:
     objective is exactly P(win)).
     """
 
-    def __init__(self, blend_beta0: float = 1.0, count_beta0: float = 0.05) -> None:
+    def __init__(
+        self,
+        blend_beta0: float = 1.0,
+        count_beta0: float = 0.05,
+        phi_beta0: float = 1.0,
+    ) -> None:
         self.blend_beta0 = blend_beta0
         self.count_beta0 = count_beta0
+        self.phi_beta0 = phi_beta0
         self.progress_remaining = 1.0
 
     @property
@@ -112,6 +134,10 @@ class TrainingSchedules:
     @property
     def count_beta(self) -> float:
         return self.count_beta0 * self.progress_remaining
+
+    @property
+    def phi_beta(self) -> float:
+        return self.phi_beta0 * self.progress_remaining
 
 
 class ScheduleCallback(BaseCallback):
@@ -125,6 +151,7 @@ class ScheduleCallback(BaseCallback):
         self._schedules.progress_remaining = self.model._current_progress_remaining
         self.logger.record("shop/blend_beta", self._schedules.blend_beta)
         self.logger.record("shop/count_beta", self._schedules.count_beta)
+        self.logger.record("shop/phi_beta", self._schedules.phi_beta)
         return True
 
 
@@ -249,7 +276,7 @@ class ShopReservoir:
             pickle.dump(state, fh, protocol=pickle.HIGHEST_PROTOCOL)
 
     @classmethod
-    def load(cls, path: str | Path) -> "ShopReservoir":
+    def load(cls, path: str | Path) -> ShopReservoir:
         import pickle
 
         with open(path, "rb") as fh:
@@ -288,6 +315,7 @@ class ShopRewardWrapper(gymnasium.Wrapper):
         reservoir: ShopReservoir | None = None,
         harvest_prob: float = 0.02,
         seed: int = 0,
+        phi: Callable[[dict[str, Any]], float] | None = None,
     ) -> None:
         super().__init__(env)
         self._schedules = schedules
@@ -296,6 +324,8 @@ class ShopRewardWrapper(gymnasium.Wrapper):
         self._harvest_prob = harvest_prob
         self._rng = np.random.default_rng(seed)
         self._prev_joker_set: tuple[str, ...] = ()
+        self._phi = phi
+        self._phi_prev = 0.0
 
     # sb3-contrib discovers masking via this method; define it explicitly
     # rather than relying on Wrapper.__getattr__ forwarding.
@@ -319,6 +349,8 @@ class ShopRewardWrapper(gymnasium.Wrapper):
     def reset(self, **kwargs: Any):
         obs, info = self.env.reset(**kwargs)
         self._prev_joker_set = self._joker_set()
+        if self._phi is not None:
+            self._phi_prev = self._phi(obs)
         return obs, info
 
     def step(self, action: int):
@@ -329,6 +361,15 @@ class ShopRewardWrapper(gymnasium.Wrapper):
         rc = info["reward_components"]
 
         bonus = self._schedules.blend_beta * rc["blind_bonus"]
+
+        phi_term = 0.0
+        if self._phi is not None:
+            # Phi(terminal) == 0 covers BOTH terminated and truncated episode
+            # ends: an episode boundary is an episode boundary for telescoping.
+            # gamma=1, so F = Phi(s') - Phi(s).
+            phi_next = 0.0 if (terminated or truncated) else self._phi(obs)
+            phi_term = self._schedules.phi_beta * (phi_next - self._phi_prev)
+            self._phi_prev = phi_next
 
         count_bonus = 0.0
         joker_set = self._joker_set()
@@ -342,6 +383,9 @@ class ShopRewardWrapper(gymnasium.Wrapper):
 
         rc["blend_beta"] = self._schedules.blend_beta
         rc["count_bonus"] = count_bonus
+        if self._phi is not None:
+            rc["phi_term"] = phi_term
+            rc["phi_beta"] = self._schedules.phi_beta
 
         if (
             self._reservoir is not None
@@ -353,7 +397,10 @@ class ShopRewardWrapper(gymnasium.Wrapper):
             ante = gs.get("round_resets", {}).get("ante", 1)
             self._reservoir.add(self.env.snapshot(), ante, pack_pending)
 
-        return obs, reward + bonus + count_bonus, terminated, truncated, info
+        total_reward = reward + bonus + count_bonus
+        if self._phi is not None:
+            total_reward += phi_term
+        return obs, total_reward, terminated, truncated, info
 
 
 # ---------------------------------------------------------------------------
@@ -385,6 +432,8 @@ def make_train_env(
     seed_prefix: str = "SHOPPPO",
     harvest_prob: float = 0.02,
     hand_policy: Callable[[dict[str, Any]], Any] | None = None,
+    s1_schema: bool = False,
+    phi: Callable[[dict[str, Any]], float] | None = None,
 ) -> DummyVecEnv:
     # One partner instance shared across all envs: DummyVecEnv is single-process
     # and the hand policy is a deterministic, stateless argmax, so sharing is
@@ -393,7 +442,7 @@ def make_train_env(
     def factory(rank: int):
         def _make() -> gymnasium.Env:
             env = ShopGymEnv(
-                config=ShopRunConfig(win_ante=win_ante),
+                config=ShopRunConfig(win_ante=win_ante, s1_schema=s1_schema),
                 hand_policy=hand_policy,
                 seed_prefix=f"{seed_prefix}{rank}",
                 start_state_sampler=reservoir.sample if reservoir is not None else None,
@@ -405,6 +454,7 @@ def make_train_env(
                 reservoir,
                 harvest_prob=harvest_prob,
                 seed=rank,
+                phi=phi,
             )
 
         return _make
@@ -490,6 +540,46 @@ def _install_finite_grad_guard(model: MaskablePPO) -> None:
     model.policy.action_net.register_forward_hook(_bound_logits)
 
 
+def _attach_widened_model(
+    model: MaskablePPO,
+    env: DummyVecEnv,
+    *,
+    n_steps: int,
+    batch_size: int,
+    learning_rate: float,
+    ent_coef: float,
+) -> None:
+    """Attach the migration helper's one-env model to the real train env."""
+    # widen_s0_checkpoint builds its temporary policy against one env. SB3's
+    # set_env requires matching n_envs, and the rollout buffer must be resized
+    # too when the training invocation asks for more than one env.
+    model.n_envs = env.num_envs
+    model.n_steps = n_steps
+    model.batch_size = batch_size
+    model.n_epochs = 4
+    model.gamma = 1.0
+    model.gae_lambda = 0.95
+    model.ent_coef = ent_coef
+    # learning_rate must track lr_schedule: a save/load of this model re-derives
+    # the schedule from learning_rate, so a stale value would silently revert
+    # the LR on resume.
+    model.learning_rate = learning_rate
+    model.lr_schedule = FloatSchedule(learning_rate)
+    for group in model.policy.optimizer.param_groups:
+        group["lr"] = learning_rate
+    model.set_env(env)
+    model.rollout_buffer = model.rollout_buffer_class(
+        model.n_steps,
+        model.observation_space,
+        model.action_space,
+        model.device,
+        gamma=model.gamma,
+        gae_lambda=model.gae_lambda,
+        n_envs=model.n_envs,
+        **model.rollout_buffer_kwargs,
+    )
+
+
 def build_model(
     win_ante: int,
     *,
@@ -506,10 +596,45 @@ def build_model(
     log_dir: str | None = None,
     device: str = "auto",
     hand_policy: Callable[[dict[str, Any]], Any] | None = None,
+    s1_schema: bool = False,
+    phi: Callable[[dict[str, Any]], float] | None = None,
 ) -> tuple[MaskablePPO, TrainingSchedules]:
     """Construct (or resume) the shop MaskablePPO with its training env."""
     schedules = schedules or TrainingSchedules()
     counts = counts or CountBonus()
+    checkpoint_width = None
+    if init_from is not None:
+        # Inspect before constructing an env so s0 checkpoints can take the
+        # explicit widening path and incompatible widths fail clearly.
+        checkpoint = MaskablePPO.load(str(init_from), device=device)
+        checkpoint_width = checkpoint.action_space.n
+
+    if s1_schema and init_from is not None and checkpoint_width == NUM_TOTAL_ACTIONS:
+        model = widen_s0_checkpoint(init_from, seed=seed, device=device)
+        env = make_train_env(
+            win_ante,
+            schedules,
+            counts,
+            reservoir,
+            n_envs=n_envs,
+            seed_prefix=f"SHOPPPO_S{seed}_R",
+            hand_policy=hand_policy,
+            s1_schema=True,
+            phi=phi,
+        )
+        _attach_widened_model(
+            model,
+            env,
+            n_steps=n_steps,
+            batch_size=batch_size,
+            learning_rate=learning_rate,
+            ent_coef=ent_coef,
+        )
+        model.tensorboard_log = log_dir
+        _install_finite_grad_guard(model)
+        print(f"Widened s0 checkpoint {init_from} to the s1 schema (694 actions).")
+        return model, schedules
+
     env = make_train_env(
         win_ante,
         schedules,
@@ -518,9 +643,22 @@ def build_model(
         n_envs=n_envs,
         seed_prefix=f"SHOPPPO_S{seed}_R",
         hand_policy=hand_policy,
+        s1_schema=s1_schema,
+        phi=phi,
     )
 
     if init_from is not None:
+        expected_width = NUM_TOTAL_ACTIONS_S1 if s1_schema else NUM_TOTAL_ACTIONS
+        if checkpoint_width != expected_width:
+            if not s1_schema and checkpoint_width == NUM_TOTAL_ACTIONS_S1:
+                raise ValueError(
+                    f"checkpoint action-space width is {checkpoint_width}, but "
+                    "--s1-schema is disabled; pass --s1-schema to load an s1 checkpoint"
+                )
+            raise ValueError(
+                f"checkpoint action-space width is {checkpoint_width}, expected "
+                f"{expected_width} for {'s1' if s1_schema else 's0'}"
+            )
         # Horizon-curriculum continuation: same canonical action space and
         # obs schema, so the previous stage's weights load verbatim.
         model = MaskablePPO.load(str(init_from), env=env, device=device)
@@ -547,6 +685,7 @@ def build_model(
         device=device,
         policy_kwargs=dict(
             features_extractor_class=ShopFeaturesExtractor,
+            **({"features_extractor_kwargs": {"s1_schema": True}} if s1_schema else {}),
             net_arch=[],  # trunk lives in the extractor; heads are single Linears
         ),
     )
@@ -554,7 +693,7 @@ def build_model(
     return model, schedules
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--win-ante", type=int, default=2, help="horizon-curriculum stage")
     parser.add_argument("--init-from", type=Path, default=None, help="previous stage .zip")
@@ -572,7 +711,15 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--ent-coef", type=float, default=0.01)
-    parser.add_argument("--blend-beta0", type=float, default=1.0)
+    parser.add_argument(
+        "--blend-beta0",
+        type=float,
+        default=None,
+        help="initial c_ante blend coefficient (defaults to 0 with Phi, else 1)",
+    )
+    parser.add_argument("--phi-checkpoint", type=Path, default=None, help="frozen s0 critic .zip")
+    parser.add_argument("--phi-beta0", type=float, default=1.0)
+    parser.add_argument("--s1-schema", action="store_true")
     parser.add_argument("--count-beta0", type=float, default=0.05)
     parser.add_argument("--fresh-frac", type=float, default=0.5)
     parser.add_argument("--pack-frac", type=float, default=0.3)
@@ -589,12 +736,38 @@ def main() -> None:
     parser.add_argument("--eval-freq", type=int, default=20_000, help="in total env steps")
     parser.add_argument("--checkpoint-freq", type=int, default=100_000, help="in total env steps")
     parser.add_argument("--device", default="auto")
-    args = parser.parse_args()
+    return parser
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.phi_checkpoint is not None and not args.s1_schema:
+        parser.error("--phi-checkpoint requires --s1-schema")
+    if (
+        args.phi_checkpoint is not None
+        and args.blend_beta0 is not None
+        and args.blend_beta0 != 0.0
+    ):
+        parser.error("--phi-checkpoint replaces --blend-beta0; pass --blend-beta0 0")
+    return args
+
+
+def main() -> None:
+    args = parse_args()
 
     log_path = Path(args.log_dir)
     log_path.mkdir(parents=True, exist_ok=True)
 
-    schedules = TrainingSchedules(blend_beta0=args.blend_beta0, count_beta0=args.count_beta0)
+    phi = S0CriticPhi(args.phi_checkpoint) if args.phi_checkpoint is not None else None
+    blend_beta0 = 0.0 if phi is not None else (
+        1.0 if args.blend_beta0 is None else args.blend_beta0
+    )
+    schedules = TrainingSchedules(
+        blend_beta0=blend_beta0,
+        count_beta0=args.count_beta0,
+        phi_beta0=args.phi_beta0,
+    )
     if args.init_reservoir is not None:
         reservoir = ShopReservoir.load(args.init_reservoir)
         print(f"Loaded reservoir from {args.init_reservoir} (size {len(reservoir)})")
@@ -622,6 +795,8 @@ def main() -> None:
         log_dir=str(log_path),
         device=args.device,
         hand_policy=hand_policy,
+        s1_schema=args.s1_schema,
+        phi=phi,
     )
 
     # Eval on the reserved EVAL_* stream: plain env, no wrapper — mean
@@ -629,7 +804,7 @@ def main() -> None:
     eval_env = DummyVecEnv(
         [
             lambda: ShopGymEnv(
-                config=ShopRunConfig(win_ante=args.win_ante),
+                config=ShopRunConfig(win_ante=args.win_ante, s1_schema=args.s1_schema),
                 hand_policy=hand_policy,
                 seed_prefix=EVAL_SEED_PREFIX,
             )

@@ -8,6 +8,7 @@ raising on a >8-card (Serpent over-draw) hand.
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 torch = pytest.importorskip("torch")
@@ -15,7 +16,9 @@ pytest.importorskip("sb3_contrib")
 
 from jackdaw.agents.hand_action_space import combo_to_action, legal_action_mask  # noqa: E402
 from jackdaw.agents.hand_checkpoint_policy import HandCheckpointPolicy  # noqa: E402
+from jackdaw.agents.hand_pointer_head import HandPointerBCModel  # noqa: E402
 from jackdaw.agents.hand_policy import HandPlayBCModel  # noqa: E402
+from jackdaw.agents.pointer_ppo_policy import _action_vector_from_decode  # noqa: E402
 from jackdaw.engine.actions import (  # noqa: E402
     Discard,
     GamePhase,
@@ -27,8 +30,15 @@ from jackdaw.engine.data.enums import Rank, Suit  # noqa: E402
 from jackdaw.engine.game import step  # noqa: E402
 from jackdaw.engine.run_init import initialize_run  # noqa: E402
 from jackdaw.env.action_space import ActionType  # noqa: E402
-from jackdaw.env.hand_play_gym import HandPlayGymEnv, observation_space  # noqa: E402
 from jackdaw.env.hand_play_adapter import HandPlayConfig  # noqa: E402
+from jackdaw.env.hand_play_gym import (  # noqa: E402
+    HandPlayGymEnv,
+    build_observation_v2,
+    observation_space,
+    observation_space_v2,
+    pointer_action_to_engine_action,
+)
+from jackdaw.env.shop_gym import ShopGymEnv  # noqa: E402
 from jackdaw.env.shop_run_adapter import ShopRunAdapter, ShopRunConfig  # noqa: E402
 
 
@@ -59,6 +69,17 @@ def ppo_checkpoint(tmp_path_factory):
     )
     path = tmp_path_factory.mktemp("hcp") / "hand_ppo.zip"
     model.save(str(path))
+    return path
+
+
+@pytest.fixture(scope="module")
+def pointer_bc_checkpoint(tmp_path_factory):
+    torch.manual_seed(1)
+    model = HandPointerBCModel(observation_space_v2())
+    path = tmp_path_factory.mktemp("hcp_pointer") / "pointer_checkpoint.pt"
+    torch.save(
+        {"model_state_dict": model.state_dict(), "metadata": {"head": "pointer"}}, path
+    )
     return path
 
 
@@ -132,6 +153,66 @@ class TestPPOCheckpoint:
         again = policy(gs)
         assert type(again) is type(first)
         assert again.card_indices == first.card_indices
+
+
+class TestPointerBCCheckpoint:
+    def test_returns_ascending_in_bounds_action_with_budget(self, pointer_bc_checkpoint):
+        policy = HandCheckpointPolicy(pointer_bc_checkpoint)
+        gs = _selecting_hand_state("HCP_POINTER")
+        action = policy(gs)
+        _assert_legal(action, gs)
+        assert tuple(action.card_indices) == tuple(sorted(action.card_indices))
+
+    def test_decode_round_trip_uses_shared_engine_path(self, pointer_bc_checkpoint):
+        policy = HandCheckpointPolicy(pointer_bc_checkpoint)
+        gs = _selecting_hand_state("HCP_POINTER_PARITY")
+        obs = build_observation_v2(gs)
+        with torch.no_grad():
+            batch = {key: torch.as_tensor(value).unsqueeze(0) for key, value in obs.items()}
+            action_types, picked = policy._model.decode(batch)
+            vector = _action_vector_from_decode(action_types, picked)
+        expected = pointer_action_to_engine_action(
+            vector.squeeze(0).numpy().astype(np.int64, copy=False), gs
+        )
+        assert policy(gs) == expected
+
+    def test_pointer_dispatch_and_unknown_head(self, pointer_bc_checkpoint, tmp_path):
+        assert HandCheckpointPolicy(pointer_bc_checkpoint)._kind == "pointer_bc"
+
+        legacy = tmp_path / "legacy.pt"
+        torch.save({"model_state_dict": HandPlayBCModel(observation_space()).state_dict()}, legacy)
+        assert HandCheckpointPolicy(legacy)._kind == "bc"
+
+        unknown = tmp_path / "unknown.pt"
+        torch.save(
+            {
+                "model_state_dict": {},
+                "metadata": {"head": "unknown"},
+            },
+            unknown,
+        )
+        with pytest.raises(ValueError, match="unrecognized BC checkpoint head"):
+            HandCheckpointPolicy(unknown)
+
+    def test_pointer_partner_plugs_into_shop_env(self, pointer_bc_checkpoint):
+        env = ShopGymEnv(
+            hand_policy=HandCheckpointPolicy(pointer_bc_checkpoint),
+            config=ShopRunConfig(win_ante=1, s1_schema=True),
+            seed_prefix="HCP_POINTER_SHOP",
+        )
+        _obs, info = env.reset()
+        for _ in range(4):
+            if env._adapter.done:
+                break
+            legal = np.flatnonzero(info["action_mask"])
+            assert len(legal)
+            # Keep this smoke at the shop/blind boundary; the pointer partner
+            # itself is exercised against real SELECTING_HAND states above.
+            if env._adapter.raw_state["phase"] != GamePhase.BLIND_SELECT:
+                break
+            _obs, _reward, terminated, truncated, info = env.step(int(legal[-1]))
+            if terminated or truncated:
+                break
 
 
 class TestShopAdapterPartner:
