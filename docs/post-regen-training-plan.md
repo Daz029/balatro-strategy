@@ -546,8 +546,9 @@ PPO checkpoint existing — this wave is the code seam only):
   recorded: the money-aware `ordering_objective` for partner copy-joker
   placement (docstring upgrade path at `action_to_engine_action`) has no
   locked concrete spec — the partner passes `None` (score-only ordering)
-  until that objective is designed. This deferral now has a DEADLINE —
-  see the "MUST BE LOCKED BEFORE THE s1 KICKOFF" item below.
+  until that objective is designed. RESOLVED 2026-07-19 — see the
+  "DECIDED — money-aware `ordering_objective`" record below (clear-gated
+  lexicographic on the wrapper, `--partner-money-ordering`).
 - Item 10 obs/Φ side = `jackdaw/agents/phi_shaping.py`: `truncate_s1_obs`
   (joker rows/mask/ids 15→8 prefix, `shop_context` S1→12 prefix; strict —
   s0-shaped input raises) with the PINNED inverse property
@@ -575,48 +576,130 @@ PPO checkpoint existing — this wave is the code seam only):
   pinned by test: sum of phi terms over an episode == −Φ(s₀), terminal
   term == −Φ(s_last). `eval_shop_policy.py --s1-schema` added for s1
   checkpoint evals and the h1-partner nextround floor re-baseline.
-- [ ] **MUST BE LOCKED BEFORE THE s1 KICKOFF — money-aware
-  `ordering_objective` for the partner (decide it either way; added
-  2026-07-19).** The h1 partner currently deploys with `objective=None`:
-  `best_joker_order`'s copy-placement argmax is raw score, so the partner
-  never points Blueprint/Brainstorm at a money target (Business Card /
-  Golden Joker class) even when that is the better run decision, and s1's
-  values for copy-joker + money-joker builds are "given a partner that
-  never does that."
-  - **Why the deadline is the s1 kickoff, not earlier and not never**:
-    s1's values are "given how the partner plays" (the same argument that
-    scheduled the joker-row widening at s1), so whatever objective the
-    partner deploys with must be FIXED before s1 trains against it —
-    flipping it on afterward changes the partner's induced distribution
-    under s1's feet. The s1 run already gates on the h1 checkpoint, so
-    the decision window is open now.
-  - **Why it is a decision, not a build blocker**: it is a deploy-time
-    knob on the wrapper only — solver labels stay score-only (locked
-    2026-07-15), h1 itself is untouched, no retraining anywhere. The
-    affected intersection is narrow (copy joker owned AND a money target
-    in the copyable set AND the money line truly better).
-  - **Design sketch to grill, not yet locked**: V_curve now provides a
-    dollars→P(win) conversion, so `score + λ(ante,$)·dollars_earned`
-    (λ from the V_curve marginal) is definable without inventing a scale
-    by hand; `ScoreResult.dollars_earned` already exists for exactly this
-    (`play_ordering.py`).
-  - **Fallback if it slips**: ship s1 with score-only ordering, land the
-    objective at the next partner swap (h2/s2) — one bootstrap iteration
-    of mild undervaluation of copy+money builds, the same accepted
-    second-order class as the V_curve pre-fix-economy rider. Slipping is
-    acceptable; deciding by default is not — record the ruling here
-    either way.
+- [x] **DECIDED 2026-07-19 — money-aware `ordering_objective` LOCKED:
+  clear-gated lexicographic (v1), learned copy-target pick at the in-blind
+  merge (v2). Built on branch `money-aware-ordering`.** Original problem:
+  the h1 partner deployed with `objective=None`, so `best_joker_order`'s
+  copy-placement argmax was raw score and the partner never pointed
+  Blueprint/Brainstorm at a money target (Business Card / Rough Gem class)
+  even when that was the better run decision — s1's values for copy+money
+  builds would be "given a partner that never does that." The deadline
+  logic (partner behavior must be FIXED before s1 trains against it)
+  forced a ruling before the s1 kickoff.
+  - **The sketched `score + λ(ante,$)·dollars_earned` blend is REJECTED
+    on a unit flaw**: λ (the V_curve marginal) converts dollars→P(win),
+    so `λ·dollars` is in P(win) units — but `score` is in chips, and no
+    chips→P(win) scale exists at deploy time. The blend re-introduces
+    exactly the hand-invented constant it claimed to avoid; pricing chips
+    honestly needs ΔP(clear)-per-chip, which is solver-grade machinery,
+    not a wrapper knob. Consequence: **V_curve is not needed by the
+    objective at all** — no artifact threading into the shop scripts.
+  - **v1 (SHIPPED): clear-gated lexicographic** —
+    `make_clear_gated_money_objective(gs)` in
+    `jackdaw/agents/ordering_objective.py`. Snapshots `banked =
+    gs["chips"]` and `need = blind.chips` (the exact fields of the
+    engine's clear check, `game.py` ~670, so gate and engine agree by
+    construction); a placement that secures the clear (`banked + total >=
+    need`, boundary inclusive) is valued `(1, dollars_earned, total)` —
+    surplus chips are worthless once the round ends, so dollars dominate;
+    a non-clearing placement is valued `(0, total, dollars_earned)` —
+    chips still bank toward clearing and a failed blind makes dollars
+    worthless, so score stays first. Fresh closure per hand-turn decision
+    (banked changes every play). No blind → clearing arm (nothing to
+    clear → dollars free). KNOWN LIMITATION, accepted: build-blind to
+    deliberate money-farming lines (non-clearing arm counts dollars only
+    as tie-break) — h1 was trained score-shaped and does not farm, same
+    second-order class as the V_curve pre-fix-economy rider.
+  - **Wiring**: `HandCheckpointPolicy(money_aware_ordering=True)` builds
+    the closure per call and passes it through BOTH decode paths (pointer
+    and v1); `--partner-money-ordering` on `train_shop_ppo.py` AND
+    `eval_shop_policy.py` (default OFF; requires `--hand-policy`; error
+    without it). Eval must match the partner mode s1 trained against —
+    the same rule as matching `--hand-policy` itself; the eval payload
+    records `partner_money_ordering` for attribution. Solver labels stay
+    score-only (locked 2026-07-15); h1 untouched; no retraining anywhere.
+  - **v2 (RECORDED for the in-blind merge, not built): learned
+    copy-target picks + eval-arbitrated compile** (grilled 2026-07-19).
+    ACTION SPACE: one pointer pick PER copy joker, ranging over CONCRETE
+    NON-COPY jokers only. All Brainstorms share ONE pick (they all copy
+    the leftmost joker by engine construction, however many are owned);
+    each Blueprint picks its own target; sequential decode for
+    conditioning. Copy-targeting-copy picks are EXCLUDED as redundant,
+    not illegal: every chain outcome is expressible in resolved targets
+    (Brainstorm→Blueprint→X = "brainstorm becomes X"), and the
+    leftmost-target case needs no special pick either — place a Blueprint
+    at slot 0 with its target as right neighbor and Brainstorm copies it
+    through the chain (retraction 2026-07-19 of "Blueprint must copy
+    Brainstorm to reach leftmost": both constructions fire the same
+    effect multiset and pay the same slot-0 cost). Masks are static
+    ("any non-copy joker row"), no dead picks, no order entropy — the
+    monotone-mask argument again. Linear in k copies, zero engine evals
+    at decision time (vs the heuristic's placement cross-product, 90
+    candidates for 2 copies among 8, greedy past
+    `MAX_JOKERS_FOR_COPY_BRUTE_FORCE`). The Death direct-construction
+    analog exactly: agent picks targets, env compiles; additive by
+    construction since the env already honors whatever order it is
+    handed (`best_joker_order` writes into `gs["jokers"]`).
+  - **v2 COMPILE LAYER — exhaustive on edition boards, NOT heuristic**
+    (user call 2026-07-19). The compile realizes the picked assignment
+    as an ordering (adjacency stacking; chain heads via substitution
+    semantics — a resolved copy "is" its target for the next copy's
+    realization). It is NOT today's machinery unchanged:
+    `best_joker_order` argmaxes copy insertions into a FIXED sorted base
+    and never reorders the base, but a copy joker keeps its OWN edition,
+    which fires at its own slot, and that slot is adjacency-coupled to
+    its target — a Polychrome Blueprint wanting a late slot must drag
+    its TARGET late, an order today's candidate set never proposes. When
+    any joker edition is present the compile enumerates orderings
+    EXHAUSTIVELY (edition boards are rare and small — ~5-6 permuted
+    units ≈ 120-720 cheap fixed-order evals — so provably-complete
+    search is affordable exactly where the coupling bites; the
+    brute-force-cap degrade pattern applies past the cap). Editionless
+    boards keep the closed-form partition + insertion argmax (provably
+    optimal there; exposing it to the agent stays null-direction
+    entropy). The SAME coupling gap exists TODAY in v1 — accepted
+    second-order (the engine scores whatever we submit; best-of-an-
+    incomplete-candidate-set, not dishonesty), documented at
+    play_ordering.py's "Known approximations" block. Reorder-actions in
+    the shop head stay REJECTED (real env-step chains — the original
+    exploration trap applies in full).
+  - **v2 OBS RIDER — joker edition is embedding-invisible**: edition
+    reaches the models only as a scalar ordinal on the joker row
+    (`encode_joker` feature 2, /4-normalized); the center-key embedding
+    and the 24-dim descriptors are per-CENTER and therefore
+    edition-blind — a Polychrome Blueprint and a plain one are identical
+    in the trigger-match injection channel. Promote edition to a 5-way
+    one-hot on the joker row at the NEXT regen-forcing schema bump (the
+    merge): same scalar-ordinal false-geometry objection as center-key
+    ids, small at 5 values but free to fix when a bump rides anyway.
+    The targets-only action split keeps this non-load-bearing — the
+    exact evaluator prices editions regardless of what the policy
+    perceives. SAME-BUMP RIDER — duplicate COUNT: joker rows are
+    per-instance so n Brainstorms are n distinguishable rows (and the
+    trigger-match SUM channel preserves multiplicity for card-matching
+    resolved targets), but the pooled trunk sees count only as mean-pool
+    dilution (max erases it) — the documented pooling-destroys-counts
+    class, and the count is exactly what prices the shared Brainstorm
+    pick (n copies fire the one chosen effect) and the shop's
+    second-copy buy. Fix by the established pattern (inject counts where
+    pooling can't destroy them): a per-row "copies-of-my-key owned"
+    feature or GC-side duplicate count, riding the same bump.
+    Credit-assignment caveat recorded: few placement-relevant
+    events per run; the v1 heuristic is available as a potential-based
+    prior if the learned pick stays noise. v2 dissolves v1's limitations
+    (build-blindness, farming) by learning targets against real run
+    reward.
 - **s1 kickoff command (once the h1 PPO checkpoint exists; transfer it +
   s0_a4_v4 + its reservoir to the training machine):**
   `uv run python scripts/train_shop_ppo.py --s1-schema --win-ante 8
   --init-from runs/shop_ppo/s0_a4/best_model/best_model.zip
   --init-reservoir runs/shop_ppo/s0_a4/reservoir.pkl
   --phi-checkpoint runs/shop_ppo/s0_a4/best_model/best_model.zip
-  --hand-policy <h1 pointer .zip> --total-timesteps 2000000
-  --log-dir runs/shop_ppo/s1 --seed 0`
+  --hand-policy <h1 pointer .zip> --partner-money-ordering
+  --total-timesteps 2000000 --log-dir runs/shop_ppo/s1 --seed 0`
   then re-baseline the floor with `eval_shop_policy.py --policy nextround
-  --s1-schema --hand-policy <h1 pointer .zip>` and eval the trained model
-  with the same partner/flags (match the partner to what s1 trained
-  against).
+  --s1-schema --hand-policy <h1 pointer .zip> --partner-money-ordering`
+  and eval the trained model with the same partner/flags (match the
+  partner — checkpoint AND ordering mode — to what s1 trained against).
 
 **Wave 4 — in-blind merge** (post-s1, as locked).
