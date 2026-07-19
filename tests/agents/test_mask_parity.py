@@ -20,12 +20,17 @@ from jackdaw.agents import (  # noqa: E402
     hand_pointer_head,  # noqa: E402
     pointer_ppo_policy,  # noqa: E402
 )
+from jackdaw.agents.hand_checkpoint_policy import HandCheckpointPolicy  # noqa: E402
 from jackdaw.agents.hand_pointer_head import (  # noqa: E402
     CARD_SLOTS,
     MAX_PICKS,
     STOP_INDEX,
+    HandPointerBCModel,
     PointerActionHead,
 )
+from jackdaw.engine.actions import GamePhase, SelectBlind  # noqa: E402
+from jackdaw.engine.game import step as engine_step  # noqa: E402
+from jackdaw.engine.run_init import initialize_run  # noqa: E402
 from jackdaw.env.hand_play_gym import observation_space_v2  # noqa: E402
 
 
@@ -236,3 +241,25 @@ def test_pointer_ppo_policy_uses_head_masks_for_identical_taken_prefixes():
     assert torch.equal(policy_type_mask, torch.isfinite(head_type))
     assert torch.equal(policy_pointer_mask, torch.isfinite(head_pointer))
     assert torch.equal(policy_active, head_active)
+
+
+def test_partner_wrapper_uses_the_shared_pointer_decoder(tmp_path, monkeypatch):
+    checkpoint = tmp_path / "pointer.pt"
+    model = HandPointerBCModel(observation_space_v2())
+    torch.save(
+        {"model_state_dict": model.state_dict(), "metadata": {"head": "pointer"}}, checkpoint
+    )
+    calls = 0
+    original_decode = HandPointerBCModel.decode
+
+    def recording_decode(self, obs):
+        nonlocal calls
+        calls += 1
+        return original_decode(self, obs)
+
+    monkeypatch.setattr(HandPointerBCModel, "decode", recording_decode)
+    gs = initialize_run("b_red", 1, "MASK_PARITY_PARTNER")
+    engine_step(gs, SelectBlind())
+    assert gs["phase"] == GamePhase.SELECTING_HAND
+    HandCheckpointPolicy(checkpoint)(gs)
+    assert calls == 1
