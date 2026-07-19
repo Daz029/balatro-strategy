@@ -217,3 +217,7 @@ checkpoints/
 
 # data
 data/
+# codex sandbox temp dirs (permission-locked leftovers)
+.pytest-tmp-*/
+.test-tmp-*/
+.temp-*/
