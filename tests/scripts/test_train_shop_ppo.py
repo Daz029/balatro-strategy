@@ -24,6 +24,7 @@ import gymnasium  # noqa: E402
 import torch  # noqa: E402
 from eval_shop_policy import NextRoundPolicy, eval_seeds, load_policy, run_suite  # noqa: E402
 from gymnasium import spaces  # noqa: E402
+from sb3_contrib.common.maskable.distributions import MaskableCategorical  # noqa: E402
 from train_shop_ppo import (  # noqa: E402
     CountBonus,
     ScheduleCallback,
@@ -532,6 +533,49 @@ class TestFiniteGradGuard:
             model.policy.action_net.bias.view(-1)[1] = 0.0
         model.policy.action_net(torch.zeros(4, model.policy.action_net.in_features))
         assert model._finite_guard_logit_catches == 2  # finite forward: no bump
+
+    def test_stale_probs_cache_does_not_fail_the_simplex_check(self):
+        # The s1 crash (~320k steps). MaskableCategorical caches probs from the
+        # UNMASKED logits, and apply_masking's re-init re-validates that cache
+        # instead of the distribution it is building -- so the check fires on a
+        # tensor layer 3's clamp never touches, while the masked logits here are
+        # finite. Fails pre-guard with the reported Simplex ValueError.
+        build_model(
+            win_ante=1,
+            schedules=TrainingSchedules(),
+            reservoir=ShopReservoir(seed=0),
+            seed=0,
+            n_envs=1,
+            n_steps=8,
+            batch_size=8,
+            device="cpu",
+        )
+        dist = MaskableCategorical(logits=torch.randn(2, 8))
+        dist.probs = torch.full((2, 8), float("nan"))
+        dist.apply_masking(torch.ones(2, 8, dtype=torch.bool))
+        assert torch.isfinite(dist.probs).all()
+        assert torch.allclose(dist.probs.sum(-1), torch.ones(2), atol=1e-6)
+
+    def test_genuinely_nonfinite_masked_probs_are_repaired_not_raised(self):
+        # Real poison must survive as a near-no-op update rather than killing a
+        # multi-hour run -- and must stay a legal distribution.
+        build_model(
+            win_ante=1,
+            schedules=TrainingSchedules(),
+            reservoir=ShopReservoir(seed=0),
+            seed=0,
+            n_envs=1,
+            n_steps=8,
+            batch_size=8,
+            device="cpu",
+        )
+        dist = MaskableCategorical(logits=torch.randn(2, 8))
+        # Poison arriving AFTER construction: layer 3 keeps non-finite logits
+        # out of the constructor, so this is the shape real poison must take.
+        dist._original_logits = torch.full((2, 8), float("nan"))
+        dist.apply_masking(torch.ones(2, 8, dtype=torch.bool))
+        assert torch.isfinite(dist.probs).all()
+        assert torch.allclose(dist.probs.sum(-1), torch.ones(2), atol=1e-6)
 
 
 class TestEvalSuite:
