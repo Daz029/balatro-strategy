@@ -278,6 +278,18 @@ def candidate_orderings(
 #     The exact closed form for mixed (add-then-multiply) blocks is a sort
 #     by a*x/(x-1) descending, which needs per-joker magnitudes we don't
 #     have without evaluation -- the binary partition is the locked design.
+#   - Copy-joker editions couple placement to target adjacency: a copy
+#     fires its OWN edition at its own slot, but its slot must sit
+#     adjacent-left of its target, and `best_joker_order` only inserts
+#     copies into the FIXED sorted base -- an order that serves a copy's
+#     x-mult edition by moving its TARGET into the late block (Polychrome
+#     Blueprint + early-additive target) is never proposed. Second-order
+#     for the same reason as above; the in-blind-merge compile layer
+#     closes it with exhaustive ordering search on Holo/Polychrome boards
+#     (Foil is chips-only, Negative non-scoring -- order-insensitive;
+#     exact algorithm deliberately TBD at the merge, edge cases abound --
+#     see the ordering_objective v2 record in
+#     docs/post-regen-training-plan.md).
 
 # Center keys whose handler can return Xmult_mod in the joker_main context
 # (Phase 9b) -- i.e. jokers that MULTIPLY at their own list position. Kept

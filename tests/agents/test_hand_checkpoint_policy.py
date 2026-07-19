@@ -8,12 +8,15 @@ raising on a >8-card (Serpent over-draw) hand.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
 torch = pytest.importorskip("torch")
 pytest.importorskip("sb3_contrib")
 
+import jackdaw.agents.hand_checkpoint_policy as hand_checkpoint_policy  # noqa: E402
 from jackdaw.agents.hand_action_space import combo_to_action, legal_action_mask  # noqa: E402
 from jackdaw.agents.hand_checkpoint_policy import HandCheckpointPolicy  # noqa: E402
 from jackdaw.agents.hand_pointer_head import HandPointerBCModel  # noqa: E402
@@ -213,6 +216,75 @@ class TestPointerBCCheckpoint:
             _obs, _reward, terminated, truncated, info = env.step(int(legal[-1]))
             if terminated or truncated:
                 break
+
+
+class TestMoneyAwareOrdering:
+    def test_pointer_decoder_receives_fresh_objective(self, pointer_bc_checkpoint, monkeypatch):
+        captured = []
+        marker = object()
+
+        def decode(action, game_state, ordering_objective=None):
+            captured.append(ordering_objective)
+            return marker
+
+        monkeypatch.setattr(hand_checkpoint_policy, "pointer_action_to_engine_action", decode)
+        policy = HandCheckpointPolicy(pointer_bc_checkpoint, money_aware_ordering=True)
+        policy._infer_pointer = lambda obs: np.array([int(ActionType.Discard), 0, 8, 8, 8, 8])
+
+        assert policy(_selecting_hand_state("HCP_MONEY_POINTER")) is marker
+        assert len(captured) == 1
+        assert callable(captured[0])
+
+    def test_v1_decoder_receives_fresh_objective(self, bc_checkpoint, monkeypatch):
+        captured = []
+        marker = object()
+
+        def decode(action, game_state, ordering_objective=None):
+            captured.append(ordering_objective)
+            return marker
+
+        monkeypatch.setattr(hand_checkpoint_policy, "action_to_engine_action", decode)
+        policy = HandCheckpointPolicy(bc_checkpoint, money_aware_ordering=True)
+        policy._infer = lambda obs, mask: 0
+
+        assert policy(_selecting_hand_state("HCP_MONEY_V1")) is marker
+        assert len(captured) == 1
+        assert callable(captured[0])
+
+    def test_default_decoder_objective_is_none(self, bc_checkpoint, monkeypatch):
+        captured = []
+
+        def decode(action, game_state, ordering_objective=None):
+            captured.append(ordering_objective)
+            return object()
+
+        monkeypatch.setattr(hand_checkpoint_policy, "action_to_engine_action", decode)
+        policy = HandCheckpointPolicy(bc_checkpoint)
+        policy._infer = lambda obs, mask: 0
+
+        policy(_selecting_hand_state("HCP_MONEY_DEFAULT"))
+        assert captured == [None]
+
+    def test_objective_is_rebuilt_after_chips_change(self, bc_checkpoint, monkeypatch):
+        captured = []
+
+        def decode(action, game_state, ordering_objective=None):
+            captured.append(ordering_objective)
+            return object()
+
+        monkeypatch.setattr(hand_checkpoint_policy, "action_to_engine_action", decode)
+        policy = HandCheckpointPolicy(bc_checkpoint, money_aware_ordering=True)
+        policy._infer = lambda obs, mask: 0
+        game_state = _selecting_hand_state("HCP_MONEY_FRESHNESS")
+        game_state["chips"] = 0
+        policy(game_state)
+        game_state["chips"] = game_state["blind"].chips
+        policy(game_state)
+
+        probe = SimpleNamespace(total=0, dollars_earned=4)
+        assert captured[0] is not captured[1]
+        assert captured[0](probe) == (0.0, 0.0, 4.0)
+        assert captured[1](probe) == (1.0, 4.0, 0.0)
 
 
 class TestShopAdapterPartner:

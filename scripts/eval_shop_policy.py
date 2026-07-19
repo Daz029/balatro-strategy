@@ -158,13 +158,22 @@ def main() -> None:
         help="hand-partner checkpoint (.pt/.zip); omit for the greedy baseline. "
         "Match this to the partner s0 was TRAINED against.",
     )
+    parser.add_argument(
+        "--partner-money-ordering",
+        action="store_true",
+        help="use clear-gated money-aware copy-joker ordering with the hand partner",
+    )
     args = parser.parse_args()
+    if args.partner_money_ordering and args.hand_policy is None:
+        parser.error("--partner-money-ordering requires --hand-policy")
 
     hand_policy = None
     if args.hand_policy is not None:
         from jackdaw.agents.hand_checkpoint_policy import HandCheckpointPolicy
 
-        hand_policy = HandCheckpointPolicy(str(args.hand_policy))
+        hand_policy = HandCheckpointPolicy(
+            str(args.hand_policy), money_aware_ordering=args.partner_money_ordering
+        )
 
     policy = load_policy(args.policy, args.device)
     result = run_suite(
@@ -176,6 +185,7 @@ def main() -> None:
     )
     result["policy"] = args.policy
     result["hand_policy"] = str(args.hand_policy) if args.hand_policy is not None else "greedy"
+    result["partner_money_ordering"] = bool(args.partner_money_ordering)
 
     print(json.dumps(result, indent=2))
     if args.output:
