@@ -546,7 +546,8 @@ PPO checkpoint existing — this wave is the code seam only):
   recorded: the money-aware `ordering_objective` for partner copy-joker
   placement (docstring upgrade path at `action_to_engine_action`) has no
   locked concrete spec — the partner passes `None` (score-only ordering)
-  until that objective is designed.
+  until that objective is designed. This deferral now has a DEADLINE —
+  see the "MUST BE LOCKED BEFORE THE s1 KICKOFF" item below.
 - Item 10 obs/Φ side = `jackdaw/agents/phi_shaping.py`: `truncate_s1_obs`
   (joker rows/mask/ids 15→8 prefix, `shop_context` S1→12 prefix; strict —
   s0-shaped input raises) with the PINNED inverse property
@@ -574,6 +575,37 @@ PPO checkpoint existing — this wave is the code seam only):
   pinned by test: sum of phi terms over an episode == −Φ(s₀), terminal
   term == −Φ(s_last). `eval_shop_policy.py --s1-schema` added for s1
   checkpoint evals and the h1-partner nextround floor re-baseline.
+- [ ] **MUST BE LOCKED BEFORE THE s1 KICKOFF — money-aware
+  `ordering_objective` for the partner (decide it either way; added
+  2026-07-19).** The h1 partner currently deploys with `objective=None`:
+  `best_joker_order`'s copy-placement argmax is raw score, so the partner
+  never points Blueprint/Brainstorm at a money target (Business Card /
+  Golden Joker class) even when that is the better run decision, and s1's
+  values for copy-joker + money-joker builds are "given a partner that
+  never does that."
+  - **Why the deadline is the s1 kickoff, not earlier and not never**:
+    s1's values are "given how the partner plays" (the same argument that
+    scheduled the joker-row widening at s1), so whatever objective the
+    partner deploys with must be FIXED before s1 trains against it —
+    flipping it on afterward changes the partner's induced distribution
+    under s1's feet. The s1 run already gates on the h1 checkpoint, so
+    the decision window is open now.
+  - **Why it is a decision, not a build blocker**: it is a deploy-time
+    knob on the wrapper only — solver labels stay score-only (locked
+    2026-07-15), h1 itself is untouched, no retraining anywhere. The
+    affected intersection is narrow (copy joker owned AND a money target
+    in the copyable set AND the money line truly better).
+  - **Design sketch to grill, not yet locked**: V_curve now provides a
+    dollars→P(win) conversion, so `score + λ(ante,$)·dollars_earned`
+    (λ from the V_curve marginal) is definable without inventing a scale
+    by hand; `ScoreResult.dollars_earned` already exists for exactly this
+    (`play_ordering.py`).
+  - **Fallback if it slips**: ship s1 with score-only ordering, land the
+    objective at the next partner swap (h2/s2) — one bootstrap iteration
+    of mild undervaluation of copy+money builds, the same accepted
+    second-order class as the V_curve pre-fix-economy rider. Slipping is
+    acceptable; deciding by default is not — record the ruling here
+    either way.
 - **s1 kickoff command (once the h1 PPO checkpoint exists; transfer it +
   s0_a4_v4 + its reservoir to the training machine):**
   `uv run python scripts/train_shop_ppo.py --s1-schema --win-ante 8
