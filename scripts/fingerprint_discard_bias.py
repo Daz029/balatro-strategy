@@ -61,8 +61,11 @@ from eval_hand_policy import eval_seeds, load_policy  # noqa: E402
 from jackdaw.agents.greedy_hand_policy import GreedyHandPolicy  # noqa: E402
 from jackdaw.agents.hand_action_space import NUM_COMBOS, combo_to_action  # noqa: E402
 from jackdaw.engine.actions import PlayHand as EnginePlayHand  # noqa: E402
+from jackdaw.env.action_space import ActionType  # noqa: E402
 from jackdaw.env.hand_play_gym import HandPlayGymEnv  # noqa: E402
 
+# v2 appends 21 global-context features to the v1 vector, so these v1 indices
+# remain valid for pointer observations.
 GC_HANDS_LEFT = 13  # x10 normalization -- round() recovers the integer
 GC_DISCARDS_LEFT = 14
 GC_FLUSH_PROX = 227
@@ -133,8 +136,19 @@ class _GreedyGymPolicy:
 def run_episodes(policy_factory, config, n_episodes: int) -> list[dict]:
     """One row per episode: starting bucket, archetype, first-decision
     action kind, cleared. Uses the reserved EVAL_ seed suite."""
-    env = HandPlayGymEnv(config=config)
-    policy = policy_factory(env)
+    probe_env = HandPlayGymEnv(config=config)
+    policy = policy_factory(probe_env)
+    obs_version = getattr(policy, "obs_version", 1)
+    action_version = getattr(policy, "action_version", 1)
+    if action_version == 1:
+        env = probe_env
+    else:
+        env = HandPlayGymEnv(
+            config=config,
+            obs_version=obs_version,
+            action_version=action_version,
+        )
+        policy = policy_factory(env)
     rows: list[dict] = []
     for seed in eval_seeds(n_episodes):
         obs, info = env.reset(options={"episode_seed": seed})
@@ -147,9 +161,15 @@ def run_episodes(policy_factory, config, n_episodes: int) -> list[dict]:
         }
         first = True
         while True:
-            action = policy.act(obs, info["action_mask"])
+            if action_version == 1:
+                action = policy.act(obs, info["action_mask"])
+            else:
+                action = policy.act(obs)
             if first:
-                row["first_discard"] = bool(action >= NUM_COMBOS)
+                if action_version == 1:
+                    row["first_discard"] = bool(action >= NUM_COMBOS)
+                else:
+                    row["first_discard"] = bool(int(action[0]) == int(ActionType.Discard))
                 first = False
             obs, reward, terminated, truncated, info = env.step(action)
             if terminated or truncated:

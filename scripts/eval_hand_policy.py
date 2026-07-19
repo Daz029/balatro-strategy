@@ -28,9 +28,11 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import sys
 import time
+import zipfile
 from pathlib import Path
 
 import numpy as np
@@ -53,6 +55,9 @@ def eval_seeds(n_episodes: int) -> list[str]:
 
 class _BCPolicy:
     """Deterministic masked-argmax wrapper for a BC checkpoint."""
+
+    obs_version = 1
+    action_version = 1
 
     def __init__(self, checkpoint_path: Path, device: str) -> None:
         import torch
@@ -80,6 +85,9 @@ class _BCPolicy:
 class _PPOPolicy:
     """Deterministic wrapper for a saved MaskablePPO .zip."""
 
+    obs_version = 1
+    action_version = 1
+
     def __init__(self, model_path: Path, device: str) -> None:
         from sb3_contrib import MaskablePPO
 
@@ -90,20 +98,137 @@ class _PPOPolicy:
         return int(action)
 
 
+class _PointerBCPolicy:
+    """Deterministic wrapper for a pointer BC checkpoint."""
+
+    obs_version = 2
+    action_version = 2
+
+    def __init__(self, checkpoint_path: Path, device: str) -> None:
+        import torch
+
+        from jackdaw.agents.pointer_ppo_policy import load_bc_model
+
+        self._torch = torch
+        self._model = load_bc_model(checkpoint_path, device=device)
+        self._device = device
+
+    def act(self, obs: dict[str, np.ndarray]) -> np.ndarray:
+        from jackdaw.agents.pointer_ppo_policy import _action_vector_from_decode
+
+        torch = self._torch
+        with torch.no_grad():
+            batch = {
+                k: torch.as_tensor(v, device=self._device).unsqueeze(0) for k, v in obs.items()
+            }
+            action_types, picked = self._model.decode(batch)
+            action = _action_vector_from_decode(action_types, picked)
+        return action.squeeze(0).cpu().numpy().astype(np.int64, copy=False)
+
+
+class _PointerPPOPolicy:
+    """Deterministic wrapper for a saved pointer PPO .zip."""
+
+    obs_version = 2
+    action_version = 2
+
+    def __init__(self, model_path: Path, device: str) -> None:
+        from train_hand_ppo_b import KLToBCPointerPPO
+
+        self._model = KLToBCPointerPPO.load(str(model_path), device=device)
+
+    def act(self, obs: dict[str, np.ndarray]) -> np.ndarray:
+        policy = self._model.policy
+        obs_tensor, _ = policy.obs_to_tensor(obs)
+        action = policy.predict_deterministic(obs_tensor)
+        return action.squeeze(0).detach().cpu().numpy().astype(np.int64, copy=False)
+
+
+def _pointer_class_record(data: dict) -> str:
+    """Return the serialized policy-class record used for dispatch."""
+
+    record = data.get("policy_class")
+    if isinstance(record, str):
+        return record
+    if not isinstance(record, dict):
+        return ""
+
+    parts = [str(record.get(key, "")) for key in ("__name__", "__qualname__", "__module__")]
+    serialized = record.get(":serialized:")
+    if isinstance(serialized, str):
+        try:
+            parts.append(base64.b64decode(serialized).decode("latin1"))
+        except Exception:  # noqa: BLE001 -- malformed metadata is handled below
+            pass
+    return " ".join(parts)
+
+
+def _zip_policy_kind(policy_path: Path) -> str:
+    try:
+        with zipfile.ZipFile(policy_path) as archive:
+            data = json.loads(archive.read("data"))
+    except (
+        OSError,
+        KeyError,
+        TypeError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        zipfile.BadZipFile,
+    ) as exc:
+        raise ValueError(f"invalid SB3 checkpoint archive: {policy_path}") from exc
+
+    class_record = _pointer_class_record(data)
+    if "PointerPPOPolicy" in class_record:
+        return "pointer"
+    if "Maskable" in class_record:
+        return "v1"
+    raise ValueError(f"unrecognized SB3 policy class in {policy_path}: {class_record!r}")
+
+
 def load_policy(policy_path: Path, device: str):
-    if policy_path.suffix == ".zip":
-        return _PPOPolicy(policy_path, device)
-    return _BCPolicy(policy_path, device)
+    suffix = policy_path.suffix.lower()
+    if suffix == ".zip":
+        return (
+            _PointerPPOPolicy(policy_path, device)
+            if _zip_policy_kind(policy_path) == "pointer"
+            else _PPOPolicy(policy_path, device)
+        )
+    if suffix == ".pt":
+        import torch
+
+        try:
+            payload = torch.load(policy_path, map_location=device, weights_only=False)
+        except Exception as exc:  # noqa: BLE001 -- normalize bad checkpoint errors
+            raise ValueError(f"invalid BC checkpoint: {policy_path}") from exc
+        if not isinstance(payload, dict) or "model_state_dict" not in payload:
+            raise ValueError(f"unrecognized BC checkpoint payload: {policy_path}")
+        metadata = payload.get("metadata")
+        if metadata is not None and not isinstance(metadata, dict):
+            raise ValueError(f"unrecognized BC checkpoint metadata: {policy_path}")
+        head = metadata.get("head") if metadata else None
+        if head == "pointer":
+            return _PointerBCPolicy(policy_path, device)
+        if head is None:
+            return _BCPolicy(policy_path, device)
+        raise ValueError(f"unrecognized BC checkpoint head {head!r}: {policy_path}")
+    raise ValueError(f"unsupported policy checkpoint suffix: {policy_path.suffix!r}")
 
 
 def run_suite(policy, config: HandPlayConfig, n_episodes: int) -> dict:
-    env = HandPlayGymEnv(config=config)
+    env = HandPlayGymEnv(
+        config=config,
+        obs_version=policy.obs_version,
+        action_version=policy.action_version,
+    )
     clears: list[bool] = []
     steps_total = 0
     for seed in eval_seeds(n_episodes):
         obs, info = env.reset(options={"episode_seed": seed})
         while True:
-            action = policy.act(obs, info["action_mask"])
+            if policy.action_version == 1:
+                action = policy.act(obs, info["action_mask"])
+            else:
+                action = policy.act(obs)
             obs, reward, terminated, truncated, info = env.step(action)
             steps_total += 1
             if terminated or truncated:
