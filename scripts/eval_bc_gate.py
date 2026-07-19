@@ -4,8 +4,8 @@ This script is the executable pre-registration: thresholds are transcribed from
 the plan document and MUST NOT be edited after the first gate run. The dated
 2026-07-19 AMENDMENT in docs/post-regen-training-plan.md records the user's
 ruling that the (b) overrun/stop bars and (d) wide-NLL ratio are diagnostics;
-this is a recorded amendment, not a silent edit. Empty strata mean INCOMPLETE,
-never silent pooling.
+this is a recorded amendment, not a silent edit. Empty strata are reported without
+blocking the verdict; they are never silently pooled.
 
 The evaluator deliberately keeps the pointer decoder's teacher-forced and
 free-running paths separate.  It uses the pointer module's legality functions
@@ -822,6 +822,24 @@ def _canary(metadata: dict[str, Any]) -> float | None:
     return None
 
 
+def _empty_strata(tables: dict[str, Any]) -> list[str]:
+    empty: list[str] = []
+
+    def visit(value: Any, path: tuple[str, ...]) -> None:
+        if not isinstance(value, dict):
+            return
+        if value.get("n") == 0 and "EMPTY" in value.get("flags", []):
+            empty.append(".".join(path))
+        for key, child in value.items():
+            if key != "incomplete_requirements":
+                visit(child, (*path, key))
+
+    for name, table in tables.items():
+        if name != "incomplete_requirements":
+            visit(table, (name,))
+    return sorted(empty)
+
+
 def _verdict(
     tables: dict[str, Any], pointer_metadata: dict[str, Any], flat_metadata: dict[str, Any]
 ) -> dict[str, Any]:
@@ -865,21 +883,26 @@ def _verdict(
 
     hagg = head["aggregate"]
     hsets = [head["by_set_size"][str(size)] for size in SET_SIZES]
+    populated_hsets = [row for row in hsets if row.get("n", 0) > 0]
     nll_values = [hagg.get("pointer_joint_nll"), hagg.get("flat_nll")] + [
-        value for row in hsets for value in (row.get("pointer_joint_nll"), row.get("flat_nll"))
+        value
+        for row in populated_hsets
+        for value in (row.get("pointer_joint_nll"), row.get("flat_nll"))
     ]
     exact_values = [hagg.get("pointer_exact"), hagg.get("flat_exact")] + [
-        value for row in hsets for value in (row.get("pointer_exact"), row.get("flat_exact"))
+        value
+        for row in populated_hsets
+        for value in (row.get("pointer_exact"), row.get("flat_exact"))
     ]
     nll_pass = None
     exact_pass = None
     if required(nll_values):
         nll_pass = hagg["pointer_joint_nll"] <= 1.05 * hagg["flat_nll"] and all(
-            row["pointer_joint_nll"] <= 1.10 * row["flat_nll"] for row in hsets
+            row["pointer_joint_nll"] <= 1.10 * row["flat_nll"] for row in populated_hsets
         )
     if required(exact_values):
         exact_pass = hagg["pointer_exact"] >= hagg["flat_exact"] - 0.01 and all(
-            row["pointer_exact"] >= row["flat_exact"] - 0.02 for row in hsets
+            row["pointer_exact"] >= row["flat_exact"] - 0.02 for row in populated_hsets
         )
     add(
         "(a) shared_nll",
@@ -969,6 +992,7 @@ def _verdict(
         }
     )
     incomplete = tables.get("incomplete_requirements", [])
+    empty_strata = _empty_strata(tables)
     structural_fail = invalid not in (None, 0)
     any_fail = any(check["status"] == "FAIL" for check in checks)
     any_incomplete = bool(incomplete) or any(
@@ -983,6 +1007,7 @@ def _verdict(
         "checks": checks,
         "overall": overall,
         "incomplete_requirements": incomplete,
+        "empty_strata": empty_strata,
         "winrate": "REFERENCE_ONLY_NOT_COMPUTED",
     }
 
@@ -1084,25 +1109,9 @@ def _build_report(
         container["B_value_mse"] = container.pop("pointer_value_mse")
         container["flat_value_mse"] = container.pop("flat_value_mse")
 
-    wide_required = bool(wide_records)
     incomplete: list[str] = []
     if not shared:
         incomplete.append("shared flat-compatible support is empty")
-    for size in SET_SIZES:
-        if head["by_set_size"][str(size)]["n"] == 0:
-            incomplete.append(f"shared set-size stratum {size} is empty")
-        if not [r for r in records if r["label"]["set_size"] == size]:
-            incomplete.append(f"all-example set-size stratum {size} is empty")
-        if stop_table["by_set_size"][str(size)]["n"] == 0:
-            incomplete.append(f"stop set-size stratum {size} is empty")
-    if not wide_required:
-        incomplete.append("wide stratum is empty")
-    for size in SET_SIZES:
-        if wide["by_set_size"][str(size)]["n"] == 0:
-            incomplete.append(f"wide set-size stratum {size} is empty")
-    for action_type in ACTION_TYPES:
-        if not [r for r in shared if r["label"]["type_index"] == action_type]:
-            incomplete.append(f"shared {TYPE_NAMES[action_type]} stratum is empty")
     if pclear["aggregate"]["flat_value_mse"] is None:
         incomplete.append("flat p_clear MSE is missing")
     if _canary(pointer_metadata) is None and _canary(flat_metadata) is None:
@@ -1182,6 +1191,8 @@ def _markdown_report(report: dict[str, Any]) -> str:
         "# BC gate report",
         "",
         f"Overall verdict: **{report['verdict']['overall']}**",
+        "",
+        f"Empty strata (reported only): {report['verdict']['empty_strata']}",
         "",
         (
             "Flat dropped-label rider: "

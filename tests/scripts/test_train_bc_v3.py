@@ -25,6 +25,10 @@ from jackdaw.env.hand_play_gym import observation_space_v2
 
 def _synthetic_dataset(n: int = 64, *, repeated: bool = False) -> DemoDataset:
     space = observation_space_v2()
+    # Seeded: gate tests assert verdict properties on models trained on this
+    # data, and an unseeded space.sample() makes those verdicts per-process
+    # coin flips (observed: order-dependent PASS/FAIL in test_eval_bc_gate).
+    space.seed(1234 + n + int(repeated))
     samples = [space.sample() for _ in range(1 if repeated else n)]
     obs = {
         key: torch.as_tensor(np.stack([sample[key] for sample in samples])) for key in samples[0]
@@ -127,6 +131,12 @@ def test_pointer_arm_writes_checkpoint_and_history(tmp_path):
     assert metadata["data_dirs"] == ["synthetic"]
     assert metadata["history"]
     assert "sequence_nll" in metadata["history"][0]
+    assert metadata["canary_final_ce"] < 0.05
+    assert metadata["canary_epochs"] >= 1
+    assert metadata["canary_passed"] is True
+    assert metadata["memorization_canary_mean_non_padding_token_ce"] == pytest.approx(
+        metadata["canary_final_ce"]
+    )
 
 
 def test_flat_arm_drops_exactly_wide_rows_and_writes_checkpoint(tmp_path):
@@ -149,6 +159,26 @@ def test_flat_arm_drops_exactly_wide_rows_and_writes_checkpoint(tmp_path):
     assert metadata["dropped_wide_count"] == expected_count
     assert metadata["dropped_wide_fraction"] == pytest.approx(expected_count / len(dataset))
     assert metadata["num_train"] + metadata["num_val"] == len(dataset) - expected_count
+    assert not any("canary" in key for key in metadata)
+
+
+def test_pointer_canary_does_not_change_saved_model_weights(tmp_path):
+    dataset = _synthetic_dataset(32, repeated=True)
+    common = {
+        "head": "pointer",
+        "max_epochs": 2,
+        "patience": 2,
+        "batch_size": 32,
+        "val_fraction": 0.2,
+        "device_str": "cpu",
+        "seed": 8,
+    }
+    with_canary = train(dataset, tmp_path / "with_canary", **common)
+    without_canary = train(dataset, tmp_path / "without_canary", _run_canary=False, **common)
+    with_state = torch.load(with_canary, weights_only=False)["model_state_dict"]
+    without_state = torch.load(without_canary, weights_only=False)["model_state_dict"]
+    assert with_state.keys() == without_state.keys()
+    assert all(torch.equal(with_state[key], without_state[key]) for key in with_state)
 
 
 def test_pointer_memorization_canary_uses_non_padding_token_ce(tmp_path):

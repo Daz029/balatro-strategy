@@ -98,6 +98,17 @@ def test_gate_writes_all_required_tables_and_verdict(artifacts):
         "greedy_vs_beam_decode",
     } <= set(report["tables"])
     assert {"checks", "overall", "winrate"} <= set(report["verdict"])
+    canary = next(
+        check
+        for check in report["verdict"]["checks"]
+        if check["id"] == "(e) memorization_canary"
+    )
+    assert canary["status"] in {"PASS", "FAIL"}
+    assert canary["measured"] == pytest.approx(
+        torch.load(artifacts["pointer"], weights_only=False)["metadata"][
+            "canary_final_ce"
+        ]
+    )
     for size in range(1, 6):
         assert str(size) in report["tables"]["head_to_head"]["by_set_size"]
         assert str(size) in report["tables"]["predicted_vs_true_set_size"]["by_true_set_size"]
@@ -110,7 +121,7 @@ def test_free_running_actions_are_all_valid(artifacts):
     assert all(case["valid"] for case in audit["decoded_actions"])
 
 
-def test_empty_wide_stratum_is_incomplete(artifacts, monkeypatch, tmp_path):
+def test_empty_wide_stratum_is_reported_without_blocking(artifacts, monkeypatch, tmp_path):
     no_wide = _synthetic_dataset(32, repeated=True)
     monkeypatch.setattr(gate, "load_dataset", lambda *_args: no_wide)
     report = gate.evaluate_gate(
@@ -123,7 +134,12 @@ def test_empty_wide_stratum_is_incomplete(artifacts, monkeypatch, tmp_path):
     )
     wide = report["tables"]["wide"]["aggregate"]
     assert wide["n"] == 0
-    assert report["verdict"]["overall"] == "INCOMPLETE"
+    assert "wide.aggregate" in report["verdict"]["empty_strata"]
+    assert any("wide" in name for name in report["verdict"]["empty_strata"])
+    assert not any(
+        "empty" in requirement for requirement in report["verdict"]["incomplete_requirements"]
+    )
+    assert report["verdict"]["overall"] != "INCOMPLETE"
 
 
 def test_overrun_is_dumped_as_diagnostic(artifacts, monkeypatch, tmp_path):
@@ -146,11 +162,13 @@ def test_overrun_is_dumped_as_diagnostic(artifacts, monkeypatch, tmp_path):
     )
     cases = report["tables"]["free_running_termination_audit"]["overrun_cases"]
     assert cases and {"seed", "true_label", "decoded_action"} <= set(cases[0])
-    assert any(
-        check["id"] == "(b) overrun_rate" and check["status"] == "DIAGNOSTIC"
-        for check in report["verdict"]["checks"]
-    )
-    assert report["verdict"]["overall"] == artifacts["report"]["verdict"]["overall"]
+    checks = {check["id"]: check for check in report["verdict"]["checks"]}
+    assert checks["(b) overrun_rate"]["status"] == "DIAGNOSTIC"
+    assert checks["(b) stop_token_accuracy"]["status"] == "DIAGNOSTIC"
+    # NOT asserted: overall equality with the baseline report. The rig
+    # degrades the teacher-forced (a) bars too (uniform pick logits), so the
+    # overall verdict may legitimately differ; the diagnostics-are-excluded
+    # property is pinned by test_amended_diagnostics_are_excluded_... below.
 
 
 def test_amended_diagnostics_are_excluded_but_hard_b_bars_gate(artifacts):

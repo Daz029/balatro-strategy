@@ -280,6 +280,81 @@ def _train_epoch_flat(
     return epoch_loss / max(n_batches, 1)
 
 
+@torch.no_grad()
+def _mean_pointer_token_ce(
+    model: HandPointerBCModel,
+    dataset: DemoDataset,
+    batch_size: int,
+    device: torch.device,
+) -> float:
+    model.eval()
+    total_ce = 0.0
+    total_steps = 0
+    for start in range(0, len(dataset), batch_size):
+        batch = dataset.slice(torch.arange(start, min(start + batch_size, len(dataset))))
+        card_latents, pooled, hand_mask, hands_left, discards_left = _pointer_batch(
+            model, batch, device
+        )
+        per_step, _, _, _ = model.pointer_head.teacher_forced_log_probs(
+            card_latents,
+            pooled,
+            hand_mask,
+            hands_left,
+            discards_left,
+            batch.action_types.to(device),
+            batch.card_indices.to(device),
+            return_uniform_log_probs=True,
+        )
+        active = pointer_step_active_mask(batch.card_indices.to(device))
+        total_ce += float((-(per_step * active)).sum().item())
+        total_steps += int(active.sum())
+    return total_ce / max(total_steps, 1)
+
+
+def _run_pointer_memorization_canary(
+    train_set: DemoDataset,
+    *,
+    device: torch.device,
+    seed: int,
+    lr: float,
+    max_epochs: int = 200,
+    target_ce: float = 0.05,
+) -> dict[str, float | int | bool]:
+    """Overfit a fresh pointer model on the first 50 training examples."""
+
+    canary_set = train_set.slice(torch.arange(min(50, len(train_set))))
+    if not len(canary_set):
+        raise ValueError("memorization canary requires at least one training example")
+
+    cuda_devices = [device.index or 0] if device.type == "cuda" else []
+    with torch.random.fork_rng(devices=cuda_devices):
+        torch.manual_seed(seed)
+        model = HandPointerBCModel(observation_space_v2()).to(device)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=max(lr, 3e-3), weight_decay=0.0)
+        final_ce = float("inf")
+        epochs = 0
+        for epoch in range(max_epochs):
+            _train_epoch_pointer(
+                model,
+                canary_set,
+                len(canary_set),
+                device,
+                label_smoothing=0.0,
+                value_coef=0.0,
+                optimizer=optimizer,
+            )
+            final_ce = _mean_pointer_token_ce(model, canary_set, len(canary_set), device)
+            epochs = epoch + 1
+            if final_ce < target_ce:
+                break
+
+    return {
+        "final_ce": final_ce,
+        "epochs": epochs,
+        "passed": final_ce < target_ce,
+    }
+
+
 def train(
     dataset: DemoDataset,
     output_dir: Path,
@@ -298,6 +373,7 @@ def train(
     data_dirs: list[str | Path] | None = None,
     stage_weights: dict[str, float] | None = None,
     metadata_extra: dict | None = None,
+    _run_canary: bool = True,
 ) -> Path:
     """Train one arm and save its best validation checkpoint."""
 
@@ -391,6 +467,14 @@ def train(
                 break
 
     assert best_state is not None
+    canary: dict[str, float | int | bool] | None = None
+    if head == "pointer" and _run_canary:
+        canary = _run_pointer_memorization_canary(
+            train_set,
+            device=device,
+            seed=seed,
+            lr=lr,
+        )
     output_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_path = output_dir / f"bc_v3_{head}.pt"
     metadata = {
@@ -420,6 +504,15 @@ def train(
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         **(metadata_extra or {}),
     }
+    if canary is not None:
+        metadata.update(
+            {
+                "canary_final_ce": canary["final_ce"],
+                "canary_epochs": canary["epochs"],
+                "canary_passed": canary["passed"],
+                "memorization_canary_mean_non_padding_token_ce": canary["final_ce"],
+            }
+        )
     torch.save({"model_state_dict": best_state, "metadata": metadata}, checkpoint_path)
     metrics_payload = {
         "head": head,

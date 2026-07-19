@@ -98,7 +98,12 @@ laptop-single-worker scaling.
     at a future regen) is the named lever; not pursued now. Smoke evidence at
     convergence: B beats the flat control on every head-to-head bar
     (NLL 2.41 vs 3.30, exact-set-match 0.445 vs 0.275, p_clear MSE 0.042 vs
-    0.052) with invalid rate 0.
+    0.052) with invalid rate 0. (3) Strata with zero val examples are marked
+    EMPTY and reported, but no longer block the verdict (user ruling
+    2026-07-19: the stratification rule forbids SILENT POOLING, not data
+    that genuinely doesn't exist — e.g. wide AND size-1..3 labels may be
+    structurally rare at any pool size). An empty stratum can never be
+    claimed as evidence of passing it.
   - **Gate data**: pipeline smoke + direction check NOW on stage2_k3_relabel +
     the regenerated v3 stage3 shards (transferred from the 9600X; the v3
     stage1 shards are STALE — never load them). The RECORDED verdict re-runs
