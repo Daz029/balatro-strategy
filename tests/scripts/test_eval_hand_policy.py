@@ -24,6 +24,7 @@ from eval_hand_policy import (  # noqa: E402
     run_suite,
 )
 from fingerprint_discard_bias import _GreedyGymPolicy, run_episodes  # noqa: E402
+from generate_hand_demos import stage_presets  # noqa: E402
 from train_hand_ppo_b import build_model  # noqa: E402
 
 from jackdaw.agents.hand_pointer_head import HandPointerBCModel  # noqa: E402
@@ -130,6 +131,15 @@ def test_pointer_fingerprint_uses_type_token_for_first_discard():
     assert all("first_discard" in row for row in rows)
 
 
-def test_fingerprint_greedy_control_stays_on_v1_env():
+def test_fingerprint_greedy_control_runs_in_fingerprint_env():
     rows = run_episodes(lambda env: _GreedyGymPolicy(env), HandPlayConfig(), n_episodes=1)
     assert len(rows) == 1
+
+
+def test_fingerprint_greedy_control_handles_h1_wide_stage1_hands():
+    # The h1 regen preset's hand-size tail deliberately creates 9-12-card
+    # hands. The greedy control must use the pointer action path, not the
+    # frozen v1/436-action space whose positions stop at 7.
+    config = stage_presets()["stage1_no_jokers"].config
+    rows = run_episodes(lambda env: _GreedyGymPolicy(env), config, n_episodes=6)
+    assert len(rows) == 6

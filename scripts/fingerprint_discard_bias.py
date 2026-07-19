@@ -59,10 +59,14 @@ for _p in (str(_SCRIPTS_DIR), str(_REPO_ROOT)):
 from eval_hand_policy import eval_seeds, load_policy  # noqa: E402
 
 from jackdaw.agents.greedy_hand_policy import GreedyHandPolicy  # noqa: E402
-from jackdaw.agents.hand_action_space import NUM_COMBOS, combo_to_action  # noqa: E402
+from jackdaw.agents.hand_action_space import NUM_COMBOS  # noqa: E402
 from jackdaw.engine.actions import PlayHand as EnginePlayHand  # noqa: E402
 from jackdaw.env.action_space import ActionType  # noqa: E402
-from jackdaw.env.hand_play_gym import HandPlayGymEnv  # noqa: E402
+from jackdaw.env.hand_play_gym import (  # noqa: E402
+    POINTER_MAX_PICKS,
+    POINTER_STOP_INDEX,
+    HandPlayGymEnv,
+)
 
 # v2 appends 21 global-context features to the v1 vector, so these v1 indices
 # remain valid for pointer observations.
@@ -120,17 +124,35 @@ def teacher_stats(stage_dir: Path) -> dict:
 
 
 class _GreedyGymPolicy:
-    """GreedyHandPolicy adapted to the gym loop: reads the env's raw engine
-    state, emits the canonical Discrete(436) index for the same action."""
+    """GreedyHandPolicy adapted to the gym loop.
+
+    The fingerprint uses the h1 stage presets, whose hand-size tail can create
+    9-12-card hands. Emit the pointer action format so the control can address
+    every live hand position; the frozen v1/436-action space only reaches
+    positions 0-7.
+    """
+
+    obs_version = 2
+    action_version = 2
 
     def __init__(self, env: HandPlayGymEnv) -> None:
         self._env = env
         self._greedy = GreedyHandPolicy()
 
-    def act(self, obs, mask) -> int:
+    def act(self, obs) -> np.ndarray:
         engine_action = self._greedy(self._env._adapter.raw_state)
-        action_type = 0 if isinstance(engine_action, EnginePlayHand) else 1
-        return combo_to_action(action_type, tuple(sorted(engine_action.card_indices)))
+        action_type = (
+            int(ActionType.PlayHand)
+            if isinstance(engine_action, EnginePlayHand)
+            else int(ActionType.Discard)
+        )
+        card_indices = tuple(sorted(int(i) for i in engine_action.card_indices))
+        if not 1 <= len(card_indices) <= POINTER_MAX_PICKS:
+            raise ValueError(f"greedy policy selected {len(card_indices)} cards")
+        tokens = card_indices + (POINTER_STOP_INDEX,) * (
+            POINTER_MAX_PICKS - len(card_indices)
+        )
+        return np.asarray((action_type, *tokens), dtype=np.int64)
 
 
 def run_episodes(policy_factory, config, n_episodes: int) -> list[dict]:
