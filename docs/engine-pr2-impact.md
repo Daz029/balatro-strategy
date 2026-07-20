@@ -52,6 +52,26 @@ Both are this project's own, from the C2 capture-skew work:
 | Castle suit via `GameSnapshot` | no | computation |
 | Cryptid copies → hand, fresh `sort_id` | no | computation |
 
+### Confidence in the table above
+
+**The classification is analytical, not measured.** Two rows are grounded in
+more than reading:
+
+- `used_jokers` — traced end to end (`pools.py:394` consumer,
+  `card_factory.py:347` producer, the `packs.py` add/delete emulation) and
+  demonstrated empirically: with registration applied but the packs fix absent,
+  one Arcana pack permanently registered `c_emperor` / `c_empress` / `c_world`.
+- `reset_round_targets` — the zone widening is pinned by a test
+  (`TestRoundTargetsSeeEveryZone`); the round-start → round-end move was
+  verified by reading both call sites (`run_init.start_round`,
+  `_handle_cash_out`).
+
+Every other row is reasoned from the diff and the surrounding code, not
+observed. That is adequate for "should these fixes land" — the suites and the
+independent fixture corroboration cover that — but it is **not** adequate as
+the sole basis for an expensive regeneration decision. If a regen call turns on
+one specific row, confirm that row directly first.
+
 ### The one irreparable item
 
 `used_jokers` is **stored state, and the lost information is not recoverable**.
