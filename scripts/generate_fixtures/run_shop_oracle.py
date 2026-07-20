@@ -21,7 +21,9 @@ import json
 import sys
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# parents[2]: this file lives at scripts/generate_fixtures/, so two levels up
+# is the repo root (parent.parent resolved to scripts/ and broke every path).
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from jackdaw.engine.rng import PseudoRandom  # noqa: E402
@@ -139,7 +141,9 @@ def main() -> None:
 
     # Convert sets to lists for JSON serialisation
     text = json.dumps(output, indent=2, default=lambda o: list(o) if isinstance(o, set) else o)
-    FIXTURE_PATH.write_text(text, encoding="utf-8")
+    # Trailing newline keeps regenerated output byte-identical to the committed
+    # fixture, so a re-run shows only real content changes.
+    FIXTURE_PATH.write_text(text + "\n", encoding="utf-8")
     print(f"Wrote fixture: {FIXTURE_PATH}")
 
     # Print a human-readable summary

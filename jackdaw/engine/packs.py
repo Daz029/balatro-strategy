@@ -84,6 +84,23 @@ def generate_pack_cards(
     # during generation and removing them after.
     _pack_added_keys: list[str] = []
     for i in range(extra):
+        # Membership must be snapshotted BEFORE the card is created.
+        # ``create_card`` now performs the registration itself (mirroring
+        # Card:set_ability), so a post-hoc "is the key absent?" test can never
+        # be True — nothing would ever be recorded for cleanup and every card
+        # merely SHOWN in a pack would permanently poison the run-wide pool.
+        # Deciding beforehand keeps add/delete accounting exact.
+        #
+        # Showman: duplicates within one pack are legal (the pool filter is
+        # bypassed entirely, pools.py `if not has_showman and ...`).  The
+        # per-iteration snapshot handles that correctly — the second copy of a
+        # key sees it already present and is not recorded, so cleanup deletes
+        # it exactly once rather than raising KeyError on a double delete.
+        # A key registered BEFORE this pack (e.g. bought earlier, re-shown
+        # under Showman) is likewise never recorded, so a real registration is
+        # never erased.
+        _seen_before = set(gs.get("used_jokers", {}))
+
         if kind == "Arcana":
             card = _gen_arcana(rng, ante, gs)
         elif kind == "Celestial":
@@ -99,7 +116,9 @@ def generate_pack_cards(
         cards.append(card)
 
         if "used_jokers" in gs and card.center_key != "c_base":
-            if card.center_key not in gs["used_jokers"]:
+            if card.center_key not in _seen_before:
+                # create_card already registered it; this is a no-op that keeps
+                # the branch correct if the card came from a non-create_card path.
                 gs["used_jokers"][card.center_key] = True
                 _pack_added_keys.append(card.center_key)
 
