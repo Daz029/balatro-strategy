@@ -614,6 +614,40 @@ def _install_finite_grad_guard(model: MaskablePPO) -> None:
     model.policy.action_net.register_forward_hook(_bound_logits)
 
 
+def soften_action_logits(model: MaskablePPO, temperature: float) -> None:
+    """Flatten a warm-started policy's action logits by ``temperature``.
+
+    A converged stage hands the next horizon a near-deterministic policy: the
+    a2 -> a4 transition was measured entering a4 at ~0.05 nats of entropy
+    within a few thousand steps, against 10-40 legal actions (uniform over 10
+    is 2.3 nats).  PPO cannot learn from a policy that never samples anything
+    but its argmax, and neither ``--ent-coef`` nor ``--learning-rate`` fixes
+    it: the bonus claws back against an already-saturated softmax, and a
+    smaller step size only holds the policy at the initialization more
+    faithfully.  The collapse is INHERITED, so it has to be undone at load.
+
+    Dividing the action head's weight AND bias by ``temperature > 1`` scales
+    every logit uniformly, which flattens the softmax while preserving the
+    complete preference ordering -- the argmax, and every ranking below it,
+    are untouched.  That is the property worth having: the previous stage's
+    learned ranking is the asset, its confidence is the pathology.
+
+    Applied only at warm start, never to a fresh model (whose head is already
+    near-uniform) and never mid-run.
+    """
+    if temperature == 1.0:
+        return
+    if temperature <= 0.0:
+        raise ValueError(f"init temperature must be positive, got {temperature}")
+
+    action_net = model.policy.action_net
+    with torch.no_grad():
+        action_net.weight.div_(temperature)
+        if action_net.bias is not None:
+            action_net.bias.div_(temperature)
+    print(f"Softened warm-started action logits by temperature {temperature}.")
+
+
 def _attach_widened_model(
     model: MaskablePPO,
     env: DummyVecEnv,
@@ -661,6 +695,7 @@ def build_model(
     counts: CountBonus | None = None,
     reservoir: ShopReservoir | None = None,
     init_from: Path | None = None,
+    init_temperature: float = 1.0,
     seed: int = 0,
     n_envs: int = 4,
     n_steps: int = 256,
@@ -707,6 +742,7 @@ def build_model(
         model.tensorboard_log = log_dir
         _install_finite_grad_guard(model)
         print(f"Widened s0 checkpoint {init_from} to the s1 schema (694 actions).")
+        soften_action_logits(model, init_temperature)
         return model, schedules
 
     env = make_train_env(
@@ -738,6 +774,7 @@ def build_model(
         model = MaskablePPO.load(str(init_from), env=env, device=device)
         model.tensorboard_log = log_dir
         _install_finite_grad_guard(model)
+        soften_action_logits(model, init_temperature)
         return model, schedules
 
     model = MaskablePPO(
@@ -771,6 +808,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--win-ante", type=int, default=2, help="horizon-curriculum stage")
     parser.add_argument("--init-from", type=Path, default=None, help="previous stage .zip")
+    parser.add_argument(
+        "--init-temperature",
+        type=float,
+        default=1.0,
+        help="divide warm-started action logits by this (>1 restores exploration "
+        "entropy without changing the loaded policy's preference ordering); "
+        "requires --init-from",
+    )
     parser.add_argument(
         "--hand-policy",
         type=Path,
@@ -831,6 +876,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         and args.blend_beta0 != 0.0
     ):
         parser.error("--phi-checkpoint replaces --blend-beta0; pass --blend-beta0 0")
+    if args.init_temperature != 1.0:
+        if args.init_from is None:
+            parser.error("--init-temperature requires --init-from")
+        if args.init_temperature <= 0.0:
+            parser.error("--init-temperature must be positive")
     return args
 
 
@@ -869,6 +919,7 @@ def main() -> None:
         schedules=schedules,
         reservoir=reservoir,
         init_from=args.init_from,
+        init_temperature=args.init_temperature,
         seed=args.seed,
         n_envs=args.n_envs,
         n_steps=args.n_steps,

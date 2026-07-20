@@ -110,7 +110,17 @@ def test_s0_critic_phi_is_frozen_and_schema_consistent(tmp_path):
     assert phi._policy.optimizer is None
 
 
-def test_s0_critic_phi_rejects_s1_width_checkpoint(tmp_path):
+def test_s1_critic_phi_consumes_the_untruncated_observation(tmp_path):
+    """An s1-width critic is accepted and fed its own schema.
+
+    Truncating for it would drop the joker rows and offered tag its encoder
+    was fitted with.  Reading an s0 observation is the error instead.
+    """
+
     checkpoint = _save_model(tmp_path / "s1.zip", s1_schema=True)
-    with pytest.raises(ValueError, match="frozen s0 width"):
-        S0CriticPhi(checkpoint)
+    phi = S0CriticPhi(checkpoint)
+    gs = _fresh_state()
+
+    assert np.isfinite(phi(build_shop_observation(gs, s1_schema=True)))
+    with pytest.raises(ValueError):
+        phi(build_shop_observation(gs, s1_schema=False))

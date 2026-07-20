@@ -406,6 +406,67 @@ class TestS1Wiring:
         )
         assert resumed.action_space.n == NUM_TOTAL_ACTIONS_S1
 
+    def test_init_temperature_raises_entropy_and_keeps_the_ranking(self, tmp_path):
+        """Softening must flatten the softmax without reordering preferences.
+
+        The warm start's learned ranking is the asset worth carrying to the
+        next horizon; only its confidence is pathological.
+        """
+
+        model, _ = build_model(
+            win_ante=1,
+            schedules=TrainingSchedules(),
+            reservoir=ShopReservoir(seed=0),
+            seed=0,
+            n_envs=1,
+            n_steps=8,
+            batch_size=8,
+            device="cpu",
+            s1_schema=True,
+        )
+        # A fresh head is near-uniform; saturate it so the test starts from
+        # the collapsed state a converged stage actually hands over.
+        with torch.no_grad():
+            model.policy.action_net.weight.mul_(50.0)
+            model.policy.action_net.bias.mul_(50.0)
+        checkpoint = tmp_path / "collapsed.zip"
+        model.save(str(checkpoint))
+
+        obs = model.env.reset()
+
+        def _logits(m):
+            obs_tensor, _ = m.policy.obs_to_tensor(obs)
+            with torch.no_grad():
+                return m.policy.get_distribution(obs_tensor).distribution.logits[0]
+
+        def _entropy(logits):
+            probs = torch.softmax(logits, dim=-1)
+            return float(-(probs * torch.log(probs.clamp_min(1e-12))).sum())
+
+        load_kwargs = dict(
+            win_ante=1,
+            schedules=TrainingSchedules(),
+            reservoir=ShopReservoir(seed=0),
+            init_from=checkpoint,
+            seed=0,
+            n_envs=1,
+            n_steps=8,
+            batch_size=8,
+            device="cpu",
+            s1_schema=True,
+        )
+        hot, _ = build_model(**load_kwargs)
+        cool, _ = build_model(**load_kwargs, init_temperature=10.0)
+
+        hot_logits, cool_logits = _logits(hot), _logits(cool)
+        assert _entropy(cool_logits) > _entropy(hot_logits)
+        # Uniform scaling is order-preserving, so argsort is identical.
+        assert torch.equal(torch.argsort(hot_logits), torch.argsort(cool_logits))
+
+    def test_init_temperature_requires_init_from(self):
+        with pytest.raises(SystemExit):
+            parse_args(["--init-temperature", "5.0"])
+
     def test_phi_requires_s1_and_replaces_nonzero_blend(self):
         with pytest.raises(SystemExit):
             parse_args(["--phi-checkpoint", "critic.zip"])
