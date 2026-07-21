@@ -2176,7 +2176,7 @@ def _sync_played_hand_types(gs: dict[str, Any]) -> None:
 
     The Planet pool softlock gate is ``G.GAME.hands[hand_type].played > 0``
     (common_events.lua:2009) — a hand type counts only once it has been
-    PLAYED this run.  Leveling a secret hand (e.g. via a Ceres from a pack)
+    PLAYED this run.  Leveling a secret hand (e.g. via Black Hole)
     makes it *visible* but does not unlock its planet in pools.
     """
     from jackdaw.engine.hand_levels import HandLevels
