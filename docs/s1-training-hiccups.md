@@ -636,3 +636,184 @@ uv run python scripts/train_shop_ppo.py --win-ante 3 --s1-schema \
 diversity forward — confirm `s1_a2_pr2/reservoir.pkl` exists, else omit for a
 fresh one.) Then eval `s1_a3_pr2/best_model` at `--win-ante 4`; that number
 decides whether a4 launches from it or earns another rung first.
+
+# The a3 rung ran — `s1_a3_pr2` (2026-07-21)
+
+The rung above was run. **It was launched with `--init-temperature 3.0`, not
+the 5.0 the command block specifies** — note the discrepancy before reusing any
+of this to reason about the softening.
+
+> **PROVENANCE.** Read from the loose top-level `…24624.0` (no `MaskablePPO_1/`
+> subdir — the hand-copy pattern), but **verified genuine**: `shop/phi_beta`
+> maxes at 0.0998, matching `--phi-beta0 0.1`. The CLI evals below are on
+> `EVAL_0..199`, disjoint from the callback's consumed range.
+
+## Verdict — the rung works; launch a4, but confirm the gate first
+
+**[MEASURED] The a3 rung converted the a2→a4 cliff into a trainable step.**
+Zero-shot ante-4 density (200 ep, h1 partner, `--partner-money-ordering`):
+`s1_a2_pr2/best_model` = **0.09** (the cliff — sparse, PPO can't explore off it);
+`s1_a3_pr2/best_model` = **0.22**. The a2_pr2 density gate (≥~0.2 trainable,
+~0.1 insert-a-rung) is cleared, and 0.22 beats even the flawed-engine a3's
+honest ~0.158. This is the density gradient working exactly as the a2_pr2 plan
+designed it.
+
+**Caveat that must travel with 0.22:** it is only **~0.7σ over the 0.2 line**
+(n=200 sd ≈ 0.029) and is read off `best_model` — the lottery-selected 950k
+peak. Before burning a 1M-step a4 run, re-verify on `EVAL_200..399` **and** eval
+900k (a non-lottery neighbor) at ante 4; launch a4 only if both hold ≥~0.2. If
+they sag to ~0.15 the cliff is not really cleared and harvest→h2 is the better
+call (the EV/low-leverage findings already lean there).
+
+## Measured findings
+
+**[MEASURED] The stage learns, then plateaus flat — more steps won't help.**
+`eval/mean_reward` (40 evals): front half (<500k) mean **0.346**, back half
+(≥600k) mean **0.422**, but the back-half trend slope is **−0.002 per 100k
+steps** (n=17) — statistically zero. Logged peak **0.500 at 950k**
+(`best_model`); the very next points fall back (975k 0.435, **1M 0.370**). 950k
+is the top of a ~0.37–0.50 oscillation, not the tip of a rising curve. Extending
+a3 buys more wander and a fresh lottery peak, not a higher plateau.
+
+**[MEASURED] Honest ante-3 ability ≈ 0.46–0.47, not the 0.525 headline.**
+`best_model` CLI re-eval: **0.525** at ante 3 (`n_dead_at_reset` 0). Notably it
+did **not** regress down this time (logged 0.500 → honest 0.525) — the opposite
+of a4_v3's 0.200→0.090. But 0.525 is only ~1.5σ over the back-half cluster
+(sweep 800k/900k/1M = 0.47/0.465/0.41), so it is consistent with a ~0.47 truth,
+not a separate tier. Treat honest a3 ante-3 ability as **~0.46–0.47**; 0.525 is
+still a single-checkpoint headline (max-of-N is fractal — Issue 2's lesson).
+Ante-3 checkpoint sweep (300k→1M): 0.35 / 0.36 / 0.39 / 0.37 / 0.335 / 0.47 /
+0.465 / 0.41 — flat first half, real +0.10 back-half lift.
+
+**[MEASURED] The early sag is the softening tax, and it cost ~300–500k steps.**
+a3 was handed a policy already at **0.37 zero-shot at ante 3**, yet dipped to
+**0.295 / 0.295 / 0.290** at 100–275k — *below its own warm-start density* —
+before climbing past it by ~700k. `--init-temperature 3.0` raised init
+`norm_entropy` to **0.44 at step 2048** (so temperature does move entropy at
+T=3, contra one Issue-1 worry), but PPO consumed it within ~50k steps. Half the
+1M budget went to undoing the flattening. Confounded with plain ante-3 horizon
+adaptation — can't pin the whole sag on temperature — but the softening's
+mechanical cost is visible and its benefit is not (see next).
+
+## Live theories re-examined against this run
+
+**[MEASURED, against Φ/exploration being the culprit] The wander is not
+exploration-driven.** `|Δeval|` vs interval metrics (n=39): `count_beta`
++0.090, `phi_beta` +0.090, `entropy_loss` −0.082, `clip_fraction` +0.036 — all
+flat; only `approx_kl` is non-flat at **−0.352** (bigger eval swings on
+*smaller* KL updates). That negative-KL signature is the **pivotal-flip**
+theory, not lost exploration pressure. And performance is *best* in the back
+half where both bonuses have decayed to ~0 (at 950k `count_beta` 0.003,
+`phi_beta` 0.005) — if shaping were harmful, removing it would hurt; it doesn't.
+Fourth independent measurement against the Issue-4 count-bonus suspect.
+
+**[MEASURED, against raising `--ent-coef`] Entropy and competence are decoupled
+within this run.** eval level vs `norm_entropy`: r = **−0.50** over all 40 evals
+(confounded by the softening recovery), r = **−0.10** in the clean back half
+(≥500k, n=21). Higher entropy buys no win rate here — the opposite sign to the
+a3-flawed sweep's confounded `r=+0.71` (n=6, p≈0.11), and on far more data. Do
+**not** raise `ent-coef` as a default and do not slip it into the a4 launch (it
+confounds the launch/no-launch read). If the entropy-competence question is
+worth settling it is a dedicated 0.01-vs-0.02 A/B run, ranked below launching a4
+and below harvest→h2.
+
+**[SPECULATION → now better-supported] Temperature is not needed; drop it going
+forward.** Its injected exploration (0.44 entropy early) coincided with the
+*worst* eval (the sag); gains came after re-sharpening (best = lowest-entropy
+950k). Measured recovery tax, unmeasured/absent benefit, and you already handle
+collapse-chaining by chaining off `best_model` (softer) rather than the
+over-sharpened final. Issue 1's "addressed a non-problem" disposition stands.
+Escape hatch: read the first ~20k steps of the a4 run — only if `norm_entropy`
+is pinned near a3's ending ~0.19 **and won't move** under `ent-coef` is
+temperature (argsort-preserving) the right cheap fix.
+
+## Next step
+
+Launch a4 from `s1_a3_pr2/best_model`, **dropping `--init-temperature`**,
+mirroring the full pr2 flag set (change only `--win-ante 4`, `--init-from`,
+`--init-reservoir`, `--log-dir runs/shop_ppo/s1_a4_pr2`) — **after** the two
+ante-4 confirmation evals above clear ≥~0.2. Keep `--phi-checkpoint` /
+`--blend-beta0 0` / `--phi-beta0 0.1` / `--eval-episodes 200`; dropping any
+silently reverts the objective or re-noises best_model selection. If the gate
+fails or a4 plateaus flat like a3, stop shop training and go to harvest→h2 — the
+EV/low-leverage finding, Future-worry #4, and the pivotal-flip signature all
+point there.
+
+# The a4 rung ran — `s1_a4_pr2` (2026-07-21)
+
+The a4 rung was launched from `s1_a3_pr2/best_model` per the plan above
+(dropping `--init-temperature`). **It failed — the a2→a4 cliff the a3_pr2 gate
+pre-registered is real, and this is the harvest→h2 trigger firing.**
+
+> **PROVENANCE — genuine, not a stray.** Read from
+> `runs/shop_ppo/s1_a4_pr2/MaskablePPO_1/…7100.0` (a proper subdir, not a
+> hand-copied top-level file). `shop/phi_beta` maxes at **0.0998**, matching
+> `--phi-beta0 0.1`. Ran 1.2M steps (checkpoints to 1.2M).
+
+## Measured
+
+**[MEASURED] a4 PPO walked the policy *downhill* from its warm start and never
+recovered.** `eval/mean_reward` (48 evals, 200 ep each — values are multiples of
+0.005):
+
+| step | eval win |
+|---|---|
+| 25k | **0.225** ← `best_model`, and the max of all 48 evals |
+| 100k | 0.140 |
+| 200k | 0.070 |
+| ~flat rest | ~0.12–0.13 |
+| mean after 100k | **0.126** |
+
+`best_model` is the **25k checkpoint** — i.e. the warm start with almost no a4
+training on it. The 0.225 first eval is just the inherited a3_pr2 zero-shot ante-4
+density (0.22) showing through before training corrupts it. Every one of the
+1.2M steps made the policy worse. Extending past 1M (to 1.2M) bought nothing.
+
+**[MEASURED] The mechanistic tell — entropy *inflates*, the opposite of a3.**
+`rollout/normalized_entropy` **0.19 → 0.44** over the run (a3_pr2 *consumed*
+entropy and sharpened; this diffuses); `entropy_loss` −0.166 → −0.183 (more
+entropy); `mean_ep_length` 32 → 26 (dying earlier); `explained_variance` dipped
+to 0.05 before recovering to 0.69. Init `normalized_entropy` was 0.187 (≈ a3's
+ending ~0.19), confirming `--init-temperature` was correctly dropped — the
+diffusion is NOT inherited softening.
+
+The signature is **reward-signal starvation, not exploration starvation.** At
+ante 4 with terminal-only `1{won}` reward at ~0.1 density there is no consistent
+gradient for the policy to become confident about, so the `ent-coef 0.01` bonus
+dominates a near-flat reward landscape and pushes the policy toward uniform; as
+it drifts off the good warm-start argmax, the win rate erodes toward the floor.
+This is entropy *inflation* on a rewardless plateau — not Issue 1's inherited
+collapse, and not a knob the temperature could have fixed (more entropy is the
+disease here, not the cure).
+
+**[MEASURED] The collapsed policy churns.** First trace (5 ep, new tooling
+below): **46 BuyCard vs 37 SellJoker** — buy-then-dump joker churn — 0 wins.
+Behaviorally consistent with a diffused policy taking near-random legal actions.
+
+**[MEASURED, separate finding] `s1_a4_pr2/best_model` NaN-crashes eval on some
+seeds.** `policy.predict` raises `ValueError: ... probs ... Simplex() ... invalid
+values` (the documented stale-probs / NaN signature — see `shop-ppo-nan-grad`)
+on at least one `EVAL_` seed, with **or without** the new dump flag, so it is a
+property of the checkpoint, not the eval path. Consistent with a policy diffused
+to the point of numerical degeneracy. **Under investigation** — a full-suite dump
+of this checkpoint dies partway until it is guarded or the seed is skipped.
+
+## Tooling added this session
+
+`scripts/eval_shop_policy.py --dump-decisions <path>` writes a full per-decision
+JSONL trace (state at the decision, decoded action family/slot/label, legal set,
+terminal/won). Opt-in; aggregate metrics unchanged when absent. This is how the
+buy/sell churn above was read, and it is the instrument for actually *seeing*
+what a collapsed policy does rather than inferring it from scalar curves.
+
+## Verdict / next step
+
+The a2→a4 cliff was not cleared: the 0.22 zero-shot the a3_pr2 gate passed (only
+~0.7σ over the 0.2 line, read off a lottery `best_model`) does not survive honest
+a4 training. Three independent results now point the same way — Issue 3's
+low-leverage EV reading, Future-worry #4, and the pivotal-flip signature — so
+**stop shop rungs and go to harvest → h2.** Per Future-worry #2, do not attempt
+a8. A temperature-3.0 a4 rerun was started to sanity-check the softening angle,
+but the diagnosis says temperature is orthogonal to a reward-density failure;
+expect it to diffuse the same way (watch whether its eval climbs *above* the
+~0.22 warm-start line or decays while `normalized_entropy` inflates past ~0.3).
