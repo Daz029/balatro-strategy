@@ -51,6 +51,7 @@ from jackdaw.agents.shop_action_space import (  # noqa: E402
     shop_action,
     target_combo_for_action,
 )
+from jackdaw.env.maskable_guard import install_stale_probs_guard  # noqa: E402
 from jackdaw.env.shop_gym import ShopGymEnv  # noqa: E402
 from jackdaw.env.shop_run_adapter import ShopRunConfig  # noqa: E402
 
@@ -82,6 +83,7 @@ class PPOPolicy:
         from sb3_contrib import MaskablePPO
 
         self._model = MaskablePPO.load(str(model_path), device=device)
+        install_stale_probs_guard()
 
     def act(self, obs: dict[str, np.ndarray], mask: np.ndarray) -> int:
         action, _ = self._model.predict(obs, action_masks=mask, deterministic=True)

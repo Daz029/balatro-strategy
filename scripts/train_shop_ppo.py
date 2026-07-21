@@ -83,7 +83,6 @@ import gymnasium  # noqa: E402
 import torch  # noqa: E402
 from sb3_contrib import MaskablePPO  # noqa: E402
 from sb3_contrib.common.maskable.callbacks import MaskableEvalCallback  # noqa: E402
-from sb3_contrib.common.maskable.distributions import MaskableCategorical  # noqa: E402
 from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback  # noqa: E402
 from stable_baselines3.common.utils import FloatSchedule  # noqa: E402
 from stable_baselines3.common.vec_env import DummyVecEnv  # noqa: E402
@@ -97,6 +96,7 @@ from jackdaw.agents.shop_action_space import (  # noqa: E402
 )
 from jackdaw.agents.shop_policy import ShopFeaturesExtractor  # noqa: E402
 from jackdaw.engine.actions import GamePhase  # noqa: E402
+from jackdaw.env.maskable_guard import install_stale_probs_guard  # noqa: E402
 from jackdaw.env.shop_gym import ShopGymEnv  # noqa: E402
 from jackdaw.env.shop_run_adapter import ShopRunConfig  # noqa: E402
 
@@ -515,71 +515,6 @@ def make_train_env(
     return DummyVecEnv([factory(rank) for rank in range(n_envs)])
 
 
-_STALE_PROBS_PATCHED = False
-
-
-def _install_stale_probs_guard() -> None:
-    """Layer 4: stop the simplex check firing on a tensor nobody is using.
-
-    ``MaskableCategorical`` caches ``self.probs`` at construction time (from the
-    UNMASKED logits).  ``apply_masking`` then re-runs ``Categorical.__init__``,
-    and ``Distribution.__init__`` validates every entry of ``arg_constraints``
-    that is present in ``__dict__`` -- so it re-validates that STALE cache
-    instead of the masked distribution it is building.  Verified directly: a
-    ``MaskableCategorical`` whose cached ``probs`` are corrupted raises the
-    Simplex error on the next ``apply_masking`` even when the masked logits are
-    perfectly finite.
-
-    That is why layers 1-3 could not stop the observed crash and why the same
-    crash reappeared under s1: layer 3 clamps ``action_net``'s output to +/-30,
-    which provably makes the MASKED probs a valid simplex (confirmed
-    end-to-end against the real widened s1 policy at a 1e30 logit blowup), yet
-    the exception is raised against a cache from an EARLIER pass that the clamp
-    never saw.
-
-    The fix drops the cache before the re-init, so validation sees the tensor
-    actually being constructed.  Genuine poison is still caught -- the masked
-    probs are checked explicitly afterwards -- but it is now repaired and
-    counted rather than killing a multi-hour run, and the offending batch is
-    dumped so the NEXT occurrence is diagnosable instead of inferred.
-    """
-    global _STALE_PROBS_PATCHED
-    if _STALE_PROBS_PATCHED:
-        return
-    _STALE_PROBS_PATCHED = True
-
-    original_apply_masking = MaskableCategorical.apply_masking
-    stats = {"catches": 0}
-
-    def _guarded_apply_masking(self, masks):  # type: ignore[no-untyped-def]
-        # Drop the stale cache: validation must judge the distribution being
-        # built, not the previous one. Categorical repopulates it downstream.
-        self.__dict__.pop("probs", None)
-
-        # Repair genuine poison BEFORE delegating -- the re-init validates the
-        # logits constraint too, so a post-hoc check never gets to run.
-        logits = self._original_logits
-        if not torch.isfinite(logits).all():
-            stats["catches"] += 1
-            n = stats["catches"]
-            bad_rows = (~torch.isfinite(logits).all(dim=-1)).nonzero().flatten().tolist()
-            if n == 1 or n % 100 == 0:
-                print(
-                    f"[stale-probs-guard] non-finite logits reached masking; "
-                    f"repaired (count={n}, rows={bad_rows[:8]}). Run continues.",
-                    file=sys.stderr,
-                    flush=True,
-                )
-            self._original_logits = torch.nan_to_num(
-                logits, nan=0.0, posinf=0.0, neginf=0.0
-            ).clamp(-30.0, 30.0)
-
-        original_apply_masking(self, masks)
-
-    MaskableCategorical.apply_masking = _guarded_apply_masking
-    MaskableCategorical._stale_probs_guard_stats = stats  # type: ignore[attr-defined]
-
-
 def _install_finite_grad_guard(model: MaskablePPO) -> None:
     """Keep NaN/inf out of the policy weights so every forward stays valid.
 
@@ -617,12 +552,13 @@ def _install_finite_grad_guard(model: MaskablePPO) -> None:
        masked positions are set to a huge negative downstream, unaffected.
 
     Layer 3 did NOT hold under s1 — the crash returned at ~320k steps. The
-    reason is in :func:`_install_stale_probs_guard` (layer 4, installed here):
+    reason is in :func:`jackdaw.env.maskable_guard.install_stale_probs_guard`
+    (layer 4, installed by that shared module):
     the simplex check fires on a STALE ``probs`` cache, not on the masked
     distribution layer 3 sanitizes, so no amount of logit clamping can prevent
     it.
     """
-    _install_stale_probs_guard()
+    install_stale_probs_guard()
 
     for param in model.policy.parameters():
         param.register_hook(

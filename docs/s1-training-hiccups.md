@@ -790,13 +790,19 @@ disease here, not the cure).
 below): **46 BuyCard vs 37 SellJoker** — buy-then-dump joker churn — 0 wins.
 Behaviorally consistent with a diffused policy taking near-random legal actions.
 
-**[MEASURED, separate finding] `s1_a4_pr2/best_model` NaN-crashes eval on some
-seeds.** `policy.predict` raises `ValueError: ... probs ... Simplex() ... invalid
-values` (the documented stale-probs / NaN signature — see `shop-ppo-nan-grad`)
-on at least one `EVAL_` seed, with **or without** the new dump flag, so it is a
-property of the checkpoint, not the eval path. Consistent with a policy diffused
-to the point of numerical degeneracy. **Under investigation** — a full-suite dump
-of this checkpoint dies partway until it is guarded or the seed is skipped.
+**[MEASURED, separate finding — DIAGNOSED] The eval Simplex crash is a
+library false-positive, NOT policy degeneracy.** `policy.predict` raised
+`ValueError: ... probs ... Simplex() ... invalid values` on some `EVAL_` seeds.
+Root cause is the sb3-contrib `MaskableCategorical` stale-probs-cache bug (see
+`shop-ppo-nan-grad`, layer 4), and `eval_shop_policy.py` simply never installed
+the guard that `train_shop_ppo.py` does — so the in-training eval callback
+survived while the standalone CLI eval crashed. PROVEN: on the failing step the
+raw `action_net` logits were finite (min −10.4, max 16.7), and with the guard
+installed the seed replays to completion and in fact **wins**, with the guard's
+genuine-non-finite catch counter at **0**. So this crash is orthogonal to the a4
+collapse and is NOT evidence of numerical degeneracy — the policy is healthy on
+that state. Fixed by extracting the guard into `jackdaw/env/maskable_guard.py`
+and installing it on the eval checkpoint path.
 
 ## Tooling added this session
 
