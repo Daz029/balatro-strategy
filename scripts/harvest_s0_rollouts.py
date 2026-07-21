@@ -1,6 +1,8 @@
 """Phase 1 of the harvest pass (pre-regen build plan A1/A2): drive full runs of
-the final shop agent (s0 = ``s0_a4_v4``) paired with the current hand agent
-(h0.5) and capture EVERY hand-turn decision state, plus shop-state snapshots.
+the shop agent (s0 by default, or an s1 checkpoint with ``--s1-schema``)
+paired with the hand agent (h0.5 by default, or an h1 partner with
+``--partner-money-ordering``) and capture EVERY hand-turn decision state, plus
+shop-state snapshots.
 
 This is deliberately schema-INDEPENDENT: a captured record is a pickle of the
 live engine ``gs`` (RNG included — the exact ``ShopRunAdapter.snapshot_state``
@@ -13,10 +15,10 @@ EVERYTHING, thin later. No subsampling and no per-run caps at capture time; the
 ~8k ante-stratified selection is a separate seeded manifest step (C1) over the
 metadata table. Two passes are banked up front:
 
-* ~1200 deterministic runs (``HARVEST_{i:08d}``): s0 argmax — the DEPLOYED
+* ~1200 deterministic runs (``HARVEST_{i:08d}``): shop argmax — the DEPLOYED
   induced distribution h1 actually targets.
-* ~500 sampled runs (``HARVEST_S_{i:08d}``, ``--sample-shop``): s0 sampling for
-  coverage breadth. The hand partner (h0.5) stays deterministic in BOTH passes —
+* ~500 sampled runs (``HARVEST_S_{i:08d}``, ``--sample-shop``): shop sampling for
+  coverage breadth. The hand partner stays deterministic in BOTH passes —
   it is the partner being targeted, not the thing we vary.
 
 Every record carries a ``source`` tag (``det``/``sampled``) and a ``git_sha``
@@ -338,6 +340,7 @@ def harvest_runs(
     source: str,
     win_ante: int = HARVEST_WIN_ANTE,
     max_steps: int = 512,
+    s1_schema: bool = False,
 ) -> int:
     """Drive ``n_runs`` full runs, capturing every hand-turn + shop state.
 
@@ -347,7 +350,7 @@ def harvest_runs(
     """
     harvesting = HarvestingHandPolicy(hand_inner, sink)
     env = ShopGymEnv(
-        config=ShopRunConfig(win_ante=win_ante),
+        config=ShopRunConfig(win_ante=win_ante, s1_schema=s1_schema),
         hand_policy=harvesting,
         max_steps=max_steps,
     )
@@ -471,20 +474,22 @@ def emit_reductions(output_dir: str | Path) -> tuple[dict[str, Any], dict[str, A
 # ---------------------------------------------------------------------------
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument(
         "--shop-policy",
         type=Path,
         default=None,
-        help="s0 MaskablePPO .zip (e.g. s0_a4_v4 best_model). Required unless --reductions-only.",
+        help="MaskablePPO .zip checkpoint (s0, or s1 with --s1-schema). "
+        "Required unless --reductions-only.",
     )
     parser.add_argument(
         "--hand-policy",
         type=Path,
         default=None,
-        help="h0.5 partner checkpoint (.zip/.pt). Required unless --reductions-only.",
+        help="hand partner checkpoint (.zip/.pt; h0.5, or h1 with "
+        "--partner-money-ordering). Required unless --reductions-only.",
     )
     parser.add_argument("--n-det", type=int, default=1200, help="deterministic runs (HARVEST_)")
     parser.add_argument("--n-sampled", type=int, default=500, help="sampled runs (HARVEST_S_)")
@@ -493,11 +498,35 @@ def main() -> None:
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--schema-note", default="", help="free-text stamp on every record")
     parser.add_argument(
+        "--s1-schema",
+        action="store_true",
+        help="configure the environment for an s1-schema shop checkpoint",
+    )
+    parser.add_argument(
+        "--partner-money-ordering",
+        action="store_true",
+        help="deploy the hand partner with money-aware ordering (h1)",
+    )
+    parser.add_argument(
+        "--seed-prefix",
+        type=str,
+        default=DET_PREFIX,
+        help="prefix for deterministic seeds; sampled seeds append _S",
+    )
+    parser.add_argument(
         "--reductions-only",
         action="store_true",
         help="recompute reductions.json/coverage.json from an existing corpus; no rollouts",
     )
+    return parser
+
+
+def main() -> None:
+    parser = build_parser()
     args = parser.parse_args()
+
+    if args.partner_money_ordering and args.hand_policy is None:
+        parser.error("--partner-money-ordering requires --hand-policy")
 
     if args.reductions_only:
         reductions, coverage = emit_reductions(args.output_dir)
@@ -509,7 +538,12 @@ def main() -> None:
 
     from jackdaw.agents.hand_checkpoint_policy import HandCheckpointPolicy
 
-    hand_inner = HandCheckpointPolicy(str(args.hand_policy))
+    if args.partner_money_ordering:
+        hand_inner = HandCheckpointPolicy(
+            str(args.hand_policy), money_aware_ordering=True
+        )
+    else:
+        hand_inner = HandCheckpointPolicy(str(args.hand_policy))
     sha = git_sha()
 
     with HarvestSink(args.output_dir, sha, args.schema_note) as sink:
@@ -520,10 +554,11 @@ def main() -> None:
                 hand_inner,
                 sink,
                 n_runs=args.n_det,
-                seed_prefix=DET_PREFIX,
+                seed_prefix=args.seed_prefix,
                 source="det",
                 win_ante=args.win_ante,
                 max_steps=args.max_steps,
+                s1_schema=args.s1_schema,
             )
             print(f"[harvest] det pass: {n}/{args.n_det} runs produced records")
         if args.n_sampled > 0:
@@ -533,10 +568,11 @@ def main() -> None:
                 hand_inner,
                 sink,
                 n_runs=args.n_sampled,
-                seed_prefix=SAMPLED_PREFIX,
+                seed_prefix=f"{args.seed_prefix}_S",
                 source="sampled",
                 win_ante=args.win_ante,
                 max_steps=args.max_steps,
+                s1_schema=args.s1_schema,
             )
             print(f"[harvest] sampled pass: {n}/{args.n_sampled} runs produced records")
         total = sink.n_records
