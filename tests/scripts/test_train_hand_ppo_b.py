@@ -20,6 +20,8 @@ from harvest_snapshot_sampler import HarvestSnapshotSampler  # noqa: E402
 from train_hand_ppo_b import (  # noqa: E402
     KLToBCPointerPPO,
     build_model,
+    load_trained_pointer_policy,
+    main,
     make_vec_env,
 )
 
@@ -51,6 +53,14 @@ def _tiny_model(checkpoint: Path, *, n_steps: int = 8, n_envs: int = 2):
         batch_size=n_steps * n_envs,
         device="cpu",
     )
+
+
+@pytest.fixture()
+def trained_checkpoint(bc_checkpoint: Path, tmp_path: Path) -> Path:
+    source = _tiny_model(bc_checkpoint)
+    checkpoint = tmp_path / "trained_hand_agent.zip"
+    source.save(checkpoint)
+    return checkpoint
 
 
 def _single_snapshot_harvest(path: Path) -> None:
@@ -113,6 +123,68 @@ def test_pointer_ppo_short_run_logs_kl_and_round_trips_checkpoint(bc_checkpoint,
     original_action = model.policy.predict(comparison_obs, deterministic=True)[0]
     loaded_action = loaded.policy.predict(comparison_obs, deterministic=True)[0]
     assert np.array_equal(original_action, loaded_action)
+
+
+def test_descendant_init_matches_source_and_logs_frozen_policy_kl(trained_checkpoint):
+    source = load_trained_pointer_policy(trained_checkpoint)
+    model = build_model(
+        None,
+        HandPlayConfig(),
+        init_from=trained_checkpoint,
+        seed=31,
+        n_envs=2,
+        n_steps=8,
+        batch_size=16,
+        device="cpu",
+    )
+
+    assert model.leash_policy is not None
+    assert model.leash_policy is not model.policy
+    assert not model.leash_policy.training
+    assert all(not parameter.requires_grad for parameter in model.leash_policy.parameters())
+
+    obs = model.env.reset()
+    source_action = source.predict(obs, deterministic=True)[0]
+    descendant_action = model.policy.predict(obs, deterministic=True)[0]
+    assert np.array_equal(source_action, descendant_action)
+
+    obs_tensor = model.policy.obs_to_tensor(obs)[0]
+    actions = model.policy.act(obs_tensor)[0]
+    assert model._kl_to_bc(obs_tensor, actions).item() == pytest.approx(0.0, abs=1e-7)
+    with torch.no_grad():
+        model.policy.pointer_head.type_head.bias[0] += 0.5
+    assert model._kl_to_bc(obs_tensor, actions).item() > 0.0
+
+    model.learn(total_timesteps=128)
+    logs = model.logger.name_to_value
+    assert "train/kl_bc" in logs
+    assert np.isfinite(logs["train/kl_bc"])
+    assert all(torch.isfinite(parameter).all() for parameter in model.policy.parameters())
+
+
+def test_build_model_rejects_missing_or_multiple_reference_checkpoints(bc_checkpoint, tmp_path):
+    with pytest.raises(AssertionError, match="exactly one"):
+        build_model(None, HandPlayConfig(), device="cpu")
+    with pytest.raises(AssertionError, match="exactly one"):
+        build_model(
+            bc_checkpoint,
+            HandPlayConfig(),
+            init_from=tmp_path / "trained.zip",
+            device="cpu",
+        )
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["train_hand_ppo_b.py"],
+        ["train_hand_ppo_b.py", "--bc-checkpoint", "model.pt", "--init-from", "model.zip"],
+    ],
+)
+def test_main_requires_exactly_one_reference_checkpoint(monkeypatch, argv):
+    monkeypatch.setattr(sys, "argv", argv)
+    with pytest.raises(SystemExit):
+        main()
 
 
 def test_build_model_keeps_training_knobs_out_of_eval(bc_checkpoint):
