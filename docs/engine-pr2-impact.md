@@ -120,6 +120,49 @@ harvested blob.
    fresh capture pass. Worth deferring until (2) is decided, since a recapture
    against a stale `s0` buys little.
 
+## Resolution — measured 2026-07-21
+
+The three decisions above were resolved by direct measurement, per the
+guardrail in "Confidence in the table above" (confirm the row before an
+expensive regen). All three came back **against** regeneration; the only
+action is an s1 retrain.
+
+**Method.** Relabel-and-diff: regenerate a stratified sample of banked labels
+on the fixed engine and diff `p_clear` + action against the banked value.
+`p_clear` is deterministic (`mc_seed` = seed / record id), so any delta is
+attributable to the engine change.
+
+| Sample | Result |
+|---|---|
+| hand demos stages 1–4 (200, seed-regen) | label-drift ~0, mean\|Δp\|=0.0003; state resamples ~93% (RNG-stream nudging — a regen artifact, not a label change) |
+| hand demos stage5 harvested (200, blob-restore) | **label-drift 0/200, max\|Δp\|=0.0000** |
+| `harvest_s0` corpus (64k records + shop blobs) | Showman owned **0%**; duplicate owned jokers ~5% of runs (89% base Joker); offered-duplicate ~13% of runs (0% vouchers), broad key spread → mostly declined |
+
+**Verdicts.**
+
+1. **h1 does not regenerate.** Both hand-label samples are unchanged; stage5 —
+   the harvested realism, where the fixes bite hardest and the `used_jokers`
+   skew lives — is *exactly* zero. The stage5 relabel reproduces the skew
+   (baked into the blob), so it proves the computation-class fixes don't move
+   labels; it cannot speak to a fresh capture, which is moot since we do not
+   reharvest.
+2. **s0 does not retrain.** It is a scaffold / critic source, never deployed,
+   and its distortion is bounded: Showman never bought (0%), duplicates ~5% and
+   cheap (hand-negligible), offered dupes mostly declined and critic-only —
+   which the ante×$-averaged `V_curve` washes out.
+3. **No reharvest.** With s0 kept, it only buys skew-free blobs, and the
+   irreparable `used_jokers` skew does not bite the hand-play-resume path these
+   blobs actually feed.
+4. **s1 retrains — the sole action** (a class absent from the table above). Its
+   a2/a3/a4 scaffolds (`runs/shop_ppo/s1_*`) were trained on the buggy engine
+   and, unlike s0, have no downstream averaging shield; s1 is the most
+   shop-central artifact and the first honest fixed-engine shop train. Restart
+   the horizon curriculum from `s0_a4_v4` on the fixed engine — do **not**
+   warm-start from the stale s1 checkpoints or inherit their reservoir (both
+   carry buggy-engine shop habits; the ~9% a4 win rate means there is no
+   converged value to salvage). The retrain runs on this branch merged with the
+   Φ-shaping training branch `s1-warm-start-entropy`.
+
 ## Known-open, not fixed here
 
 - The aliasing between `gs["jokers"]` and the `jokers` parameter of
