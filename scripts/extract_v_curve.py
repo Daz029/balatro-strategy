@@ -59,7 +59,11 @@ for _p in (str(_SCRIPTS_DIR), str(_REPO_ROOT)):
 
 from harvest_restore import restore_state  # noqa: E402
 
-from jackdaw.env.shop_obs import build_shop_observation  # noqa: E402
+from jackdaw.env.shop_obs import (  # noqa: E402
+    D_SHOP_CONTEXT,
+    D_SHOP_CONTEXT_S1,
+    build_shop_observation,
+)
 
 # ---------------------------------------------------------------------------
 # Defaults
@@ -190,6 +194,10 @@ class Critic(Protocol):
     def values(self, obs_batch: dict[str, np.ndarray]) -> np.ndarray: ...
 
 
+class CriticForwardError(RuntimeError):
+    """A batch-level failure that must abort the sweep, not skip one state."""
+
+
 class MaskablePPOCritic:
     """Wraps a saved MaskablePPO ``.zip``; forwards batched obs through
     ``predict_values`` ONLY -- the action head is never touched, since the
@@ -200,6 +208,7 @@ class MaskablePPOCritic:
 
         self._model = MaskablePPO.load(str(checkpoint_path), device=device)
         self._model.policy.set_training_mode(False)
+        self.s1_schema = _s1_schema_from_observation_space(self._model.observation_space)
 
     def values(self, obs_batch: dict[str, np.ndarray]) -> np.ndarray:
         import torch
@@ -209,6 +218,19 @@ class MaskablePPOCritic:
         with torch.no_grad():
             values = self._model.policy.predict_values(tensor_obs)
         return values.squeeze(-1).cpu().numpy()
+
+
+def _s1_schema_from_observation_space(observation_space: Any) -> bool:
+    """Recover the encoder schema stored with a checkpoint."""
+    context_width = int(observation_space["shop_context"].shape[0])
+    if context_width == D_SHOP_CONTEXT:
+        return False
+    if context_width == D_SHOP_CONTEXT_S1:
+        return True
+    raise ValueError(
+        "checkpoint has an unrecognized shop_context width: "
+        f"{context_width} (expected {D_SHOP_CONTEXT} or {D_SHOP_CONTEXT_S1})"
+    )
 
 
 def stack_obs(obs_list: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray]:
@@ -273,6 +295,7 @@ def run_sweep(
     critic: Critic,
     batch_size: int = DEFAULT_BATCH_SIZE,
     progress_every: int | None = None,
+    s1_schema: bool | None = None,
 ) -> tuple[CellAccumulator, list[dict[str, Any]]]:
     """Sweep every restored state across ``dollar_values``, batched through
     ``critic``. Returns ``(accumulator, failures)`` -- a restore/encode
@@ -281,6 +304,11 @@ def run_sweep(
     """
     acc = CellAccumulator()
     failures: list[dict[str, Any]] = []
+    if s1_schema is None:
+        # The production critic records the schema from its checkpoint.  Keep
+        # the default s0 path for lightweight test critics that do not expose
+        # a schema flag.
+        s1_schema = bool(getattr(critic, "s1_schema", False))
 
     buffer_obs: list[dict[str, np.ndarray]] = []
     buffer_keys: list[tuple[int, int]] = []
@@ -288,9 +316,16 @@ def run_sweep(
     def flush() -> None:
         if not buffer_obs:
             return
-        batch = stack_obs(buffer_obs)
-        values = critic.values(batch)
-        acc.add_batch(buffer_keys, values)
+        try:
+            batch = stack_obs(buffer_obs)
+            values = critic.values(batch)
+            acc.add_batch(buffer_keys, values)
+        except Exception as exc:  # noqa: BLE001 -- preserve the original cause
+            raise CriticForwardError(
+                "critic forward failed; aborting sweep instead of retrying the "
+                f"failed batch (size={len(buffer_obs)}, keys={buffer_keys[0]}.."
+                f"{buffer_keys[-1]}, s1_schema={s1_schema})"
+            ) from exc
         buffer_obs.clear()
         buffer_keys.clear()
 
@@ -302,11 +337,15 @@ def run_sweep(
         try:
             for dollar in dollar_values:
                 gs["dollars"] = dollar  # <-- the ONE mutation: engine state, not obs
-                obs = build_shop_observation(gs, None)  # <-- full re-encode, every time
+                obs = build_shop_observation(
+                    gs, None, s1_schema=s1_schema
+                )  # <-- full re-encode, every time
                 buffer_obs.append(obs)
                 buffer_keys.append((ante, dollar))
                 if len(buffer_obs) >= batch_size:
                     flush()
+        except CriticForwardError:
+            raise
         except Exception as exc:  # noqa: BLE001 -- one bad record must not kill the run
             failures.append({"record_id": row.get("record_id"), "error": repr(exc)})
         n_states_done += 1
