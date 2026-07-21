@@ -32,6 +32,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import sys
 from pathlib import Path
@@ -44,7 +45,12 @@ for _p in (str(_SCRIPTS_DIR), str(_REPO_ROOT)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from jackdaw.agents.shop_action_space import ShopActionFamily, shop_action  # noqa: E402
+from jackdaw.agents.shop_action_space import (  # noqa: E402
+    ShopActionFamily,
+    decode_shop_action,
+    shop_action,
+    target_combo_for_action,
+)
 from jackdaw.env.shop_gym import ShopGymEnv  # noqa: E402
 from jackdaw.env.shop_run_adapter import ShopRunConfig  # noqa: E402
 
@@ -94,6 +100,7 @@ def run_suite(
     n_episodes: int,
     hand_policy=None,
     s1_schema: bool = False,
+    dump_decisions: Path | None = None,
 ) -> dict:
     env = ShopGymEnv(
         config=ShopRunConfig(win_ante=win_ante, s1_schema=s1_schema),
@@ -105,26 +112,59 @@ def run_suite(
     steps: list[int] = []
     dead_at_reset = 0
 
-    for seed in eval_seeds(n_episodes):
-        try:
-            obs, info = env.reset(options={"episode_seed": seed})
-        except RuntimeError:
-            # Hand policy lost the auto-resolved first blind — no shop
-            # decision was ever made; not attributable to this policy.
-            dead_at_reset += 1
-            continue
+    with contextlib.ExitStack() as stack:
+        trace_file = None
+        if dump_decisions is not None:
+            dump_decisions.parent.mkdir(parents=True, exist_ok=True)
+            trace_file = stack.enter_context(dump_decisions.open("w", encoding="utf-8"))
 
-        for step_count in range(1, _MAX_EPISODE_STEPS + 1):
-            action = policy.act(obs, info["action_mask"])
-            obs, _, terminated, truncated, info = env.step(action)
-            if terminated or truncated:
-                wins.append(bool(info.get("balatro/won", False)))
-                final_antes.append(int(info.get("balatro/ante", 1)))
-                rounds_cleared.append(int(info.get("balatro/round", 0)))
-                steps.append(step_count)
-                break
-        else:
-            raise AssertionError(f"episode {seed} did not terminate")
+        for seed in eval_seeds(n_episodes):
+            try:
+                obs, info = env.reset(options={"episode_seed": seed})
+            except RuntimeError:
+                # Hand policy lost the auto-resolved first blind — no shop
+                # decision was ever made; not attributable to this policy.
+                dead_at_reset += 1
+                continue
+
+            for step_count in range(1, _MAX_EPISODE_STEPS + 1):
+                mask = info["action_mask"]
+                gs = env._adapter.raw_state
+                action = int(policy.act(obs, mask))
+                family, slot = decode_shop_action(action)
+                action_label = (
+                    f"SelectTarget{list(target_combo_for_action(action))}"
+                    if family is ShopActionFamily.SelectTarget
+                    else f"{family.name}[{slot}]"
+                )
+                record = {
+                    "seed": seed,
+                    "step": step_count,
+                    "ante": gs.get("round_resets", {}).get("ante", 1),
+                    "round": gs.get("round", 0),
+                    "dollars": gs.get("dollars", 0),
+                    "pending_target": env._pending is not None,
+                    "action": int(action),
+                    "action_family": family.name,
+                    "action_slot": slot,
+                    "action_label": action_label,
+                    "n_legal": int(mask.sum()),
+                    "legal_actions": [int(i) for i in np.nonzero(mask)[0]],
+                }
+                obs, _, terminated, truncated, info = env.step(action)
+                terminal = bool(terminated or truncated)
+                record["terminal"] = terminal
+                record["won"] = bool(info.get("balatro/won", False)) if terminal else None
+                if trace_file is not None:
+                    trace_file.write(json.dumps(record) + "\n")
+                if terminal:
+                    wins.append(bool(info.get("balatro/won", False)))
+                    final_antes.append(int(info.get("balatro/ante", 1)))
+                    rounds_cleared.append(int(info.get("balatro/round", 0)))
+                    steps.append(step_count)
+                    break
+            else:
+                raise AssertionError(f"episode {seed} did not terminate")
 
     n_played = len(wins)
     return {
@@ -149,6 +189,13 @@ def main() -> None:
     parser.add_argument("--win-ante", type=int, default=2)
     parser.add_argument("--n-episodes", type=int, default=200)
     parser.add_argument("--output", type=Path, default=None)
+    parser.add_argument(
+        "--dump-decisions",
+        type=Path,
+        default=None,
+        help="write a full per-decision JSONL trace to this path (one JSON object "
+        "per policy decision). Aggregate metrics are unaffected.",
+    )
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--s1-schema", action="store_true")
     parser.add_argument(
@@ -182,6 +229,7 @@ def main() -> None:
         args.n_episodes,
         hand_policy=hand_policy,
         s1_schema=args.s1_schema,
+        dump_decisions=args.dump_decisions,
     )
     result["policy"] = args.policy
     result["hand_policy"] = str(args.hand_policy) if args.hand_policy is not None else "greedy"
