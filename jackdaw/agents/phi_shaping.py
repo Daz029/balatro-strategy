@@ -15,6 +15,12 @@ The pinned inverse property is::
 byte-identically for all states, including builds with more than eight
 jokers (both schemas use the same first-eight prefix) and blind-select states
 with an offered tag (the appended tag one-hot is dropped).
+
+An s1-width critic is also accepted as a potential and is fed the s1
+observation unchanged.  Which critic is the RIGHT potential is a separate
+question from which one loads: a potential should be in-distribution for the
+horizon being trained, so an a4 run wants a critic that has seen ante-3/4
+states, not merely one whose partner matches.
 """
 
 from __future__ import annotations
@@ -23,7 +29,7 @@ from pathlib import Path
 
 import numpy as np
 
-from jackdaw.agents.shop_action_space import NUM_TOTAL_ACTIONS
+from jackdaw.agents.shop_action_space import NUM_TOTAL_ACTIONS, NUM_TOTAL_ACTIONS_S1
 from jackdaw.env.shop_obs import (
     D_SHOP_CONTEXT,
     D_SHOP_CONTEXT_S1,
@@ -118,11 +124,17 @@ class S0CriticPhi:
         model = MaskablePPO.load(str(checkpoint_path), device=device)
         policy = model.policy
         action_width = policy.action_net.weight.shape[0]
-        if action_width != NUM_TOTAL_ACTIONS:
+        if action_width not in (NUM_TOTAL_ACTIONS, NUM_TOTAL_ACTIONS_S1):
             raise ValueError(
                 f"checkpoint action_net has {action_width} rows, expected the "
-                f"frozen s0 width {NUM_TOTAL_ACTIONS}"
+                f"frozen s0 width {NUM_TOTAL_ACTIONS} or the s1 width "
+                f"{NUM_TOTAL_ACTIONS_S1}"
             )
+        # The critic must be fed the schema it was trained on.  An s0 critic
+        # takes the truncated observation; an s1 critic takes it unchanged --
+        # truncating for the latter would drop joker rows 8-14 and the offered
+        # tag that its own encoder was fitted with.
+        self._truncate = action_width == NUM_TOTAL_ACTIONS
 
         policy.eval()
         for parameter in policy.parameters():
@@ -134,8 +146,8 @@ class S0CriticPhi:
         self._device = device
 
     def __call__(self, obs: dict[str, np.ndarray]) -> float:
-        s0_obs = _to_s0_obs(obs)
-        obs_tensor, _ = self._policy.obs_to_tensor(s0_obs)
+        critic_obs = _to_s0_obs(obs) if self._truncate else obs
+        obs_tensor, _ = self._policy.obs_to_tensor(critic_obs)
         with self._torch.no_grad():
             value = self._policy.predict_values(obs_tensor)
         return float(value.item())
