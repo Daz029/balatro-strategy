@@ -27,6 +27,7 @@ from gymnasium import spaces  # noqa: E402
 from sb3_contrib.common.maskable.distributions import MaskableCategorical  # noqa: E402
 from train_shop_ppo import (  # noqa: E402
     CountBonus,
+    NormalizedEntropyCallback,
     ScheduleCallback,
     ShopReservoir,
     ShopRewardWrapper,
@@ -303,6 +304,33 @@ class TestLearnSmoke:
         if result["n_played"]:
             assert 0.0 <= result["win_rate"] <= 1.0
             assert result["mean_steps"] >= 1.0
+
+
+class TestNormalizedEntropy:
+    def test_logs_normalized_entropy(self):
+        schedules = TrainingSchedules()
+        model, _ = build_model(
+            win_ante=1,
+            schedules=schedules,
+            reservoir=ShopReservoir(seed=0),
+            seed=0,
+            n_envs=1,
+            n_steps=8,
+            batch_size=8,
+            device="cpu",
+        )
+        model.learn(
+            total_timesteps=16,
+            callback=[ScheduleCallback(schedules), NormalizedEntropyCallback()],
+        )
+
+        assert "rollout/normalized_entropy" in model.logger.name_to_value
+        normalized_entropy = model.logger.name_to_value["rollout/normalized_entropy"]
+        assert np.isfinite(normalized_entropy)
+        assert 0.0 <= normalized_entropy <= 1.0
+        assert "rollout/mean_legal_actions" in model.logger.name_to_value
+        mean_legal_actions = model.logger.name_to_value["rollout/mean_legal_actions"]
+        assert mean_legal_actions >= 1.0
 
 
 class TestS1Wiring:

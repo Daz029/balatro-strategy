@@ -156,6 +156,58 @@ class ScheduleCallback(BaseCallback):
         return True
 
 
+class NormalizedEntropyCallback(BaseCallback):
+    """Logs entropy normalized by the number of legal actions per state."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._last_normalized_entropy: float | None = None
+        self._last_mean_legal_actions: float | None = None
+
+    def _on_step(self) -> bool:
+        return True
+
+    def _on_rollout_end(self) -> None:
+        buf = self.model.rollout_buffer
+        if buf.buffer_size == 0 or not buf.full:
+            return
+
+        entropy_sum = torch.zeros((), device=self.model.device)
+        valid_count = torch.zeros((), dtype=torch.long, device=self.model.device)
+        legal_sum = torch.zeros((), device=self.model.device)
+        total_states = 0
+        # Exclude forced moves: they have no exploration signal and ln(1) is 0.
+        with torch.no_grad():
+            for batch in buf.get(batch_size=None):
+                dist = self.model.policy.get_distribution(
+                    batch.observations, action_masks=batch.action_masks
+                )
+                entropy = dist.entropy()
+                legal = batch.action_masks.reshape(entropy.shape[0], -1).sum(dim=1).float()
+                valid = legal > 1
+                norm = entropy[valid] / torch.log(legal[valid])
+                entropy_sum += norm.sum()
+                valid_count += valid.sum()
+                legal_sum += legal.sum()
+                total_states += entropy.shape[0]
+
+        if valid_count.item() > 0:
+            normalized_entropy = (entropy_sum / valid_count).item()
+            mean_legal_actions = (legal_sum / total_states).item()
+            self._last_normalized_entropy = normalized_entropy
+            self._last_mean_legal_actions = mean_legal_actions
+            self.logger.record(
+                "rollout/normalized_entropy", normalized_entropy
+            )
+            self.logger.record("rollout/mean_legal_actions", mean_legal_actions)
+
+    def _on_training_end(self) -> None:
+        # Keep the final diagnostics available after SB3's last logger dump.
+        if self._last_normalized_entropy is not None:
+            self.logger.record("rollout/normalized_entropy", self._last_normalized_entropy)
+            self.logger.record("rollout/mean_legal_actions", self._last_mean_legal_actions)
+
+
 class ReservoirCheckpointCallback(BaseCallback):
     """Pickles the shared reservoir on the same cadence as model checkpoints.
 
@@ -946,6 +998,7 @@ def main() -> None:
     )
     callbacks = [
         ScheduleCallback(schedules),
+        NormalizedEntropyCallback(),
         MaskableEvalCallback(
             eval_env,
             n_eval_episodes=args.eval_episodes,
