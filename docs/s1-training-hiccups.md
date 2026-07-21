@@ -512,3 +512,127 @@ would fix this permanently.
 - **State whether a claim is measured before using it to recommend anything.**
   The 600k recommendation was built on an explicitly-flagged unproven premise,
   and flagging it did not stop it from driving a decision.
+
+# The fixed-engine retrain — `s1_a2_pr2` (2026-07-21)
+
+**Context.** Everything above (`s1_a2`, `s1_a3`, `s1_a4_v3`/`WARM`) trained on
+the **pre-K3 engine** — Four Fingers / Shortcut / Smeared inert, the
+`jokers=None` bug, etc. `s1_a2_pr2` is the **first shop stage on the fixed
+engine.** Treat the flawed-engine stages as non-baselines: the old `s1_a3`'s
+~0.37–0.42 (warm-started from `s1_a4_v3`, flawed engine) is **not** a rung for
+this chain and must not be reused. Its ~30–40% coincidentally overlaps the pr2
+zero-shot a3 number below — do not conflate them.
+
+The run:
+
+```
+--win-ante 2 --s1-schema
+--init-from      runs/shop_ppo/s0_a4_v4/best_model/best_model.zip
+--phi-checkpoint runs/shop_ppo/s0_a4_v4/best_model/best_model.zip
+--blend-beta0 0 --phi-beta0 0.1 --init-temperature 5.0
+--hand-policy    runs/hand_ppo_b/h1/best_model/best_model.zip --partner-money-ordering
+--ent-coef 0.01 --total-timesteps 1000000 --n-envs 8
+--eval-freq 25000 --eval-episodes 200 --checkpoint-freq 100000
+--log-dir runs/shop_ppo/s1_a2_pr2 --seed 0
+```
+
+No `--init-reservoir` — pr2 seeds a fresh reservoir off the s0 warm start.
+
+> **PROVENANCE (consistent, not confirmed — flagged per this doc's own rule).**
+> The pr2 numbers were read from a **loose top-level** event file `…4184.0`
+> (originally in a mis-named `s1_a2_sr2/` dir; the local dir was corrected to
+> `s1_a2_pr2/` on 2026-07-21), with **no `MaskablePPO_1/` subdir** beside it —
+> the hand-copied-stray pattern the a4_v3/a3 sections flag. The pinning scalar
+> is consistent: `shop/phi_beta` maxes at 0.100, matching `--phi-beta0 0.1`. The
+> genuine file is `runs/shop_ppo/s1_a2_pr2/MaskablePPO_1/` on the training
+> machine — locate it and re-check `phi_beta` before treating anything below as
+> settled.
+
+## Measured
+
+**[MEASURED] a2 saturated early; the back half only sharpened.** Warm-started
+from `s0_a4_v4`, win rate plateaued by ~75k and never moved for the remaining
+~900k (wandered 0.57–0.72, no trend). `entropy_loss` fell −0.27 → −0.019 over
+the run. This is Issue 1 restated with the real finding foregrounded: not a
+collapse but a **converged policy sharpening on a saturated objective.** The
+`eval/mean_reward` trough at 800k (0.555) is small-sample wobble — the user's
+200-ep checkpoint sweep (300k–1M) holds 0.57–0.65 throughout, no catastrophic
+break.
+
+**[MEASURED] best_model = step 575,000.** Unique peak of `eval/mean_reward`
+(0.72; EvalCallback saves on new-max, so the step is read off the curve, not
+the file). `entropy_loss` there ≈ **−0.08** vs −0.019 at 1M — ~4× the entropy
+of the endpoint, and it predates the whole back-half sharpening. 200-ep eval
+**0.65**. It is the better warm-start on both axes (win rate *and* remaining
+entropy); the 1M final is a hair worse (over-sharpened, within noise).
+
+**[MEASURED] The 702k KL spike is the reporting artifact, not a real step.**
+`approx_kl` = 0.63 at 702,464 (~15× the ~0.04 baseline), no numeric blowup,
+`explained_variance` recovers to 0.90+ within ~10k steps. Same stale-probs-cache
+signature already documented (`shop-ppo-nan-grad-guard`). It is at 702k, not
+800k — the eval trough lags it by ~100k.
+
+**[MEASURED] Shop is the entire lever at a2.** `nextround` floor (passive shop,
+always advance) with the h1 partner = **0.000** win rate, dying at mean ante
+1.38 — the base deck + h1 cannot clear ante 1 unaided. Trained-0.65 is *all*
+shop value. Kills any "shop-irrelevant at a2" reading.
+
+**[MEASURED] Zero-shot horizon density of the a2 best_model** (200 ep each,
+`--win-ante N`, h1 partner, `--partner-money-ordering`; the a2 policy evaluated
+with the finish line moved deeper, no extra training):
+
+| finish line | win rate |
+|---|---|
+| ante 2 (trained) | 0.65 |
+| ante 3 | 0.37 |
+| ante 4 | 0.09 |
+
+a2→a3 is a **learnable step** — 0.37 is dense enough to bootstrap PPO
+immediately. a2→a4 is a **cliff**: 0.09 is below the density where PPO explores
+effectively, so training a4 straight from a2 fights sparse-reward exploration
+from a peaked prior. That is the a4=0.09 failure of the earlier sections, seen
+here at its source (the policy simply never learned the economy/scaling ante 4
+demands).
+
+## The plan it implies
+
+**[SPECULATION, but measurement-gated] Rebuild the curriculum chain on
+best_model links, softened, with an inserted a3 rung.**
+
+1. Chain `best_model → best_model`, never off a collapsed final. Soften at each
+   hop (pr2 used `--init-temperature 5.0` from s0; keep it high to err toward
+   exploration into the new deeper states rather than inheriting a3/a4's
+   collapse-chaining).
+2. Insert an **a3 rung** between a2 and a4 (the density gradient says a2→a4 is
+   too big for this partner). Re-run it **on the fixed engine** from
+   `s1_a2_pr2/best_model` — the flawed-engine `s1_a3` cannot serve.
+3. **zero-shot-density-gates-the-next-rung.** After a rung trains, eval its
+   best_model zero-shot at the next horizon *before* launching there:
+   **≥ ~0.2 → trainable; ~0.1 → insert another rung** instead of throwing PPO at
+   a sparse objective. This is the nextround-floor discriminator applied to
+   curriculum spacing — measure the density each rung hands the next, don't
+   guess it.
+
+**Mirror pr2's full flag set; change only `--win-ante`, `--init-from`,
+`--init-reservoir`, `--log-dir`.** A stripped command silently flips the
+objective and the eval quality: dropping `--phi-checkpoint`/`--blend-beta0 0`
+reverts to the c_ante blend bonus (blend-beta0 defaults to 1 without Φ), and
+dropping `--eval-episodes` reverts to 50-episode evals (default) — 4× noisier
+best_model selection, the exact lottery this doc keeps hitting. a3 command:
+
+```
+uv run python scripts/train_shop_ppo.py --win-ante 3 --s1-schema \
+  --init-from      runs/shop_ppo/s1_a2_pr2/best_model/best_model.zip \
+  --init-reservoir runs/shop_ppo/s1_a2_pr2/reservoir.pkl \
+  --phi-checkpoint runs/shop_ppo/s0_a4_v4/best_model/best_model.zip \
+  --blend-beta0 0 --phi-beta0 0.1 --init-temperature 5.0 \
+  --hand-policy runs/hand_ppo_b/h1/best_model/best_model.zip --partner-money-ordering \
+  --ent-coef 0.01 --total-timesteps 1000000 --n-envs 8 \
+  --eval-freq 25000 --eval-episodes 200 --checkpoint-freq 100000 \
+  --log-dir runs/shop_ppo/s1_a3_pr2 --seed 0
+```
+
+(`--init-reservoir` is the one addition vs pr2, carrying pr2's snapshot
+diversity forward — confirm `s1_a2_pr2/reservoir.pkl` exists, else omit for a
+fresh one.) Then eval `s1_a3_pr2/best_model` at `--win-ante 4`; that number
+decides whether a4 launches from it or earns another rung first.
