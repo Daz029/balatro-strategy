@@ -118,6 +118,38 @@ def _require_phase(gs: dict[str, Any], *phases: GamePhase) -> GamePhase:
     return phase
 
 
+def _gain_joker(gs: dict[str, Any], card: Any) -> bool:
+    """Move one card into Joker ownership and apply its passive once.
+
+    Identity, rather than center key or dataclass equality, defines ownership:
+    Showman can create distinct copies of the same Joker and each copy must
+    apply its own passive.  Re-processing the exact same card object is a
+    no-op, which prevents observer/restore seams from double-applying it.
+
+    ``used_jokers`` is run-wide duplicate-exclusion history.  Acquisition
+    registers the key idempotently; removal deliberately never unregisters it.
+    """
+    jokers: list = gs.setdefault("jokers", [])
+    if any(owned is card for owned in jokers):
+        return False
+
+    card.add_to_deck(gs)
+    jokers.append(card)
+    gs.setdefault("used_jokers", {})[card.center_key] = True
+    return True
+
+
+def _lose_joker(gs: dict[str, Any], card: Any) -> bool:
+    """Remove one owned Joker by identity and reverse its passive once."""
+    jokers: list = gs.get("jokers", [])
+    for idx, owned in enumerate(jokers):
+        if owned is card:
+            owned.remove_from_deck(gs)
+            jokers.pop(idx)
+            return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Handlers
 # ---------------------------------------------------------------------------
@@ -355,7 +387,7 @@ def _apply_tag_result(gs: dict[str, Any], result: Any) -> None:
     if result.create_jokers:
         from jackdaw.engine.card_factory import create_card
 
-        jokers = gs.get("jokers", [])
+        jokers = gs.setdefault("jokers", [])
         joker_slots = gs.get("joker_slots", 5)
         rng = gs.get("rng")
         ante = gs.get("round_resets", {}).get("ante", 1)
@@ -374,7 +406,7 @@ def _apply_tag_result(gs: dict[str, Any], result: Any) -> None:
                 append="top",
                 game_state=gs,
             )
-            jokers.append(card)
+            _gain_joker(gs, card)
 
     if result.level_up is not None:
         hand_type, levels = result.level_up
@@ -622,8 +654,7 @@ def _handle_play_hand(gs: dict[str, Any], indices: tuple[int, ...]) -> dict[str,
 
     # Joker self-destruction (Ice Cream, Popcorn, etc.)
     for removed in result.jokers_removed:
-        if removed in jokers:
-            jokers.remove(removed)
+        _lose_joker(gs, removed)
 
     # Playing card destruction (Glass shatter, etc.)
     destroyed_set = set(id(c) for c in result.cards_destroyed)
@@ -862,8 +893,7 @@ def _handle_discard(gs: dict[str, Any], indices: tuple[int, ...]) -> dict[str, A
         gs["dollars"] = gs.get("dollars", 0) + dollars_earned
 
     for joker in jokers_to_remove:
-        if joker in jokers:
-            jokers.remove(joker)
+        _lose_joker(gs, joker)
 
     # ------------------------------------------------------------------
     # 6. Discard cost (Golden Needle challenge)
@@ -1050,8 +1080,7 @@ def _handle_buy_card(gs: dict[str, Any], idx: int) -> dict[str, Any]:
     card_set = _get_card_set(card)
     added_playing_card = False
     if card_set == "Joker":
-        gs.setdefault("jokers", []).append(card)
-        gs.setdefault("used_jokers", {})[card.center_key] = True
+        _gain_joker(gs, card)
     elif card_set in ("Tarot", "Planet", "Spectral"):
         gs.setdefault("consumables", []).append(card)
     else:
@@ -1086,7 +1115,10 @@ def _handle_sell_card(gs: dict[str, Any], area: str, idx: int) -> dict[str, Any]
         raise IllegalActionError("Cannot sell eternal card")
 
     gs["dollars"] = gs.get("dollars", 0) + card.sell_cost
-    cards.pop(idx)
+    if area == "jokers":
+        _lose_joker(gs, card)
+    else:
+        cards.pop(idx)
 
     # Fire selling_card joker context (Campfire +xMult per card sold)
     _fire_shop_joker_context(gs, selling_card=True)
@@ -1292,8 +1324,7 @@ def _handle_pick_pack_card(
 
     elif card_set == "Joker":
         # Buffoon pack: add to joker slots
-        gs.setdefault("jokers", []).append(card)
-        gs.setdefault("used_jokers", {})[card.center_key] = True
+        _gain_joker(gs, card)
 
     else:
         # Standard pack: playing card → add to deck
@@ -1543,8 +1574,7 @@ def _round_won(gs: dict[str, Any]) -> None:
     # upstream bug; pinned in tests/engine/test_cashout_ordering.py).
     # Remove self-destructed jokers (Popcorn, Turtle Bean, etc.)
     for removed_joker in eor.get("jokers_removed", []):
-        if removed_joker in jokers:
-            jokers.remove(removed_joker)
+        _lose_joker(gs, removed_joker)
 
     # ------------------------------------------------------------------
     # 2. Process perishable/rental
@@ -1775,7 +1805,7 @@ def _apply_setting_blind_mutations(
                 if candidates:
                     seed_val = rng.seed("madness")
                     target, _ = rng.element(candidates, seed_val)
-                    jokers.remove(target)
+                    _lose_joker(gs, target)
 
         # Burglar: set hands / remove discards
         if "set_hands" in mut:
@@ -2101,10 +2131,8 @@ def _apply_consumable_result(
 
     # m. Destroy jokers (Ankh: destroy all except one)
     if getattr(result, "destroy_jokers", None):
-        jokers: list = gs.get("jokers", [])
         for j in result.destroy_jokers:
-            if j in jokers:
-                jokers.remove(j)
+            _lose_joker(gs, j)
 
     # ---- Game state ----
 
@@ -2148,7 +2176,7 @@ def _resolve_create_descriptors(gs: dict[str, Any], descriptors: list[dict[str, 
             if card_set == "Joker":
                 negative = card.edition and card.edition.get("negative")
                 if len(jokers) < joker_slots + (1 if negative else 0):
-                    jokers.append(card)
+                    _gain_joker(gs, card)
             elif card_set in ("Tarot", "Planet", "Spectral"):
                 if len(consumables) < consumable_limit:
                     consumables.append(card)
