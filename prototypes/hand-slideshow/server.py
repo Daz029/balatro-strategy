@@ -123,6 +123,22 @@ def _joker(card: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _joker_hand_size_modifier(jokers: list[dict[str, Any]]) -> int:
+    modifier = 0
+    for joker in jokers:
+        ability = joker.get("ability") or {}
+        modifier += int(ability.get("h_size") or 0)
+        extra = ability.get("extra")
+        if not isinstance(extra, dict):
+            continue
+        center_key = joker.get("center_key")
+        if center_key in {"j_turtle_bean", "j_troubadour"}:
+            modifier += int(extra.get("h_size") or 0)
+        elif center_key == "j_stuntman":
+            modifier -= int(extra.get("h_size") or 0)
+    return modifier
+
+
 def _required_score(record: dict[str, Any]) -> Any:
     blind = record.get("blind") or {}
     return record.get("blind_points", blind.get("chips", 0))
@@ -131,6 +147,7 @@ def _required_score(record: dict[str, Any]) -> Any:
 def frame_from_record(record: dict[str, Any]) -> dict[str, Any]:
     selected_indices = [int(index) for index in record.get("selected_indices") or []]
     hand, hidden_count = _visible_hand(record.get("cards_in_hand") or [], selected_indices)
+    jokers = record.get("jokers") or []
     blind = record.get("blind") or {}
     hand_score = record.get("hand_point_value")
     score = record.get("score") or {}
@@ -143,8 +160,11 @@ def frame_from_record(record: dict[str, Any]) -> dict[str, Any]:
         "selected_indices": selected_indices,
         "hand": hand,
         "hand_count": len(record.get("cards_in_hand") or []),
+        "hand_size": record.get("hand_size"),
+        "hand_size_source": "recorded" if record.get("hand_size") is not None else None,
+        "hand_size_modifier": _joker_hand_size_modifier(jokers),
         "hidden_hand_count": hidden_count,
-        "jokers": [_joker(card) for card in (record.get("jokers") or [])[:MAX_VISIBLE_JOKERS]],
+        "jokers": [_joker(card) for card in jokers[:MAX_VISIBLE_JOKERS]],
         "money": record.get("money", 0),
         "ante": record.get("ante", 0),
         "round": record.get("round", 0),
@@ -161,6 +181,18 @@ def frame_from_record(record: dict[str, Any]) -> dict[str, Any]:
             "boss": bool(blind.get("boss", False)),
         },
     }
+
+
+def _fill_missing_hand_sizes(frames: list[dict[str, Any]]) -> None:
+    if not frames:
+        return
+    first = frames[0]
+    base_hand_size = first["hand_count"] - first["hand_size_modifier"]
+    for frame in frames:
+        if frame["hand_size"] is not None:
+            continue
+        frame["hand_size"] = max(frame["hand_count"], base_hand_size + frame["hand_size_modifier"])
+        frame["hand_size_source"] = "inferred"
 
 
 def result_from_record(record: dict[str, Any]) -> dict[str, Any]:
@@ -196,6 +228,8 @@ def load_trace(
                 runs[seed] = RunReplay(frames=[], result={})
             runs[seed].frames.append(frame)
             runs[seed].result = result_from_record(record)
+    for run in runs.values():
+        _fill_missing_hand_sizes(run.frames)
     return runs
 
 

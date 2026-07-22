@@ -23,4 +23,7 @@ run. The bottom-right button (or `O`) reveals the recorded order in which the
 model selected its cards. Hands are displayed rank-first from Ace down, with
 Spades, Hearts, Clubs, then Diamonds as the suit tie-breaker. A green or red
 terminal slide follows the final decision, preserving the run HUD and showing
-the final score against the blind goal.
+the final score against the blind goal. The outcome selector filters the run
+dropdown to cleared or lost evaluations. New traces display their recorded hand
+size; older traces infer capacity from the opening hand and visible joker hand-
+size modifiers while keeping the number of actually recorded cards explicit.

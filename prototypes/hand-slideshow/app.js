@@ -5,6 +5,9 @@ const params = new URLSearchParams(window.location.search);
 const state = {
   runs: [],
   seed: params.get("seed"),
+  resultFilter: ["cleared", "lost"].includes(params.get("result"))
+    ? params.get("result")
+    : "all",
   frames: [],
   result: null,
   frameIndex: 0,
@@ -48,16 +51,24 @@ function actionPresentation(frame) {
   };
 }
 
+function filteredRuns() {
+  return state.resultFilter === "all"
+    ? state.runs
+    : state.runs.filter((run) => run.result === state.resultFilter);
+}
+
 function updateUrl() {
   const frame = state.frames[state.frameIndex];
   const next = new URLSearchParams(window.location.search);
   if (state.seed) next.set("seed", state.seed);
+  if (state.resultFilter === "all") next.delete("result");
+  else next.set("result", state.resultFilter);
   if (frame) next.set("decision", frame.decision);
   window.history.replaceState({}, "", `${window.location.pathname}?${next}`);
 }
 
 function transportHTML(frame, terminal) {
-  const options = state.runs
+  const options = filteredRuns()
     .map(
       (run) =>
         `<option value="${esc(run.seed)}" ${run.seed === state.seed ? "selected" : ""}>${esc(
@@ -67,7 +78,14 @@ function transportHTML(frame, terminal) {
     .join("");
   return `<header class="transport">
     <div class="brand"><span>POLICY</span><strong>HAND REPLAY</strong></div>
-    <label class="run-select">RUN<select data-control="seed">${options}</select></label>
+    <div class="run-picker">
+      <label class="result-filter">OUTCOME<select data-control="result-filter">
+        <option value="all" ${state.resultFilter === "all" ? "selected" : ""}>ALL (${state.runs.length})</option>
+        <option value="cleared" ${state.resultFilter === "cleared" ? "selected" : ""}>CLEARED (${state.runs.filter((run) => run.result === "cleared").length})</option>
+        <option value="lost" ${state.resultFilter === "lost" ? "selected" : ""}>LOST (${state.runs.filter((run) => run.result === "lost").length})</option>
+      </select></label>
+      <label class="run-select">RUN<select data-control="seed">${options}</select></label>
+    </div>
     <nav class="step-controls" aria-label="Decision navigation">
       <button data-action="previous" aria-label="Previous decision" ${state.frameIndex === 0 ? "disabled" : ""}>\u25c0</button>
       <button class="step" data-action="next" ${terminal ? "disabled" : ""}>STEP \u25b6</button>
@@ -153,12 +171,17 @@ function handHTML(frame) {
   const overflow = frame.hidden_hand_count
     ? `<span>${frame.hidden_hand_count} unselected overflow card${frame.hidden_hand_count === 1 ? "" : "s"} hidden</span>`
     : "";
+  const sizeSource = frame.hand_size_source === "inferred" ? " \u00b7 INFERRED" : "";
+  const modifier = Number(frame.hand_size_modifier || 0);
+  const modifierLabel = modifier
+    ? `<span>JOKER MODIFIER ${modifier > 0 ? "+" : ""}${modifier}</span>`
+    : "";
   return `<section class="hand-zone">
     <div class="decision-heading">
       <div><small>DECISION ${frame.decision}</small><h1>${action.heading}</h1></div>
       <div class="decision-result"><small>${action.resultLabel}</small><strong>${esc(action.resultValue)}</strong><span>${action.resultDetail}</span></div>
     </div>
-    <div class="hand-meta"><strong>${frame.hand_count} CARDS IN HAND</strong>${overflow}</div>
+    <div class="hand-meta"><strong>HAND SIZE ${formatNumber(frame.hand_size)}${sizeSource}</strong><span>${frame.hand_count} CARDS RECORDED</span>${modifierLabel}${overflow}</div>
     <div class="hand-row" style="--card-count:${Math.max(1, frame.hand.length)}">${cards}</div>
   </section>`;
 }
@@ -264,6 +287,13 @@ app.addEventListener("click", (event) => {
 
 app.addEventListener("change", (event) => {
   if (event.target.matches('[data-control="seed"]')) loadRun(event.target.value);
+  if (event.target.matches('[data-control="result-filter"]')) {
+    state.resultFilter = event.target.value;
+    const firstRun = filteredRuns()[0];
+    if (!firstRun) return;
+    if (!filteredRuns().some((run) => run.seed === state.seed)) loadRun(firstRun.seed);
+    else render();
+  }
 });
 
 app.addEventListener("keydown", (event) => {
@@ -290,9 +320,9 @@ async function init() {
   try {
     const response = await fetch("/api/runs");
     state.runs = await response.json();
-    const seed = state.runs.some((run) => run.seed === state.seed)
+    const seed = filteredRuns().some((run) => run.seed === state.seed)
       ? state.seed
-      : state.runs[0]?.seed;
+      : filteredRuns()[0]?.seed;
     if (!seed) throw new Error("No hand decisions found in the trace");
     await loadRun(seed, params.get("decision"));
   } catch (error) {

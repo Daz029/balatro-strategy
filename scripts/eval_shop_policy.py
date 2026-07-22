@@ -287,6 +287,9 @@ def _serialize_hand_decision(
         "post_points": int(post_state.get("chips", 0)),
         "hands_left": int(current_round.get("hands_left", 0)),
         "discards_left": int(current_round.get("discards_left", 0)),
+        "hand_size": (
+            int(pre_state["hand_size"]) if pre_state.get("hand_size") is not None else None
+        ),
         "action_type": type(action).__name__,
         "selected_indices": selected_indices,
         "selected_cards": selected_cards,

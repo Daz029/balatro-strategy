@@ -32,22 +32,23 @@ button, input, select { font: inherit; }
 
 .transport {
   position: relative; z-index: 40; display: grid;
-  grid-template-columns: minmax(160px,.7fr) minmax(220px,1fr) minmax(480px,2fr) 110px;
+  grid-template-columns: minmax(150px,.65fr) minmax(300px,1.2fr) minmax(450px,1.8fr) 110px;
   gap: 12px; align-items: center; height: 72px; padding: 9px 22px;
   background: rgba(8,13,17,.94); border-bottom: 4px solid #297f75;
   box-shadow: 0 8px 24px rgba(0,0,0,.25);
 }
 .brand { display: flex; flex-direction: column; line-height: 1; }
-.brand span, .transport small, .run-select, .step-controls label {
+.brand span, .transport small, .run-select, .result-filter, .step-controls label {
   color: #98aaa8; font-size: 9px; font-weight: 1000; letter-spacing: .14em;
 }
 .brand strong { margin-top: 5px; font-family: Impact, "Arial Black", sans-serif; font-size: 20px; letter-spacing: .07em; }
-.run-select { display: grid; grid-template-columns: auto 1fr; gap: 9px; align-items: center; }
-.run-select select, .step-controls input {
+.run-picker { display: grid; grid-template-columns: minmax(105px,.55fr) minmax(170px,1.45fr); gap: 8px; }
+.run-select, .result-filter { display: grid; gap: 3px; }
+.run-select select, .result-filter select, .step-controls input {
   min-width: 0; padding: 8px 9px; color: white; font-weight: 800; background: #242d31;
   border: 2px solid #435259; border-radius: 7px; outline: none;
 }
-.run-select select:focus, .step-controls input:focus { border-color: var(--gold); }
+.run-select select:focus, .result-filter select:focus, .step-controls input:focus { border-color: var(--gold); }
 .step-controls { display: flex; gap: 7px; align-items: center; justify-content: center; }
 .step-controls button, .pick-order-control button {
   min-height: 39px; padding: 7px 13px; color: white; font-weight: 1000; letter-spacing: .05em;
@@ -204,7 +205,7 @@ button, input, select { font: inherit; }
 .red-text { color: #d83d43; }
 
 @media (max-width: 1150px) {
-  .transport { grid-template-columns: 140px 190px 1fr 78px; padding-inline: 12px; }
+  .transport { grid-template-columns: 135px 270px 1fr 78px; padding-inline: 12px; }
   .brand strong { font-size: 16px; }
   .step-controls .step { padding-inline: 9px; }
   .status-rail { left: 10px; width: 160px; }
