@@ -6,6 +6,7 @@ const state = {
   runs: [],
   seed: params.get("seed"),
   frames: [],
+  result: null,
   frameIndex: 0,
   showPickOrder: false,
 };
@@ -55,7 +56,7 @@ function updateUrl() {
   window.history.replaceState({}, "", `${window.location.pathname}?${next}`);
 }
 
-function transportHTML(frame) {
+function transportHTML(frame, terminal) {
   const options = state.runs
     .map(
       (run) =>
@@ -69,11 +70,14 @@ function transportHTML(frame) {
     <label class="run-select">RUN<select data-control="seed">${options}</select></label>
     <nav class="step-controls" aria-label="Decision navigation">
       <button data-action="previous" aria-label="Previous decision" ${state.frameIndex === 0 ? "disabled" : ""}>\u25c0</button>
-      <button class="step" data-action="next" ${state.frameIndex === state.frames.length - 1 ? "disabled" : ""}>STEP \u25b6</button>
-      <label>DECISION <input id="decision-input" type="number" min="1" value="${esc(frame.decision)}" /></label>
-      <button data-action="jump">GO</button>
+      <button class="step" data-action="next" ${terminal ? "disabled" : ""}>STEP \u25b6</button>
+      ${
+        terminal
+          ? '<span class="terminal-step">RUN RESULT</span>'
+          : `<label>DECISION <input id="decision-input" type="number" min="1" value="${esc(frame.decision)}" /></label><button data-action="jump">GO</button>`
+      }
     </nav>
-    <div class="frame-count"><strong>${state.frameIndex + 1}</strong> / ${state.frames.length}<small>SPACE TO STEP</small></div>
+    <div class="frame-count"><strong>${state.frameIndex + 1}</strong> / ${state.frames.length + 1}<small>SPACE TO STEP</small></div>
   </header>`;
 }
 
@@ -177,18 +181,42 @@ function pickOrderHTML(frame) {
   </div>`;
 }
 
+function terminalSlideHTML(result) {
+  const cleared = result.status === "cleared";
+  const margin = Number(result.final_score) - Number(result.required_score);
+  const comparison = cleared
+    ? `${formatNumber(margin)} ABOVE THE GOAL`
+    : `${formatNumber(Math.abs(margin))} CHIPS SHORT`;
+  return `<section class="terminal-slide ${result.status}">
+    <small>EVALUATION COMPLETE</small>
+    <h1>${cleared ? "CLEARED" : "LOST"}</h1>
+    <p>${comparison}</p>
+    <div class="terminal-scores">
+      <div><small>TOTAL SCORE GAINED</small><strong>${formatNumber(result.final_score)}</strong></div>
+      <span>/</span>
+      <div><small>BLIND GOAL</small><strong>${formatNumber(result.required_score)}</strong></div>
+    </div>
+  </section>`;
+}
+
 function render() {
-  const frame = state.frames[state.frameIndex];
-  if (!frame) return;
+  const terminal = state.frameIndex === state.frames.length;
+  const sourceFrame = terminal ? state.frames.at(-1) : state.frames[state.frameIndex];
+  if (!sourceFrame || !state.result) return;
+  const frame = terminal
+    ? { ...sourceFrame, current_score: state.result.final_score }
+    : sourceFrame;
   app.innerHTML = `<div class="viewer ${state.showPickOrder ? "show-pick-order" : ""}">
-    ${transportHTML(frame)}
-    <div class="felt">${statusRailHTML(frame)}${jokersHTML(frame)}${handHTML(frame)}${pickOrderHTML(frame)}</div>
+    ${transportHTML(frame, terminal)}
+    <div class="felt">${statusRailHTML(frame)}${jokersHTML(frame)}${
+      terminal ? terminalSlideHTML(state.result) : `${handHTML(frame)}${pickOrderHTML(frame)}`
+    }</div>
   </div>`;
   updateUrl();
 }
 
 function moveFrame(delta) {
-  state.frameIndex = Math.max(0, Math.min(state.frames.length - 1, state.frameIndex + delta));
+  state.frameIndex = Math.max(0, Math.min(state.frames.length, state.frameIndex + delta));
   render();
 }
 
@@ -214,6 +242,7 @@ async function loadRun(seed, requestedDecision = null) {
   if (!response.ok) throw new Error(payload.error || `Could not load ${seed}`);
   state.seed = seed;
   state.frames = payload.frames || [];
+  state.result = payload.result;
   state.frameIndex = 0;
   if (requestedDecision !== null) jumpToDecision(requestedDecision);
   else render();

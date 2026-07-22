@@ -59,6 +59,7 @@ button, input, select { font: inherit; }
 .step-controls .step { color: #18211f; background: var(--gold); border-color: #ffe899; box-shadow: 0 4px 0 #9a6c0d; }
 .step-controls label { display: flex; gap: 7px; align-items: center; }
 .step-controls input { width: 82px; font-size: 15px; text-align: center; }
+.terminal-step { padding: 8px 13px; color: var(--gold); font-size: 10px; font-weight: 1000; letter-spacing: .13em; background: #252d31; border: 2px solid #56656b; border-radius: 7px; }
 .frame-count { display: flex; flex-wrap: wrap; gap: 4px; align-items: baseline; justify-content: flex-end; color: #7f9293; }
 .frame-count strong { color: white; font-size: 23px; }
 .frame-count small { flex-basis: 100%; text-align: right; }
@@ -137,6 +138,28 @@ button, input, select { font: inherit; }
 .hand-meta { display: flex; gap: 10px; min-height: 24px; align-items: center; color: #adc0bc; font-size: 9px; letter-spacing: .1em; }
 .hand-meta span { color: #f0c85b; }
 .hand-row { display: grid; grid-template-columns: repeat(var(--card-count), minmax(48px, 116px)); gap: clamp(4px,.55vw,10px); align-items: center; justify-content: center; flex: 1; min-height: 0; }
+.terminal-slide {
+  position: absolute; top: 215px; right: 7vw; bottom: 45px; left: calc(224px + 7vw); z-index: 8;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; overflow: hidden;
+  color: #eafff3; text-align: center; background:
+    radial-gradient(circle at 50% 38%, rgba(74, 237, 148, .28), transparent 38%),
+    rgba(5, 40, 28, .9);
+  border: 5px solid #43d987; border-radius: 24px;
+  box-shadow: inset 0 0 70px rgba(31, 210, 116, .14), 0 18px 38px rgba(0,0,0,.34);
+}
+.terminal-slide::before { position: absolute; inset: 12px; content: ""; border: 2px dashed rgba(160,255,203,.24); border-radius: 14px; }
+.terminal-slide > small { color: #95efbb; font-size: 11px; font-weight: 1000; letter-spacing: .24em; }
+.terminal-slide h1 { margin: 6px 0 0; font-family: Impact, "Arial Black", sans-serif; font-size: clamp(72px,10vw,160px); font-weight: 500; line-height: .9; letter-spacing: .06em; text-shadow: 0 8px 0 rgba(0,0,0,.28), 0 0 30px rgba(67,217,135,.42); }
+.terminal-slide p { margin: 13px 0 22px; color: #adf3ca; font-size: 12px; font-weight: 1000; letter-spacing: .15em; }
+.terminal-slide.lost { color: #fff1ec; background: radial-gradient(circle at 50% 38%, rgba(239,75,80,.3), transparent 38%), rgba(55,12,18,.92); border-color: #ef4b50; box-shadow: inset 0 0 70px rgba(239,75,80,.14), 0 18px 38px rgba(0,0,0,.34); }
+.terminal-slide.lost::before { border-color: rgba(255,172,169,.25); }
+.terminal-slide.lost > small, .terminal-slide.lost p { color: #ffaaa6; }
+.terminal-slide.lost h1 { text-shadow: 0 8px 0 rgba(0,0,0,.3), 0 0 30px rgba(239,75,80,.42); }
+.terminal-scores { position: relative; display: grid; grid-template-columns: minmax(170px,1fr) auto minmax(170px,1fr); gap: 24px; align-items: center; min-width: min(620px,75%); padding: 17px 25px; background: rgba(5,12,13,.58); border: 2px solid rgba(255,255,255,.13); border-radius: 14px; }
+.terminal-scores div { display: flex; flex-direction: column; }
+.terminal-scores small { color: #b9cbc5; font-size: 8px; font-weight: 1000; letter-spacing: .14em; }
+.terminal-scores strong { color: white; font-family: Impact, "Arial Black", sans-serif; font-size: clamp(32px,4vw,62px); font-weight: 500; line-height: 1; }
+.terminal-scores > span { color: rgba(255,255,255,.35); font: 35px Impact, sans-serif; }
 .playing-card {
   position: relative; display: flex; flex-direction: column; width: 100%; max-height: 310px;
   aspect-ratio: .69; padding: 10px 8px 8px; overflow: hidden; color: #171b1d;
@@ -186,6 +209,7 @@ button, input, select { font: inherit; }
   .step-controls .step { padding-inline: 9px; }
   .status-rail { left: 10px; width: 160px; }
   .joker-zone, .hand-zone { right: 14px; left: 183px; }
+  .terminal-slide { right: 4vw; left: calc(183px + 4vw); }
   .playing-card { padding: 7px 5px 6px; border-width: 3px; }
 }
 
@@ -200,6 +224,7 @@ button, input, select { font: inherit; }
   .joker-rack { height: 111px; }
   .joker small { display: none; }
   .hand-zone { top: 153px; bottom: 12px; }
+  .terminal-slide { top: 160px; bottom: 18px; }
   .decision-heading { min-height: 51px; }
   .decision-heading h1 { font-size: 29px; }
   .hand-meta { min-height: 18px; }

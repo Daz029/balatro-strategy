@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from collections import defaultdict
+from dataclasses import dataclass
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -37,6 +37,12 @@ RANK_VALUES = {
     "Ace": 14,
 }
 SUIT_VALUES = {"Diamonds": 1, "Clubs": 2, "Hearts": 3, "Spades": 4}
+
+
+@dataclass
+class RunReplay:
+    frames: list[dict[str, Any]]
+    result: dict[str, Any]
 
 
 def _edition_name(edition: Any) -> str | None:
@@ -117,6 +123,11 @@ def _joker(card: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _required_score(record: dict[str, Any]) -> Any:
+    blind = record.get("blind") or {}
+    return record.get("blind_points", blind.get("chips", 0))
+
+
 def frame_from_record(record: dict[str, Any]) -> dict[str, Any]:
     selected_indices = [int(index) for index in record.get("selected_indices") or []]
     hand, hidden_count = _visible_hand(record.get("cards_in_hand") or [], selected_indices)
@@ -137,7 +148,7 @@ def frame_from_record(record: dict[str, Any]) -> dict[str, Any]:
         "money": record.get("money", 0),
         "ante": record.get("ante", 0),
         "round": record.get("round", 0),
-        "required_score": record.get("blind_points", blind.get("chips", 0)),
+        "required_score": _required_score(record),
         "current_score": record.get("points", 0),
         "hand_score": hand_score,
         "hand_type": record.get("hand_type") or score.get("hand_type"),
@@ -152,8 +163,24 @@ def frame_from_record(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def load_trace(path: Path) -> dict[str, list[dict[str, Any]]]:
-    runs: dict[str, list[dict[str, Any]]] = defaultdict(list)
+def result_from_record(record: dict[str, Any]) -> dict[str, Any]:
+    required_score = _required_score(record)
+    final_score = record.get("post_points", record.get("points", 0))
+    explicit_result = record.get("cleared") if record.get("terminal") else None
+    cleared = (
+        bool(explicit_result) if explicit_result is not None else final_score >= required_score
+    )
+    return {
+        "status": "cleared" if cleared else "lost",
+        "final_score": final_score,
+        "required_score": required_score,
+    }
+
+
+def load_trace(
+    path: Path,
+) -> dict[str, RunReplay]:
+    runs: dict[str, RunReplay] = {}
     with path.open(encoding="utf-8") as source:
         for line_number, line in enumerate(source, start=1):
             if not line.strip():
@@ -164,12 +191,16 @@ def load_trace(path: Path) -> dict[str, list[dict[str, Any]]]:
             except (json.JSONDecodeError, TypeError, ValueError) as error:
                 message = f"Invalid hand trace record on line {line_number}: {error}"
                 raise ValueError(message) from error
-            runs[frame["seed"]].append(frame)
-    return dict(runs)
+            seed = frame["seed"]
+            if seed not in runs:
+                runs[seed] = RunReplay(frames=[], result={})
+            runs[seed].frames.append(frame)
+            runs[seed].result = result_from_record(record)
+    return runs
 
 
 class HandSlideshowHandler(SimpleHTTPRequestHandler):
-    runs: dict[str, list[dict[str, Any]]]
+    runs: dict[str, RunReplay]
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, directory=str(VIEWER_DIR), **kwargs)
@@ -190,21 +221,22 @@ class HandSlideshowHandler(SimpleHTTPRequestHandler):
                 [
                     {
                         "seed": seed,
-                        "frames": len(frames),
-                        "first_decision": frames[0]["decision"],
-                        "last_decision": frames[-1]["decision"],
+                        "frames": len(run.frames),
+                        "first_decision": run.frames[0]["decision"],
+                        "last_decision": run.frames[-1]["decision"],
+                        "result": run.result["status"],
                     }
-                    for seed, frames in self.runs.items()
+                    for seed, run in self.runs.items()
                 ]
             )
             return
         if parsed.path == "/api/frames":
             seed = parse_qs(parsed.query).get("seed", [""])[0]
-            frames = self.runs.get(seed)
-            if frames is None:
+            run = self.runs.get(seed)
+            if run is None:
                 self._send_json({"error": f"Unknown seed: {seed}"}, status=404)
             else:
-                self._send_json({"seed": seed, "frames": frames})
+                self._send_json({"seed": seed, "frames": run.frames, "result": run.result})
             return
         if parsed.path == "/":
             self.path = "/index.html"
@@ -221,7 +253,7 @@ def main() -> None:
         parser.error(f"Trace file not found: {args.trace}")
     print(f"Loading hand decisions from {args.trace} ...")
     HandSlideshowHandler.runs = load_trace(args.trace)
-    frame_count = sum(len(frames) for frames in HandSlideshowHandler.runs.values())
+    frame_count = sum(len(run.frames) for run in HandSlideshowHandler.runs.values())
     server = ThreadingHTTPServer(("127.0.0.1", args.port), HandSlideshowHandler)
     print(
         f"Loaded {frame_count:,} decisions across {len(HandSlideshowHandler.runs):,} runs. "
