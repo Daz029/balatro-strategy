@@ -95,6 +95,76 @@ def canonical(policy, action_tensor):
     return a_type, picks
 
 
+def rollout(pol, env, blob):
+    """Play the blind to termination; return (first-action canonical, cleared)."""
+    import torch
+
+    obs, _ = env.reset(options={"snapshot": blob})
+    first_canon = None
+    while True:
+        with torch.no_grad():
+            t, _ = pol.obs_to_tensor(obs)
+            a_t = pol.predict_deterministic(t)
+        if first_canon is None:
+            first_canon = canonical(pol, a_t)
+        a = a_t.squeeze(0).cpu().numpy().astype(np.int64, copy=False)
+        obs, _, terminated, truncated, info = env.step(a)
+        if terminated or truncated:
+            return first_canon, bool(info["balatro/cleared"])
+
+
+def _box() -> dict:
+    return {"n": 0, "a_clear": 0, "b_clear": 0, "both": 0, "only_a": 0, "only_b": 0, "neither": 0}
+
+
+def _tally(box: dict, ca: bool, cb: bool) -> None:
+    box["n"] += 1
+    box["a_clear"] += int(ca)
+    box["b_clear"] += int(cb)
+    box["both"] += int(ca and cb)
+    box["only_a"] += int(ca and not cb)
+    box["only_b"] += int(cb and not ca)
+    box["neither"] += int(not ca and not cb)
+
+
+def _summarize(box: dict) -> dict:
+    n = box["n"]
+    if n == 0:
+        return {"n": 0}
+    return {
+        "n": n,
+        "clear_rate_a": box["a_clear"] / n,
+        "clear_rate_b": box["b_clear"] / n,
+        "paired_diff_b_minus_a": (box["b_clear"] - box["a_clear"]) / n,
+        "only_a_clears": box["only_a"],
+        "only_b_clears": box["only_b"],
+        "both_clear": box["both"],
+        "neither_clears": box["neither"],
+    }
+
+
+def run_clear_rate(pol_a, pol_b, harvest_dir: Path, records) -> dict:
+    """Paired per-blind clear rate, split by first-action (dis)agreement.
+
+    Both policies are rolled out fully from the identical snapshot (agreement at
+    the first decision does NOT imply identical downstream play, so we never
+    assume it). The disagreement box is the money metric: on the states where h2
+    first chooses differently, does it clear more than h1?
+    """
+    env = HandPlayGymEnv(obs_version=2, action_version=2)
+    overall, agree, disagree = _box(), _box(), _box()
+    for blob in iter_snapshots(harvest_dir, records):
+        fa, ca = rollout(pol_a, env, blob)
+        fb, cb = rollout(pol_b, env, blob)
+        _tally(overall, ca, cb)
+        _tally(agree if fa == fb else disagree, ca, cb)
+    return {
+        "overall": _summarize(overall),
+        "first_action_agree": _summarize(agree),
+        "first_action_disagree": _summarize(disagree),
+    }
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--policy-a", type=Path, required=True)
@@ -104,15 +174,32 @@ def main() -> None:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cpu")
     p.add_argument("--output", type=Path, default=None)
+    p.add_argument(
+        "--clear-rate",
+        action="store_true",
+        help="Paired per-blind clear-rate (rollouts) instead of single-step divergence.",
+    )
     args = p.parse_args()
 
     import torch
 
     pol_a = load_pointer(args.policy_a, args.device)
     pol_b = load_pointer(args.policy_b, args.device)
-    env = HandPlayGymEnv(obs_version=2, action_version=2)
 
     records = sample_records(args.harvest_dir, args.n, args.seed)
+
+    if args.clear_rate:
+        result = run_clear_rate(pol_a, pol_b, args.harvest_dir, records)
+        result["policy_a"] = str(args.policy_a)
+        result["policy_b"] = str(args.policy_b)
+        result["harvest_dir"] = str(args.harvest_dir)
+        print(json.dumps(result, indent=2))
+        if args.output:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(json.dumps(result, indent=2), encoding="utf-8")
+        return
+
+    env = HandPlayGymEnv(obs_version=2, action_version=2)
 
     full_agree = 0
     type_agree = 0
