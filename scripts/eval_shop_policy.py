@@ -33,9 +33,12 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import dataclasses
+import enum
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -46,19 +49,211 @@ for _p in (str(_SCRIPTS_DIR), str(_REPO_ROOT)):
         sys.path.insert(0, _p)
 
 from jackdaw.agents.shop_action_space import (  # noqa: E402
+    MAX_JOKER_ROWS,
     ShopActionFamily,
     decode_shop_action,
     shop_action,
     target_combo_for_action,
 )
 from jackdaw.env.maskable_guard import install_stale_probs_guard  # noqa: E402
-from jackdaw.env.shop_gym import ShopGymEnv  # noqa: E402
+from jackdaw.env.shop_gym import BACK_KEY, STAKE, ShopGymEnv  # noqa: E402
 from jackdaw.env.shop_run_adapter import ShopRunConfig  # noqa: E402
 
 EVAL_SEED_PREFIX = "EVAL"
 
 # Generous per-episode decision budget; the env's own max_steps also caps.
 _MAX_EPISODE_STEPS = 512
+
+
+def _serialize_card(card: Any) -> dict[str, Any]:
+    """Return the identity and mutable state needed to audit a card decision.
+
+    Evaluation traces are intentionally self-contained: a later charting tool
+    should not have to replay the seed to discover what a shop slot contained.
+    """
+    base = getattr(card, "base", None)
+    base_data = None
+    if base is not None:
+        base_data = {
+            "card_key": getattr(card, "card_key", None),
+            "suit": _jsonable(getattr(base, "suit", None)),
+            "rank": _jsonable(getattr(base, "rank", None)),
+            "id": getattr(base, "id", None),
+            "nominal": getattr(base, "nominal", None),
+            "times_played": getattr(base, "times_played", None),
+        }
+    return {
+        "sort_id": getattr(card, "sort_id", None),
+        "center_key": getattr(card, "center_key", None),
+        "card_key": getattr(card, "card_key", None),
+        "name": getattr(card, "ability", {}).get("name", ""),
+        "set": getattr(card, "ability", {}).get("set", ""),
+        "ability": _jsonable(getattr(card, "ability", {})),
+        "base": base_data,
+        "edition": _jsonable(getattr(card, "edition", None)),
+        "seal": getattr(card, "seal", None),
+        "debuff": bool(getattr(card, "debuff", False)),
+        "base_cost": getattr(card, "base_cost", None),
+        "cost": getattr(card, "cost", None),
+        "sell_cost": getattr(card, "sell_cost", None),
+        "extra_cost": getattr(card, "extra_cost", None),
+        "eternal": bool(getattr(card, "eternal", False)),
+        "perishable": bool(getattr(card, "perishable", False)),
+        "perish_tally": getattr(card, "perish_tally", None),
+        "rental": bool(getattr(card, "rental", False)),
+    }
+
+
+def _jsonable(value: Any) -> Any:
+    """Convert engine values into stable JSON data for the eval dump."""
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, enum.Enum):
+        return value.value
+    if hasattr(value, "center_key") and hasattr(value, "ability"):
+        return _serialize_card(value)
+    if dataclasses.is_dataclass(value):
+        return {
+            field.name: _jsonable(getattr(value, field.name))
+            for field in dataclasses.fields(value)
+        }
+    if isinstance(value, dict):
+        return {str(_jsonable(key)): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    return repr(value)
+
+
+def _serialize_hand_levels(levels: Any) -> dict[str, Any] | None:
+    if levels is None:
+        return None
+    hands = getattr(levels, "_hands", None)
+    if hands is None:
+        return _jsonable(levels)
+    return {
+        str(getattr(hand_type, "value", hand_type)): _jsonable(state)
+        for hand_type, state in hands.items()
+    }
+
+
+def _serialize_state(
+    gs: dict[str, Any], pending: Any, *, episode_seed: str, win_ante: int, s1_schema: bool
+) -> dict[str, Any]:
+    """Capture the decision-visible run state and exact card inventories."""
+    rr = gs.get("round_resets", {})
+    cr = gs.get("current_round", {})
+    blind = gs.get("blind") or rr.get("blind")
+
+    def cards(key: str) -> list[dict[str, Any]]:
+        return [_serialize_card(card) for card in gs.get(key, [])]
+
+    return {
+        "run": {
+            "seed": episode_seed,
+            "back_key": BACK_KEY,
+            "stake": STAKE,
+            "win_ante": win_ante,
+            "s1_schema": s1_schema,
+        },
+        "phase": _jsonable(gs.get("phase")),
+        "ante": rr.get("ante", 1),
+        "round": gs.get("round", 0),
+        "dollars": gs.get("dollars", 0),
+        "chips": gs.get("chips", 0),
+        "won": bool(gs.get("won", False)),
+        "done": bool(gs.get("won", False)) or _jsonable(gs.get("phase")) == "game_over",
+        "blind_on_deck": gs.get("blind_on_deck"),
+        "blind": _jsonable(blind),
+        "current_round": _jsonable(cr),
+        "round_resets": _jsonable(rr),
+        "last_score_result": _jsonable(gs.get("last_score_result")),
+        "round_earnings": _jsonable(gs.get("round_earnings")),
+        "hand_levels": _serialize_hand_levels(gs.get("hand_levels")),
+        "resources": {
+            key: _jsonable(gs.get(key))
+            for key in (
+                "hand_size",
+                "joker_slots",
+                "consumable_slots",
+                "hands_left",
+                "discards_left",
+                "pack_choices_remaining",
+                "pack_type",
+                "used_vouchers",
+                "tags",
+                "round_scores",
+                "hands_played",
+                "cards_purchased",
+                "times_rerolled",
+            )
+            if key in gs
+        },
+        "inventory": {
+            "hand": cards("hand"),
+            "jokers": cards("jokers"),
+            "consumables": cards("consumables"),
+        },
+        "shop": {
+            "config": _jsonable(gs.get("shop", {})),
+            "cards": cards("shop_cards"),
+            "vouchers": cards("shop_vouchers"),
+            "boosters": cards("shop_boosters"),
+        },
+        "pack": {
+            "cards": cards("pack_cards"),
+            "hand": cards("pack_hand"),
+        },
+        "counts": {
+            "deck": len(gs.get("deck", [])),
+            "discard": len(gs.get("discard_pile", [])),
+            "played_cards": len(gs.get("played_cards_area", [])),
+        },
+        "pending_target": _jsonable(pending),
+    }
+
+
+def _serialize_action_target(
+    family: ShopActionFamily,
+    slot: int,
+    action: int,
+    gs: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Attach the exact card selected by a card-targeting action."""
+    sources = {
+        ShopActionFamily.BuyCard: ("shop_cards", "shop_card"),
+        ShopActionFamily.RedeemVoucher: ("shop_vouchers", "voucher"),
+        ShopActionFamily.OpenBooster: ("shop_boosters", "booster"),
+        ShopActionFamily.SellJoker: ("jokers", "joker"),
+        ShopActionFamily.SellJokerExt: ("jokers", "joker"),
+        ShopActionFamily.SellConsumable: ("consumables", "consumable"),
+        ShopActionFamily.UseConsumable: ("consumables", "consumable"),
+        ShopActionFamily.PickPackCard: ("pack_cards", "pack_card"),
+    }
+    source = sources.get(family)
+    if source is not None:
+        key, kind = source
+        entity_slot = slot + MAX_JOKER_ROWS if family is ShopActionFamily.SellJokerExt else slot
+        items = gs.get(key, [])
+        if 0 <= entity_slot < len(items):
+            return {
+                "kind": kind,
+                "slot": entity_slot,
+                "action_slot": slot,
+                "card": _serialize_card(items[entity_slot]),
+            }
+        return {"kind": kind, "slot": entity_slot, "action_slot": slot, "card": None}
+    if family is ShopActionFamily.SelectTarget:
+        combo = target_combo_for_action(action)
+        return {
+            "kind": "target_cards",
+            "slots": list(combo),
+            "cards": [
+                _serialize_card(gs["hand"][index])
+                for index in combo
+                if 0 <= index < len(gs.get("hand", []))
+            ],
+        }
+    return None
 
 
 def eval_seeds(n_episodes: int) -> list[str]:
@@ -132,6 +327,13 @@ def run_suite(
             for step_count in range(1, _MAX_EPISODE_STEPS + 1):
                 mask = info["action_mask"]
                 gs = env._adapter.raw_state
+                pre_state = _serialize_state(
+                    gs,
+                    env._pending,
+                    episode_seed=seed,
+                    win_ante=win_ante,
+                    s1_schema=s1_schema,
+                )
                 action = int(policy.act(obs, mask))
                 family, slot = decode_shop_action(action)
                 action_label = (
@@ -152,11 +354,20 @@ def run_suite(
                     "action_label": action_label,
                     "n_legal": int(mask.sum()),
                     "legal_actions": [int(i) for i in np.nonzero(mask)[0]],
+                    "action_target": _serialize_action_target(family, slot, action, gs),
+                    "pre_state": pre_state,
                 }
                 obs, _, terminated, truncated, info = env.step(action)
                 terminal = bool(terminated or truncated)
                 record["terminal"] = terminal
                 record["won"] = bool(info.get("balatro/won", False)) if terminal else None
+                record["post_state"] = _serialize_state(
+                    env._adapter.raw_state,
+                    env._pending,
+                    episode_seed=seed,
+                    win_ante=win_ante,
+                    s1_schema=s1_schema,
+                )
                 if trace_file is not None:
                     trace_file.write(json.dumps(record) + "\n")
                 if terminal:
@@ -195,8 +406,9 @@ def main() -> None:
         "--dump-decisions",
         type=Path,
         default=None,
-        help="write a full per-decision JSONL trace to this path (one JSON object "
-        "per policy decision). Aggregate metrics are unaffected.",
+        help="write a rich per-decision JSONL trace with exact pre/post card "
+        "inventories, offerings, targets, money, levels, and run state. "
+        "Aggregate metrics are unaffected.",
     )
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--s1-schema", action="store_true")
