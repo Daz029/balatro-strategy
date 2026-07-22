@@ -45,14 +45,46 @@ def test_partner_money_ordering_requires_hand_policy(monkeypatch):
         eval_shop_policy.main()
 
 
-def test_dump_decisions_writes_full_trace_without_changing_metrics(tmp_path: Path):
+def test_named_decision_dump_flags_reach_run_suite(monkeypatch, tmp_path: Path):
+    captured = {}
+    shop_path = tmp_path / "shop.jsonl"
+    hand_path = tmp_path / "hand.jsonl"
+
+    monkeypatch.setattr(eval_shop_policy, "load_policy", lambda policy, device: object())
+
+    def fake_run_suite(policy, win_ante, n_episodes, **kwargs):
+        captured.update(kwargs)
+        return {"n_played": 0, "n_dead_at_reset": 0}
+
+    monkeypatch.setattr(eval_shop_policy, "run_suite", fake_run_suite)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "eval_shop_policy.py",
+            "--policy",
+            "nextround",
+            "--dump-shop-decisions",
+            str(shop_path),
+            "--dump-hand-decisions",
+            str(hand_path),
+        ],
+    )
+
+    eval_shop_policy.main()
+
+    assert captured["dump_shop_decisions"] == shop_path
+    assert captured["dump_hand_decisions"] == hand_path
+
+
+def test_dump_shop_decisions_writes_full_trace_without_changing_metrics(tmp_path: Path):
     trace_path = tmp_path / "trace.jsonl"
     nextround_policy = eval_shop_policy.load_policy("nextround", "cpu")
     eval_shop_policy.run_suite(
         nextround_policy,
         win_ante=2,
         n_episodes=2,
-        dump_decisions=trace_path,
+        dump_shop_decisions=trace_path,
     )
 
     assert trace_path.exists()
@@ -100,7 +132,7 @@ def test_dump_decisions_writes_full_trace_without_changing_metrics(tmp_path: Pat
     assert without_dump == baseline
 
 
-def test_dump_decisions_captures_exact_cards_and_game_state(tmp_path: Path):
+def test_dump_shop_decisions_captures_exact_cards_and_game_state(tmp_path: Path):
     class BuyFirstPolicy:
         def act(self, obs, mask):
             buy = shop_action(ShopActionFamily.BuyCard, 0)
@@ -117,7 +149,7 @@ def test_dump_decisions_captures_exact_cards_and_game_state(tmp_path: Path):
         BuyFirstPolicy(),
         win_ante=2,
         n_episodes=1,
-        dump_decisions=trace_path,
+        dump_shop_decisions=trace_path,
     )
 
     records = [json.loads(line) for line in trace_path.read_text().splitlines()]
@@ -133,6 +165,45 @@ def test_dump_decisions_captures_exact_cards_and_game_state(tmp_path: Path):
     assert pre_state["current_round"]
     assert record["action_target"]["kind"] == "shop_card"
     assert record["action_target"]["card"] == pre_state["shop"]["cards"][0]
+
+
+def test_dump_hand_decisions_captures_detailed_play_fingerprint(tmp_path: Path):
+    trace_path = tmp_path / "hand-trace.jsonl"
+
+    eval_shop_policy.run_suite(
+        eval_shop_policy.load_policy("nextround", "cpu"),
+        win_ante=2,
+        n_episodes=1,
+        dump_hand_decisions=trace_path,
+    )
+
+    records = [json.loads(line) for line in trace_path.read_text().splitlines()]
+    play = next(record for record in records if record["action_type"] == "PlayHand")
+
+    assert play["seed"] == "EVAL_00000000"
+    assert play["hand_decision_index"] >= 1
+    assert play["ante"] >= 1
+    assert play["round"] >= 0
+    assert play["blind"]
+    assert isinstance(play["money"], int)
+    assert isinstance(play["hands_left"], int)
+    assert isinstance(play["discards_left"], int)
+    assert isinstance(play["jokers"], list)
+    assert isinstance(play["consumables"], list)
+    assert isinstance(play["points"], int)
+    assert isinstance(play["blind_points"], int)
+    assert play["blind_points"] > 0
+    assert play["cards_in_hand"]
+    assert play["cards_in_deck"]
+    assert play["played_hand"]
+    assert play["played_hand"] == [
+        play["cards_in_hand"][index] for index in play["selected_indices"]
+    ]
+    assert isinstance(play["hand_point_value"], int)
+    assert play["hand_point_value"] == play["post_points"] - play["points"]
+    assert play["hand_type"]
+    assert isinstance(play["hand_chips"], (int, float))
+    assert isinstance(play["hand_mult"], (int, float))
 
 
 def test_extended_sell_joker_target_uses_absolute_joker_row():

@@ -806,7 +806,7 @@ and installing it on the eval checkpoint path.
 
 ## Tooling added this session
 
-`scripts/eval_shop_policy.py --dump-decisions <path>` writes a full per-decision
+`scripts/eval_shop_policy.py --dump-shop-decisions <path>` writes a full per-decision
 JSONL trace (state at the decision, decoded action family/slot/label, legal set,
 terminal/won). Opt-in; aggregate metrics unchanged when absent. This is how the
 buy/sell churn above was read, and it is the instrument for actually *seeing*

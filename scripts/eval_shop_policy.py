@@ -55,6 +55,7 @@ from jackdaw.agents.shop_action_space import (  # noqa: E402
     shop_action,
     target_combo_for_action,
 )
+from jackdaw.engine.actions import Action, PlayHand  # noqa: E402
 from jackdaw.env.maskable_guard import install_stale_probs_guard  # noqa: E402
 from jackdaw.env.shop_gym import BACK_KEY, STAKE, ShopGymEnv  # noqa: E402
 from jackdaw.env.shop_run_adapter import ShopRunConfig  # noqa: E402
@@ -114,8 +115,7 @@ def _jsonable(value: Any) -> Any:
         return _serialize_card(value)
     if dataclasses.is_dataclass(value):
         return {
-            field.name: _jsonable(getattr(value, field.name))
-            for field in dataclasses.fields(value)
+            field.name: _jsonable(getattr(value, field.name)) for field in dataclasses.fields(value)
         }
     if isinstance(value, dict):
         return {str(_jsonable(key)): _jsonable(item) for key, item in value.items()}
@@ -256,6 +256,81 @@ def _serialize_action_target(
     return None
 
 
+def _serialize_hand_decision(
+    *,
+    seed: str,
+    hand_decision_index: int,
+    pre_state: dict[str, Any],
+    action: Action,
+    post_state: dict[str, Any],
+) -> dict[str, Any]:
+    """Build one self-contained fingerprint for an auto-resolved hand decision."""
+    selected_indices = list(getattr(action, "card_indices", ()))
+    hand = pre_state.get("hand", [])
+    selected_cards = [
+        _serialize_card(hand[index]) for index in selected_indices if 0 <= index < len(hand)
+    ]
+    played = isinstance(action, PlayHand)
+    score_result = post_state.get("last_score_result") if played else None
+    blind = pre_state.get("blind") or pre_state.get("round_resets", {}).get("blind")
+    current_round = pre_state.get("current_round", {})
+
+    return {
+        "seed": seed,
+        "hand_decision_index": hand_decision_index,
+        "ante": pre_state.get("round_resets", {}).get("ante", 1),
+        "round": pre_state.get("round", 0),
+        "blind": _jsonable(blind),
+        "blind_points": int(getattr(blind, "chips", 0)),
+        "money": int(pre_state.get("dollars", 0)),
+        "points": int(pre_state.get("chips", 0)),
+        "post_points": int(post_state.get("chips", 0)),
+        "hands_left": int(current_round.get("hands_left", 0)),
+        "discards_left": int(current_round.get("discards_left", 0)),
+        "action_type": type(action).__name__,
+        "selected_indices": selected_indices,
+        "selected_cards": selected_cards,
+        "jokers": [_serialize_card(card) for card in pre_state.get("jokers", [])],
+        "consumables": [_serialize_card(card) for card in pre_state.get("consumables", [])],
+        "cards_in_hand": [_serialize_card(card) for card in hand],
+        "cards_in_deck": [_serialize_card(card) for card in pre_state.get("deck", [])],
+        "cards_in_discard": [_serialize_card(card) for card in pre_state.get("discard_pile", [])],
+        "played_hand": selected_cards if played else [],
+        "hand_point_value": int(score_result.total) if score_result is not None else None,
+        "hand_type": score_result.hand_type if score_result is not None else None,
+        "hand_chips": score_result.chips if score_result is not None else None,
+        "hand_mult": score_result.mult if score_result is not None else None,
+        "score": _jsonable(score_result),
+    }
+
+
+class _HandDecisionTraceWriter:
+    def __init__(self, trace_file: Any) -> None:
+        self._trace_file = trace_file
+        self._seed = ""
+        self._hand_decision_index = 0
+
+    def start_episode(self, seed: str) -> None:
+        self._seed = seed
+        self._hand_decision_index = 0
+
+    def observe(
+        self,
+        pre_state: dict[str, Any],
+        action: Action,
+        post_state: dict[str, Any],
+    ) -> None:
+        self._hand_decision_index += 1
+        record = _serialize_hand_decision(
+            seed=self._seed,
+            hand_decision_index=self._hand_decision_index,
+            pre_state=pre_state,
+            action=action,
+            post_state=post_state,
+        )
+        self._trace_file.write(json.dumps(record) + "\n")
+
+
 def eval_seeds(n_episodes: int) -> list[str]:
     return [f"{EVAL_SEED_PREFIX}_{i:08d}" for i in range(n_episodes)]
 
@@ -297,12 +372,9 @@ def run_suite(
     n_episodes: int,
     hand_policy=None,
     s1_schema: bool = False,
-    dump_decisions: Path | None = None,
+    dump_shop_decisions: Path | None = None,
+    dump_hand_decisions: Path | None = None,
 ) -> dict:
-    env = ShopGymEnv(
-        config=ShopRunConfig(win_ante=win_ante, s1_schema=s1_schema),
-        hand_policy=hand_policy,
-    )
     wins: list[bool] = []
     final_antes: list[int] = []
     rounds_cleared: list[int] = []
@@ -310,12 +382,27 @@ def run_suite(
     dead_at_reset = 0
 
     with contextlib.ExitStack() as stack:
-        trace_file = None
-        if dump_decisions is not None:
-            dump_decisions.parent.mkdir(parents=True, exist_ok=True)
-            trace_file = stack.enter_context(dump_decisions.open("w", encoding="utf-8"))
+        shop_trace_file = None
+        if dump_shop_decisions is not None:
+            dump_shop_decisions.parent.mkdir(parents=True, exist_ok=True)
+            shop_trace_file = stack.enter_context(dump_shop_decisions.open("w", encoding="utf-8"))
+        hand_trace_writer = None
+        if dump_hand_decisions is not None:
+            dump_hand_decisions.parent.mkdir(parents=True, exist_ok=True)
+            hand_trace_file = stack.enter_context(dump_hand_decisions.open("w", encoding="utf-8"))
+            hand_trace_writer = _HandDecisionTraceWriter(hand_trace_file)
+
+        env = ShopGymEnv(
+            config=ShopRunConfig(win_ante=win_ante, s1_schema=s1_schema),
+            hand_policy=hand_policy,
+            hand_decision_observer=(
+                hand_trace_writer.observe if hand_trace_writer is not None else None
+            ),
+        )
 
         for seed in eval_seeds(n_episodes):
+            if hand_trace_writer is not None:
+                hand_trace_writer.start_episode(seed)
             try:
                 obs, info = env.reset(options={"episode_seed": seed})
             except RuntimeError:
@@ -368,8 +455,8 @@ def run_suite(
                     win_ante=win_ante,
                     s1_schema=s1_schema,
                 )
-                if trace_file is not None:
-                    trace_file.write(json.dumps(record) + "\n")
+                if shop_trace_file is not None:
+                    shop_trace_file.write(json.dumps(record) + "\n")
                 if terminal:
                     wins.append(bool(info.get("balatro/won", False)))
                     final_antes.append(int(info.get("balatro/ante", 1)))
@@ -403,12 +490,24 @@ def main() -> None:
     parser.add_argument("--n-episodes", type=int, default=200)
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument(
-        "--dump-decisions",
+        "--dump-shop-decisions",
+        "--dump_shop_decisions",
+        dest="dump_shop_decisions",
         type=Path,
         default=None,
         help="write a rich per-decision JSONL trace with exact pre/post card "
         "inventories, offerings, targets, money, levels, and run state. "
         "Aggregate metrics are unaffected.",
+    )
+    parser.add_argument(
+        "--dump-hand-decisions",
+        "--dump_hand_decisions",
+        dest="dump_hand_decisions",
+        type=Path,
+        default=None,
+        help="write one detailed JSONL fingerprint per auto-resolved hand "
+        "decision, including ante, blind, money, points, cards, selected "
+        "play/discard, and the resulting hand score",
     )
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--s1-schema", action="store_true")
@@ -443,7 +542,8 @@ def main() -> None:
         args.n_episodes,
         hand_policy=hand_policy,
         s1_schema=args.s1_schema,
-        dump_decisions=args.dump_decisions,
+        dump_shop_decisions=args.dump_shop_decisions,
+        dump_hand_decisions=args.dump_hand_decisions,
     )
     result["policy"] = args.policy
     result["hand_policy"] = str(args.hand_policy) if args.hand_policy is not None else "greedy"

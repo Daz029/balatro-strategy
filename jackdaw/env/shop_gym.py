@@ -123,7 +123,12 @@ from jackdaw.engine.actions import (
 from jackdaw.engine.consumables import can_use_consumable
 from jackdaw.env.action_space import get_action_mask, get_consumable_target_info
 from jackdaw.env.shop_obs import PendingTarget, build_shop_observation, observation_space
-from jackdaw.env.shop_run_adapter import DECISION_PHASES, ShopRunAdapter, ShopRunConfig
+from jackdaw.env.shop_run_adapter import (
+    DECISION_PHASES,
+    HandDecisionObserver,
+    ShopRunAdapter,
+    ShopRunConfig,
+)
 
 BACK_KEY = "b_red"
 STAKE = 1
@@ -247,6 +252,10 @@ class ShopGymEnv(gymnasium.Env):
         :meth:`snapshot` restores it as the episode start; returning
         ``None`` starts a fresh run. This is the reservoir hook — the
         mixture policy lives in the training script, not here.
+    hand_decision_observer:
+        Optional diagnostic callback receiving the state before a hand-policy
+        action, the chosen action, and the resulting state. Enabling it copies
+        hand-decision states and is intended for evaluation traces, not training.
     """
 
     metadata: dict[str, Any] = {"render_modes": []}
@@ -258,6 +267,7 @@ class ShopGymEnv(gymnasium.Env):
         seed_prefix: str = "SHOPPPO",
         max_steps: int = DEFAULT_MAX_STEPS,
         start_state_sampler: Callable[[], bytes | None] | None = None,
+        hand_decision_observer: HandDecisionObserver | None = None,
     ) -> None:
         super().__init__()
         if hand_policy is None:
@@ -269,7 +279,11 @@ class ShopGymEnv(gymnasium.Env):
         # behavior) and this env (obs/action-space sizing, mask/decode)
         # both read it off the SAME config, so they can never disagree.
         self._s1_schema = config.s1_schema
-        self._adapter = ShopRunAdapter(hand_policy, config)
+        self._adapter = ShopRunAdapter(
+            hand_policy,
+            config,
+            hand_decision_observer=hand_decision_observer,
+        )
         self._seed_prefix = seed_prefix
         self._max_steps = max_steps
         self._sampler = start_state_sampler

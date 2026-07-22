@@ -31,6 +31,7 @@ sampling policy live with the gym env, not here.
 
 from __future__ import annotations
 
+import copy
 import pickle
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -38,6 +39,8 @@ from typing import Any
 
 from jackdaw.engine.actions import Action, CashOut, GamePhase, SelectBlind
 from jackdaw.env.game_interface import GameState, snapshot
+
+HandDecisionObserver = Callable[[dict[str, Any], Action, dict[str, Any]], None]
 
 # Phases where control returns to the shop agent.
 DECISION_PHASES = frozenset({GamePhase.SHOP, GamePhase.PACK_OPENING})
@@ -74,9 +77,12 @@ class ShopRunAdapter:
         self,
         hand_policy: Callable[[dict[str, Any]], Action],
         config: ShopRunConfig | None = None,
+        *,
+        hand_decision_observer: HandDecisionObserver | None = None,
     ) -> None:
         self._hand_policy = hand_policy
         self._config = config or ShopRunConfig()
+        self._hand_decision_observer = hand_decision_observer
         self._gs: dict[str, Any] = {}
 
     # -- GameAdapter protocol -------------------------------------------------
@@ -164,7 +170,13 @@ class ShopRunAdapter:
                     return
                 engine_step(self._gs, SelectBlind())
             elif phase == GamePhase.SELECTING_HAND:
-                engine_step(self._gs, self._hand_policy(self._gs))
+                pre_state = (
+                    copy.deepcopy(self._gs) if self._hand_decision_observer is not None else None
+                )
+                action = self._hand_policy(self._gs)
+                engine_step(self._gs, action)
+                if self._hand_decision_observer is not None:
+                    self._hand_decision_observer(pre_state, action, self._gs)
             elif phase == GamePhase.ROUND_EVAL:
                 engine_step(self._gs, CashOut())
             else:
