@@ -5,8 +5,9 @@ decision order and flattens the useful parts of each pre/post state so the
 result can be inspected in a spreadsheet or used as the input to a later
 steppable viewer.
 
-By default, rows from the ``shop`` and ``pack_opening`` phases are exported.
-Use ``--all-phases`` when blind-selection rows are also wanted.
+By default, rows from the ``blind_select``, ``shop``, and ``pack_opening``
+phases are exported, preserving both play-blind and skip-blind decisions.
+Use ``--all-phases`` when any future phases are also wanted.
 
 Usage::
 
@@ -25,7 +26,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_INPUT = ROOT / "data" / "dumped_eval_rich.jsonl"
-SHOP_PHASES = frozenset({"shop", "pack_opening"})
+DECISION_PHASES = frozenset({"blind_select", "shop", "pack_opening"})
 
 FIELDNAMES = (
     "seed",
@@ -247,7 +248,7 @@ def convert_trace(
     input_path: Path,
     output_path: Path,
     *,
-    phases: frozenset[str] | None = SHOP_PHASES,
+    phases: frozenset[str] | None = DECISION_PHASES,
 ) -> tuple[int, int]:
     """Convert ``input_path`` and return ``(written_rows, skipped_rows)``."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -283,13 +284,13 @@ def main() -> None:
     parser.add_argument(
         "--all-phases",
         action="store_true",
-        help="include blind_select and any other phases in addition to shop/pack_opening",
+        help="include any phases beyond blind_select, shop, and pack_opening",
     )
     args = parser.parse_args()
     output = args.output or args.input.with_name(f"{args.input.stem}_shop.csv")
-    phases = None if args.all_phases else SHOP_PHASES
+    phases = None if args.all_phases else DECISION_PHASES
     written, skipped = convert_trace(args.input, output, phases=phases)
-    print(f"wrote {written:,} rows to {output} (skipped {skipped:,} non-shop rows)")
+    print(f"wrote {written:,} rows to {output} (skipped {skipped:,} other-phase rows)")
 
 
 if __name__ == "__main__":

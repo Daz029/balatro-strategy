@@ -62,14 +62,24 @@ def _record(phase: str = "shop") -> dict:
 def test_convert_trace_flattens_shop_decision(tmp_path: Path):
     source = tmp_path / "trace.jsonl"
     output = tmp_path / "decisions.csv"
+    blind_record = _record("blind_select")
+    blind_record.update(
+        action=686,
+        action_family="SkipBlind",
+        action_label="SkipBlind[0]",
+        action_target=None,
+    )
     source.write_text(
-        "\n".join(json.dumps(record) for record in (_record(), _record("blind_select"))) + "\n",
+        "\n".join(
+            json.dumps(record) for record in (_record(), blind_record, _record("round_eval"))
+        )
+        + "\n",
         encoding="utf-8",
     )
 
     written, skipped = export_shop_decisions_csv.convert_trace(source, output)
 
-    assert (written, skipped) == (1, 1)
+    assert (written, skipped) == (2, 1)
     with output.open(newline="", encoding="utf-8") as file:
         rows = list(csv.DictReader(file))
     row = rows[0]
@@ -80,11 +90,13 @@ def test_convert_trace_flattens_shop_decision(tmp_path: Path):
     assert row["dollars_after"] == "6"
     assert row["money_delta"] == "-4"
     assert json.loads(row["available_cards_json"])["shop_cards"][0]["center_key"] == "j_mad"
+    assert rows[1]["phase"] == "blind_select"
+    assert rows[1]["action_family"] == "SkipBlind"
 
 
 def test_all_phases_can_be_exported(tmp_path: Path):
     source = tmp_path / "trace.jsonl"
     output = tmp_path / "decisions.csv"
-    source.write_text(json.dumps(_record("blind_select")) + "\n", encoding="utf-8")
+    source.write_text(json.dumps(_record("round_eval")) + "\n", encoding="utf-8")
 
     assert export_shop_decisions_csv.convert_trace(source, output, phases=None) == (1, 0)
