@@ -207,7 +207,16 @@ class TestRewardWrapper:
         obs, info = env.reset(options={"episode_seed": seed})
         return env, schedules, obs, info
 
-    def _make_transaction_stub(self, *, reward=-0.1, decay=True, jokers=None, shop_cards=None):
+    def _make_transaction_stub(
+        self,
+        *,
+        reward=-0.1,
+        decay=True,
+        jokers=None,
+        shop_cards=None,
+        skip_tag_reward=None,
+        skip_tag_decay=True,
+    ):
         schedules = TrainingSchedules(blend_beta0=0.0, count_beta0=0.0)
         env = ShopRewardWrapper(
             _JokerTransactionStub(jokers or [], shop_cards or []),
@@ -215,6 +224,8 @@ class TestRewardWrapper:
             CountBonus(),
             immediate_joker_sell_reward=reward,
             immediate_joker_sell_decay=decay,
+            skip_tag_reward=skip_tag_reward,
+            skip_tag_decay=skip_tag_decay,
         )
         env.reset()
         return env, schedules
@@ -286,6 +297,35 @@ class TestRewardWrapper:
 
         with pytest.raises(SystemExit):
             parse_args(["--immediate-joker-sell-no-decay"])
+
+        args = parse_args(["--skip-tag-reward", "-0.3", "--skip-tag-no-decay"])
+        assert args.skip_tag_reward == -0.3
+        assert args.skip_tag_no_decay is True
+
+        with pytest.raises(SystemExit):
+            parse_args(["--skip-tag-no-decay"])
+
+    def test_skip_tag_reward_fires_only_on_skip_blind(self):
+        env, schedules = self._make_transaction_stub(skip_tag_reward=-0.4)
+        schedules.progress_remaining = 0.25
+
+        _, reward, _, _, info = env.step(shop_action(ShopActionFamily.SkipBlind))
+        assert reward == pytest.approx(-0.1)
+        assert info["reward_components"]["skip_tag_reward"] == pytest.approx(-0.1)
+
+        _, reward, _, _, info = env.step(shop_action(ShopActionFamily.NextRound))
+        assert reward == 0.0
+        assert info["reward_components"]["skip_tag_reward"] == 0.0
+
+    def test_skip_tag_reward_can_remain_constant(self):
+        env, schedules = self._make_transaction_stub(
+            skip_tag_reward=-0.4, skip_tag_decay=False
+        )
+        schedules.progress_remaining = 0.25
+
+        _, reward, _, _, info = env.step(shop_action(ShopActionFamily.SkipBlind))
+        assert reward == pytest.approx(-0.4)
+        assert info["reward_components"]["skip_tag_reward"] == pytest.approx(-0.4)
 
     def test_blends_blind_bonus(self):
         env, schedules, _, _ = self._make()

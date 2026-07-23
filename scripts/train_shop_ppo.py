@@ -363,7 +363,8 @@ class ShopRewardWrapper(gymnasium.Wrapper):
     reported in ``info["reward_components"]`` for logging/diagnosis. When
     configured, a joker bought on the immediately preceding step and then
     sold receives the configured reward; any intervening action clears that
-    tracker. Its decay can be disabled explicitly for experiments.
+    tracker. A configured skip-tag reward similarly fires on ``SkipBlind``.
+    Either reward's decay can be disabled explicitly for experiments.
     """
 
     def __init__(
@@ -377,6 +378,8 @@ class ShopRewardWrapper(gymnasium.Wrapper):
         phi: Callable[[dict[str, Any]], float] | None = None,
         immediate_joker_sell_reward: float | None = None,
         immediate_joker_sell_decay: bool = True,
+        skip_tag_reward: float | None = None,
+        skip_tag_decay: bool = True,
     ) -> None:
         super().__init__(env)
         self._schedules = schedules
@@ -390,6 +393,8 @@ class ShopRewardWrapper(gymnasium.Wrapper):
         self._phi_prev = 0.0
         self._immediate_joker_sell_reward = immediate_joker_sell_reward
         self._immediate_joker_sell_decay = immediate_joker_sell_decay
+        self._skip_tag_reward = skip_tag_reward
+        self._skip_tag_decay = skip_tag_decay
 
     # sb3-contrib discovers masking via this method; define it explicitly
     # rather than relying on Wrapper.__getattr__ forwarding.
@@ -477,6 +482,7 @@ class ShopRewardWrapper(gymnasium.Wrapper):
         carrier_key_before = self._pending_carrier_key()
         was_pending = self.env.pending is not None
         decoded, bought_joker, sold_joker = self._joker_transaction_state(action)
+        skip_tag_decision = decoded is not None and decoded[0] is ShopActionFamily.SkipBlind
         immediate_joker_sell = (
             decoded is not None
             and decoded[0] in (ShopActionFamily.SellJoker, ShopActionFamily.SellJokerExt)
@@ -524,6 +530,12 @@ class ShopRewardWrapper(gymnasium.Wrapper):
             joker_sell_reward = self._immediate_joker_sell_reward * decay
         rc["immediate_joker_sell_reward"] = joker_sell_reward
 
+        skip_tag_reward = 0.0
+        if skip_tag_decision and self._skip_tag_reward is not None:
+            decay = self._schedules.progress_remaining if self._skip_tag_decay else 1.0
+            skip_tag_reward = self._skip_tag_reward * decay
+        rc["skip_tag_reward"] = skip_tag_reward
+
         if (
             self._reservoir is not None
             and not (terminated or truncated)
@@ -536,6 +548,7 @@ class ShopRewardWrapper(gymnasium.Wrapper):
 
         total_reward = reward + bonus + count_bonus
         total_reward += joker_sell_reward
+        total_reward += skip_tag_reward
         if self._phi is not None:
             total_reward += phi_term
         return obs, total_reward, terminated, truncated, info
@@ -574,6 +587,8 @@ def make_train_env(
     phi: Callable[[dict[str, Any]], float] | None = None,
     immediate_joker_sell_reward: float | None = None,
     immediate_joker_sell_decay: bool = True,
+    skip_tag_reward: float | None = None,
+    skip_tag_decay: bool = True,
 ) -> DummyVecEnv:
     # One partner instance shared across all envs: DummyVecEnv is single-process
     # and the hand policy is a deterministic, stateless argmax, so sharing is
@@ -597,6 +612,8 @@ def make_train_env(
                 phi=phi,
                 immediate_joker_sell_reward=immediate_joker_sell_reward,
                 immediate_joker_sell_decay=immediate_joker_sell_decay,
+                skip_tag_reward=skip_tag_reward,
+                skip_tag_decay=skip_tag_decay,
             )
 
         return _make
@@ -786,6 +803,8 @@ def build_model(
     phi: Callable[[dict[str, Any]], float] | None = None,
     immediate_joker_sell_reward: float | None = None,
     immediate_joker_sell_decay: bool = True,
+    skip_tag_reward: float | None = None,
+    skip_tag_decay: bool = True,
 ) -> tuple[MaskablePPO, TrainingSchedules]:
     """Construct (or resume) the shop MaskablePPO with its training env."""
     schedules = schedules or TrainingSchedules()
@@ -811,6 +830,8 @@ def build_model(
             phi=phi,
             immediate_joker_sell_reward=immediate_joker_sell_reward,
             immediate_joker_sell_decay=immediate_joker_sell_decay,
+            skip_tag_reward=skip_tag_reward,
+            skip_tag_decay=skip_tag_decay,
         )
         _attach_widened_model(
             model,
@@ -838,6 +859,8 @@ def build_model(
         phi=phi,
         immediate_joker_sell_reward=immediate_joker_sell_reward,
         immediate_joker_sell_decay=immediate_joker_sell_decay,
+        skip_tag_reward=skip_tag_reward,
+        skip_tag_decay=skip_tag_decay,
     )
 
     if init_from is not None:
@@ -940,6 +963,18 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="keep --immediate-joker-sell-reward constant instead of decaying to zero",
     )
+    parser.add_argument(
+        "--skip-tag-reward",
+        type=float,
+        default=None,
+        help="enable and set the reward for taking a SkipBlind/tag decision "
+        "(for example -0.1); omit to disable",
+    )
+    parser.add_argument(
+        "--skip-tag-no-decay",
+        action="store_true",
+        help="keep --skip-tag-reward constant instead of decaying to zero",
+    )
     parser.add_argument("--fresh-frac", type=float, default=0.5)
     parser.add_argument("--pack-frac", type=float, default=0.3)
     parser.add_argument("--harvest-prob", type=float, default=0.02)
@@ -978,6 +1013,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             parser.error("--init-temperature must be positive")
     if args.immediate_joker_sell_no_decay and args.immediate_joker_sell_reward is None:
         parser.error("--immediate-joker-sell-no-decay requires --immediate-joker-sell-reward")
+    if args.skip_tag_no_decay and args.skip_tag_reward is None:
+        parser.error("--skip-tag-no-decay requires --skip-tag-reward")
     return args
 
 
@@ -1030,6 +1067,8 @@ def main() -> None:
         phi=phi,
         immediate_joker_sell_reward=args.immediate_joker_sell_reward,
         immediate_joker_sell_decay=not args.immediate_joker_sell_no_decay,
+        skip_tag_reward=args.skip_tag_reward,
+        skip_tag_decay=not args.skip_tag_no_decay,
     )
 
     # Eval on the reserved EVAL_* stream: plain env, no wrapper — mean
