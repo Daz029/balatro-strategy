@@ -54,11 +54,15 @@ def _upcoming_blind(state: dict[str, Any]) -> dict[str, Any]:
 def _card(card: dict[str, Any] | None) -> dict[str, Any] | None:
     if not card:
         return None
+    base = card.get("base") or {}
     ability = card.get("ability") or {}
     edition = card.get("edition") or {}
     detail_parts = [ability.get("effect"), ability.get("type")]
+    rank = base.get("rank")
+    suit = base.get("suit")
+    name = f"{rank} of {suit}" if rank and suit else None
     return {
-        "name": card.get("name") or ability.get("name") or card.get("center_key") or "Unknown",
+        "name": name or card.get("name") or ability.get("name") or card.get("center_key") or "Unknown",
         "key": card.get("center_key") or card.get("card_key"),
         "set": card.get("set") or ability.get("set") or "Card",
         "cost": card.get("cost"),
