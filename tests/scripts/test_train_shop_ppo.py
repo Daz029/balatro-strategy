@@ -14,6 +14,8 @@ Critical invariants:
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
@@ -42,6 +44,7 @@ from jackdaw.agents.shop_action_space import (  # noqa: E402
     NUM_TOTAL_ACTIONS,
     NUM_TOTAL_ACTIONS_S1,
     ShopActionFamily,
+    decode_shop_action,
     shop_action,
 )
 from jackdaw.env.shop_gym import ShopGymEnv, blind_clear_bonus  # noqa: E402
@@ -51,6 +54,54 @@ from jackdaw.env.shop_run_adapter import ShopRunConfig  # noqa: E402
 def _card_set(card) -> str:
     ability = getattr(card, "ability", None)
     return ability.get("set", "") if isinstance(ability, dict) else ""
+
+
+class _JokerTransactionStub(gymnasium.Env):
+    observation_space = spaces.Box(0, 1, (1,), dtype=np.float32)
+    action_space = spaces.Discrete(NUM_TOTAL_ACTIONS_S1)
+
+    def __init__(self, jokers, shop_cards):
+        self.raw_state = {
+            "jokers": list(jokers),
+            "shop_cards": list(shop_cards),
+            "round_resets": {"ante": 1},
+        }
+        self.pending = None
+
+    def reset(self, **kwargs):
+        return np.zeros(1, dtype=np.float32), {
+            "reward_components": {"blind_bonus": 0.0, "win": 0.0}
+        }
+
+    def step(self, action):
+        family, slot = decode_shop_action(action)
+        if family is ShopActionFamily.BuyCard:
+            card = self.raw_state["shop_cards"].pop(slot)
+            if _card_set(card) == "Joker":
+                self.raw_state["jokers"].append(card)
+        elif family is ShopActionFamily.SellJoker:
+            self.raw_state["jokers"].pop(slot)
+        return (
+            np.zeros(1, dtype=np.float32),
+            0.0,
+            False,
+            False,
+            {"reward_components": {"blind_bonus": 0.0, "win": 0.0}},
+        )
+
+    def action_masks(self):
+        return np.ones(NUM_TOTAL_ACTIONS_S1, dtype=bool)
+
+
+def _joker(key="j_zany_joker", *, edition=None, **stickers):
+    return SimpleNamespace(
+        center_key=key,
+        ability={"set": "Joker"},
+        edition=edition,
+        eternal=stickers.get("eternal", False),
+        perishable=stickers.get("perishable", False),
+        rental=stickers.get("rental", False),
+    )
 
 
 class TestSchedules:
@@ -155,6 +206,86 @@ class TestRewardWrapper:
         )
         obs, info = env.reset(options={"episode_seed": seed})
         return env, schedules, obs, info
+
+    def _make_transaction_stub(self, *, reward=-0.1, decay=True, jokers=None, shop_cards=None):
+        schedules = TrainingSchedules(blend_beta0=0.0, count_beta0=0.0)
+        env = ShopRewardWrapper(
+            _JokerTransactionStub(jokers or [], shop_cards or []),
+            schedules,
+            CountBonus(),
+            immediate_joker_sell_reward=reward,
+            immediate_joker_sell_decay=decay,
+        )
+        env.reset()
+        return env, schedules
+
+    def test_immediate_duplicate_joker_sale_ignores_position(self):
+        env, _ = self._make_transaction_stub(
+            jokers=[_joker() for _ in range(3)],
+            shop_cards=[_joker()],
+        )
+
+        env.step(shop_action(ShopActionFamily.BuyCard, 0))
+        _, reward, _, _, info = env.step(shop_action(ShopActionFamily.SellJoker, 0))
+
+        assert reward == pytest.approx(-0.1)
+        assert info["reward_components"]["immediate_joker_sell_reward"] == pytest.approx(-0.1)
+
+    def test_tracker_requires_matching_stickers_and_editions(self):
+        env, _ = self._make_transaction_stub(
+            jokers=[_joker(edition={"foil": True}, rental=True), _joker()],
+            shop_cards=[_joker()],
+        )
+
+        env.step(shop_action(ShopActionFamily.BuyCard, 0))
+        _, reward, _, _, info = env.step(shop_action(ShopActionFamily.SellJoker, 0))
+
+        assert reward == 0.0
+        assert info["reward_components"]["immediate_joker_sell_reward"] == 0.0
+
+    def test_any_intervening_action_clears_tracker_and_buy_overwrites_it(self):
+        env, _ = self._make_transaction_stub(
+            jokers=[_joker(), _joker("j_mad_joker")],
+            shop_cards=[_joker(), _joker("j_mad_joker")],
+        )
+
+        env.step(shop_action(ShopActionFamily.BuyCard, 0))
+        env.step(shop_action(ShopActionFamily.BuyCard, 0))
+        _, reward, _, _, info = env.step(shop_action(ShopActionFamily.SellJoker, 0))
+        assert reward == 0.0
+        assert info["reward_components"]["immediate_joker_sell_reward"] == 0.0
+
+        env.step(shop_action(ShopActionFamily.Reroll))
+        _, reward, _, _, info = env.step(shop_action(ShopActionFamily.SellJoker, 0))
+        assert reward == 0.0
+        assert info["reward_components"]["immediate_joker_sell_reward"] == 0.0
+
+    def test_reward_can_decay_or_remain_constant(self):
+        decayed, schedules = self._make_transaction_stub(
+            reward=-0.4, decay=True, jokers=[_joker()], shop_cards=[_joker()]
+        )
+        schedules.progress_remaining = 0.25
+        decayed.step(shop_action(ShopActionFamily.BuyCard, 0))
+        _, reward, _, _, _ = decayed.step(shop_action(ShopActionFamily.SellJoker, 0))
+        assert reward == pytest.approx(-0.1)
+
+        constant, schedules = self._make_transaction_stub(
+            reward=-0.4, decay=False, jokers=[_joker()], shop_cards=[_joker()]
+        )
+        schedules.progress_remaining = 0.25
+        constant.step(shop_action(ShopActionFamily.BuyCard, 0))
+        _, reward, _, _, _ = constant.step(shop_action(ShopActionFamily.SellJoker, 0))
+        assert reward == pytest.approx(-0.4)
+
+    def test_reward_flag_enables_feature_and_no_decay_requires_reward(self):
+        args = parse_args(
+            ["--immediate-joker-sell-reward", "-0.25", "--immediate-joker-sell-no-decay"]
+        )
+        assert args.immediate_joker_sell_reward == -0.25
+        assert args.immediate_joker_sell_no_decay is True
+
+        with pytest.raises(SystemExit):
+            parse_args(["--immediate-joker-sell-no-decay"])
 
     def test_blends_blind_bonus(self):
         env, schedules, _, _ = self._make()

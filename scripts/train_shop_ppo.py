@@ -92,6 +92,9 @@ from jackdaw.agents.phi_shaping import S0CriticPhi  # noqa: E402
 from jackdaw.agents.shop_action_space import (  # noqa: E402
     NUM_TOTAL_ACTIONS,
     NUM_TOTAL_ACTIONS_S1,
+    ShopActionFamily,
+    decode_shop_action,
+    joker_row_for_sell_action,
     target_combo_for_action,
 )
 from jackdaw.agents.shop_policy import ShopFeaturesExtractor  # noqa: E402
@@ -355,9 +358,12 @@ class ShopReservoir:
 class ShopRewardWrapper(gymnasium.Wrapper):
     """Blends reward components, adds count bonuses, harvests snapshots.
 
-    The wrapped env's reward stays the honest ``1{win}``; everything added
-    here is scheduled to zero by end of training. All extra terms are also
-    reported in ``info["reward_components"]`` for logging/diagnosis.
+    The wrapped env's reward stays the honest ``1{win}``; the existing shaping
+    terms are scheduled to zero by end of training. All extra terms are also
+    reported in ``info["reward_components"]`` for logging/diagnosis. When
+    configured, a joker bought on the immediately preceding step and then
+    sold receives the configured reward; any intervening action clears that
+    tracker. Its decay can be disabled explicitly for experiments.
     """
 
     def __init__(
@@ -369,6 +375,8 @@ class ShopRewardWrapper(gymnasium.Wrapper):
         harvest_prob: float = 0.02,
         seed: int = 0,
         phi: Callable[[dict[str, Any]], float] | None = None,
+        immediate_joker_sell_reward: float | None = None,
+        immediate_joker_sell_decay: bool = True,
     ) -> None:
         super().__init__(env)
         self._schedules = schedules
@@ -377,8 +385,11 @@ class ShopRewardWrapper(gymnasium.Wrapper):
         self._harvest_prob = harvest_prob
         self._rng = np.random.default_rng(seed)
         self._prev_joker_set: tuple[str, ...] = ()
+        self._last_bought_joker: tuple[Any, ...] | None = None
         self._phi = phi
         self._phi_prev = 0.0
+        self._immediate_joker_sell_reward = immediate_joker_sell_reward
+        self._immediate_joker_sell_decay = immediate_joker_sell_decay
 
     # sb3-contrib discovers masking via this method; define it explicitly
     # rather than relying on Wrapper.__getattr__ forwarding.
@@ -388,6 +399,61 @@ class ShopRewardWrapper(gymnasium.Wrapper):
     def _joker_set(self) -> tuple[str, ...]:
         gs = self.env.raw_state
         return tuple(sorted(getattr(j, "center_key", "") for j in gs.get("jokers", [])))
+
+    @staticmethod
+    def _joker_signature(card: Any) -> tuple[Any, ...] | None:
+        """Return the identity used to match an immediate joker sale.
+
+        The list position is intentionally absent: buying a duplicate joker
+        can append it in a different position than the one the policy sells.
+        Editions are normalized so their dict insertion order is irrelevant,
+        and the three joker stickers are part of the identity.
+        """
+        ability = getattr(card, "ability", None)
+        if not isinstance(ability, dict) or ability.get("set") != "Joker":
+            return None
+
+        edition = getattr(card, "edition", None)
+        edition_key = tuple(
+            sorted((str(key), repr(value)) for key, value in (edition or {}).items())
+        )
+        stickers = tuple(
+            bool(getattr(card, sticker, False) or ability.get(sticker, False))
+            for sticker in ("eternal", "perishable", "rental")
+        )
+        return (getattr(card, "center_key", ""), edition_key, stickers)
+
+    @staticmethod
+    def _action_family_and_slot(action: int) -> tuple[ShopActionFamily, int] | None:
+        # The wrapper is also used with small test environments whose action
+        # spaces are not the canonical shop action space.
+        try:
+            return decode_shop_action(int(action))
+        except (TypeError, ValueError):
+            return None
+
+    def _joker_transaction_state(
+        self, action: int
+    ) -> tuple[tuple[ShopActionFamily, int] | None, tuple[Any, ...] | None, tuple[Any, ...] | None]:
+        """Capture the pre-step joker involved in a buy or sell action."""
+        decoded = self._action_family_and_slot(action)
+        if decoded is None:
+            return None, None, None
+
+        family, slot = decoded
+        gs = self.env.raw_state
+        bought_joker = None
+        sold_joker = None
+        if family is ShopActionFamily.BuyCard:
+            shop_cards = gs.get("shop_cards", [])
+            if slot < len(shop_cards):
+                bought_joker = self._joker_signature(shop_cards[slot])
+        elif family in (ShopActionFamily.SellJoker, ShopActionFamily.SellJokerExt):
+            joker_row = joker_row_for_sell_action(action)
+            jokers = gs.get("jokers", [])
+            if joker_row < len(jokers):
+                sold_joker = self._joker_signature(jokers[joker_row])
+        return decoded, bought_joker, sold_joker
 
     def _pending_carrier_key(self) -> str:
         pending = self.env.pending
@@ -402,6 +468,7 @@ class ShopRewardWrapper(gymnasium.Wrapper):
     def reset(self, **kwargs: Any):
         obs, info = self.env.reset(**kwargs)
         self._prev_joker_set = self._joker_set()
+        self._last_bought_joker = None
         if self._phi is not None:
             self._phi_prev = self._phi(obs)
         return obs, info
@@ -409,9 +476,20 @@ class ShopRewardWrapper(gymnasium.Wrapper):
     def step(self, action: int):
         carrier_key_before = self._pending_carrier_key()
         was_pending = self.env.pending is not None
+        decoded, bought_joker, sold_joker = self._joker_transaction_state(action)
+        immediate_joker_sell = (
+            decoded is not None
+            and decoded[0] in (ShopActionFamily.SellJoker, ShopActionFamily.SellJokerExt)
+            and self._last_bought_joker is not None
+            and sold_joker == self._last_bought_joker
+        )
 
         obs, reward, terminated, truncated, info = self.env.step(action)
         rc = info["reward_components"]
+
+        # This is deliberately a one-step tracker. A new joker purchase
+        # overwrites the previous candidate; every other action clears it.
+        self._last_bought_joker = bought_joker if bought_joker is not None else None
 
         bonus = self._schedules.blend_beta * rc["blind_bonus"]
 
@@ -440,6 +518,12 @@ class ShopRewardWrapper(gymnasium.Wrapper):
             rc["phi_term"] = phi_term
             rc["phi_beta"] = self._schedules.phi_beta
 
+        joker_sell_reward = 0.0
+        if immediate_joker_sell and self._immediate_joker_sell_reward is not None:
+            decay = self._schedules.progress_remaining if self._immediate_joker_sell_decay else 1.0
+            joker_sell_reward = self._immediate_joker_sell_reward * decay
+        rc["immediate_joker_sell_reward"] = joker_sell_reward
+
         if (
             self._reservoir is not None
             and not (terminated or truncated)
@@ -451,6 +535,7 @@ class ShopRewardWrapper(gymnasium.Wrapper):
             self._reservoir.add(self.env.snapshot(), ante, pack_pending)
 
         total_reward = reward + bonus + count_bonus
+        total_reward += joker_sell_reward
         if self._phi is not None:
             total_reward += phi_term
         return obs, total_reward, terminated, truncated, info
@@ -487,6 +572,8 @@ def make_train_env(
     hand_policy: Callable[[dict[str, Any]], Any] | None = None,
     s1_schema: bool = False,
     phi: Callable[[dict[str, Any]], float] | None = None,
+    immediate_joker_sell_reward: float | None = None,
+    immediate_joker_sell_decay: bool = True,
 ) -> DummyVecEnv:
     # One partner instance shared across all envs: DummyVecEnv is single-process
     # and the hand policy is a deterministic, stateless argmax, so sharing is
@@ -508,6 +595,8 @@ def make_train_env(
                 harvest_prob=harvest_prob,
                 seed=rank,
                 phi=phi,
+                immediate_joker_sell_reward=immediate_joker_sell_reward,
+                immediate_joker_sell_decay=immediate_joker_sell_decay,
             )
 
         return _make
@@ -695,6 +784,8 @@ def build_model(
     hand_policy: Callable[[dict[str, Any]], Any] | None = None,
     s1_schema: bool = False,
     phi: Callable[[dict[str, Any]], float] | None = None,
+    immediate_joker_sell_reward: float | None = None,
+    immediate_joker_sell_decay: bool = True,
 ) -> tuple[MaskablePPO, TrainingSchedules]:
     """Construct (or resume) the shop MaskablePPO with its training env."""
     schedules = schedules or TrainingSchedules()
@@ -718,6 +809,8 @@ def build_model(
             hand_policy=hand_policy,
             s1_schema=True,
             phi=phi,
+            immediate_joker_sell_reward=immediate_joker_sell_reward,
+            immediate_joker_sell_decay=immediate_joker_sell_decay,
         )
         _attach_widened_model(
             model,
@@ -743,6 +836,8 @@ def build_model(
         hand_policy=hand_policy,
         s1_schema=s1_schema,
         phi=phi,
+        immediate_joker_sell_reward=immediate_joker_sell_reward,
+        immediate_joker_sell_decay=immediate_joker_sell_decay,
     )
 
     if init_from is not None:
@@ -833,6 +928,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--phi-beta0", type=float, default=1.0)
     parser.add_argument("--s1-schema", action="store_true")
     parser.add_argument("--count-beta0", type=float, default=0.05)
+    parser.add_argument(
+        "--immediate-joker-sell-reward",
+        type=float,
+        default=None,
+        help="enable and set the reward for buying a joker then selling a matching "
+        "joker on the next action (for example -0.1); omit to disable",
+    )
+    parser.add_argument(
+        "--immediate-joker-sell-no-decay",
+        action="store_true",
+        help="keep --immediate-joker-sell-reward constant instead of decaying to zero",
+    )
     parser.add_argument("--fresh-frac", type=float, default=0.5)
     parser.add_argument("--pack-frac", type=float, default=0.3)
     parser.add_argument("--harvest-prob", type=float, default=0.02)
@@ -869,6 +976,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             parser.error("--init-temperature requires --init-from")
         if args.init_temperature <= 0.0:
             parser.error("--init-temperature must be positive")
+    if args.immediate_joker_sell_no_decay and args.immediate_joker_sell_reward is None:
+        parser.error("--immediate-joker-sell-no-decay requires --immediate-joker-sell-reward")
     return args
 
 
@@ -919,6 +1028,8 @@ def main() -> None:
         hand_policy=hand_policy,
         s1_schema=args.s1_schema,
         phi=phi,
+        immediate_joker_sell_reward=args.immediate_joker_sell_reward,
+        immediate_joker_sell_decay=not args.immediate_joker_sell_no_decay,
     )
 
     # Eval on the reserved EVAL_* stream: plain env, no wrapper — mean
