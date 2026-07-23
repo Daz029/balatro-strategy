@@ -6,7 +6,7 @@ const params = new URLSearchParams(window.location.search);
 const state = {
   runs: [],
   seed: params.get("seed"),
-  resultFilter: ["won", "lost"].includes(params.get("result"))
+  resultFilter: ["won", "lost", "incomplete"].includes(params.get("result"))
     ? params.get("result")
     : "all",
   frames: [],
@@ -141,6 +141,7 @@ function controlsHTML(frame) {
         <option value="all" ${state.resultFilter === "all" ? "selected" : ""}>ALL (${state.runs.length})</option>
         <option value="won" ${state.resultFilter === "won" ? "selected" : ""}>WON (${state.runs.filter((run) => run.result?.status === "won").length})</option>
         <option value="lost" ${state.resultFilter === "lost" ? "selected" : ""}>LOST (${state.runs.filter((run) => run.result?.status === "lost").length})</option>
+        <option value="incomplete" ${state.resultFilter === "incomplete" ? "selected" : ""}>INCOMPLETE (${state.runs.filter((run) => run.result?.status === "incomplete").length})</option>
       </select></label>
       <label class="run-select">GAME<select data-control="seed">${options}</select></label>
     </div>
@@ -157,16 +158,19 @@ function controlsHTML(frame) {
 
 function terminalSlideHTML(result) {
   const won = result.status === "won";
+  const incomplete = result.status === "incomplete";
   const hasMargin = result.margin !== null && result.margin !== undefined;
   const margin = Number(result.margin);
-  const comparison = !hasMargin
+  const comparison = incomplete
+    ? "OUTCOME UNKNOWN · RUN ENDED EARLY"
+    : !hasMargin
     ? "SCORE MARGIN UNAVAILABLE"
     : won
       ? `${formatNumber(margin)} CHIPS ABOVE THE GOAL`
       : `${formatNumber(Math.abs(margin))} CHIPS SHORT`;
-  return `<section class="terminal-slide ${won ? "won" : "lost"}">
+  return `<section class="terminal-slide ${incomplete ? "incomplete" : won ? "won" : "lost"}">
     <small>EVALUATION COMPLETE</small>
-    <h1>${won ? "WON" : "LOST"}</h1>
+    <h1>${incomplete ? "INCOMPLETE" : won ? "WON" : "LOST"}</h1>
     <p>${comparison}</p>
     <div class="terminal-scores">
       <div><small>FINAL SCORE</small><strong>${formatNumber(result.final_score)}</strong></div>

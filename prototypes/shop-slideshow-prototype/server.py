@@ -93,10 +93,11 @@ def _result_from_record(record: dict[str, Any]) -> dict[str, Any]:
     won = bool(record.get("won"))
     pre = record.get("pre_state") or {}
     post = record.get("post_state") or {}
+    complete = won or bool(post.get("done"))
 
     # A win keeps the cleared blind in the pre-state. A loss keeps the failed
     # blind and final score in the post-state.
-    state = pre if won else post if post.get("done") else None
+    state = pre if won else post if complete else None
     blind = (state or {}).get("blind") or {}
     final_score = (state or {}).get("chips")
     required_score = blind.get("chips")
@@ -105,7 +106,7 @@ def _result_from_record(record: dict[str, Any]) -> dict[str, Any]:
         margin = final_score - required_score
 
     return {
-        "status": "won" if won else "lost",
+        "status": "won" if won else "lost" if complete else "incomplete",
         "final_score": final_score,
         "required_score": required_score,
         "margin": margin,
