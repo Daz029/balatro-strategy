@@ -38,6 +38,7 @@ from jackdaw.engine.rng import pseudohash  # noqa: E402
 from jackdaw.env.hand_play_adapter import HandPlayAdapter  # noqa: E402
 from jackdaw.env.hand_play_gym import HandPlayGymEnv  # noqa: E402
 from jackdaw.env.shop_gym import ShopGymEnv  # noqa: E402
+from jackdaw.env.shop_obs import D_SHOP_CONTEXT, D_SHOP_CONTEXT_S1  # noqa: E402
 from jackdaw.env.shop_run_adapter import (  # noqa: E402
     DECISION_PHASES,
     ShopRunAdapter,
@@ -457,8 +458,26 @@ def build_summary(
     return summary
 
 
-def _shop_env(hand_partner: CheckpointProbePartner) -> ShopGymEnv:
-    config = ShopRunConfig(win_ante=BOSS_PROBE_WIN_ANTE)
+def detect_shop_s1_schema(observation_space: Any) -> bool:
+    """Recover the shop obs schema from a loaded policy's observation space.
+
+    An s1/s2 shop policy widens ``shop_context`` by the offered-tag one-hot,
+    so the env must be built with the matching schema or the model rejects
+    the observation. Mirrors ``extract_v_curve._s1_schema_from_observation_space``.
+    """
+    width = int(observation_space["shop_context"].shape[0])
+    if width == D_SHOP_CONTEXT:
+        return False
+    if width == D_SHOP_CONTEXT_S1:
+        return True
+    raise ValueError(
+        f"shop policy has an unrecognized shop_context width {width} "
+        f"(expected {D_SHOP_CONTEXT} for s0 or {D_SHOP_CONTEXT_S1} for s1/s2)"
+    )
+
+
+def _shop_env(hand_partner: CheckpointProbePartner, *, s1_schema: bool) -> ShopGymEnv:
+    config = ShopRunConfig(win_ante=BOSS_PROBE_WIN_ANTE, s1_schema=s1_schema)
     env = ShopGymEnv(
         config=config,
         hand_policy=hand_partner,
@@ -476,6 +495,7 @@ def run_probe(
     n_redeals: int,
     out_path: str | Path,
     keep_blobs: bool = False,
+    s1_schema: bool = False,
 ) -> list[dict[str, Any]]:
     """Roll out full runs, probe their terminal bosses, and stream JSONL."""
     if n_runs < 1:
@@ -483,7 +503,7 @@ def run_probe(
     if n_redeals < 1:
         raise ValueError("n_redeals must be positive")
 
-    env = _shop_env(partner)
+    env = _shop_env(partner, s1_schema=s1_schema)
     adapter = env._adapter
     assert isinstance(adapter, BossCapturingShopRunAdapter)
     records: list[dict[str, Any]] = []
@@ -544,6 +564,8 @@ def main() -> None:
     args = build_parser().parse_args()
     partner = CheckpointProbePartner(args.hand_policy, device=args.device)
     shop_policy = PPOPolicy(args.shop_policy, args.device)
+    s1_schema = detect_shop_s1_schema(shop_policy._model.observation_space)
+    print(f"shop schema: {'s1/s2' if s1_schema else 's0'}", file=sys.stderr)
     records = run_probe(
         shop_policy,
         partner,
@@ -551,6 +573,7 @@ def main() -> None:
         n_redeals=args.redeals,
         out_path=args.out,
         keep_blobs=args.keep_blobs,
+        s1_schema=s1_schema,
     )
     print(json.dumps(build_summary(records, requested_runs=args.n_runs), indent=2))
 

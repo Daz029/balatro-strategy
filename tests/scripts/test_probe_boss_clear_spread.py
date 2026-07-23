@@ -9,6 +9,7 @@ import pytest
 from probe_boss_clear_spread import (
     build_probe_record,
     build_summary,
+    detect_shop_s1_schema,
     prepare_redeal,
     reseed_deal_stream,
 )
@@ -16,6 +17,7 @@ from probe_boss_clear_spread import (
 from jackdaw.engine.actions import GamePhase
 from jackdaw.engine.card_factory import create_joker
 from jackdaw.engine.run_init import initialize_run
+from jackdaw.env.shop_obs import D_SHOP_CONTEXT, D_SHOP_CONTEXT_S1
 
 
 class StubPartner:
@@ -33,6 +35,18 @@ class StubPartner:
         assert mask is not None
         legal_actions = np.flatnonzero(mask)
         return int(legal_actions[next(self._legal_action_offsets)])
+
+
+class _CtxSpace:
+    def __init__(self, width: int) -> None:
+        self.shape = (width,)
+
+
+def test_detect_shop_s1_schema_reads_context_width() -> None:
+    assert detect_shop_s1_schema({"shop_context": _CtxSpace(D_SHOP_CONTEXT)}) is False
+    assert detect_shop_s1_schema({"shop_context": _CtxSpace(D_SHOP_CONTEXT_S1)}) is True
+    with pytest.raises(ValueError, match="unrecognized shop_context width"):
+        detect_shop_s1_schema({"shop_context": _CtxSpace(99)})
 
 
 def _predeal_boss_blob() -> bytes:
