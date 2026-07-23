@@ -460,6 +460,40 @@ class ShopRewardWrapper(gymnasium.Wrapper):
                 sold_joker = self._joker_signature(jokers[joker_row])
         return decoded, bought_joker, sold_joker
 
+    def _buy_sell_is_suppressed(
+        self,
+        bought_joker: tuple[Any, ...] | None,
+        sold_joker: tuple[Any, ...] | None,
+    ) -> bool:
+        """Whether the immediate buy/sell shaping reward is inapplicable."""
+        gs = self.env.raw_state
+        if any(getattr(joker, "center_key", "") == "j_campfire" for joker in gs.get("jokers", [])):
+            return True
+
+        transaction_jokers = (bought_joker, sold_joker)
+        if any(
+            signature is not None and signature[0] == "j_diet_cola"
+            for signature in transaction_jokers
+        ):
+            return True
+        if any(
+            signature is not None and signature[2][2]
+            for signature in transaction_jokers
+        ):
+            return True
+
+        overstock_keys = {"v_overstock_norm", "v_overstock_plus"}
+        return any(
+            getattr(voucher, "center_key", "") in overstock_keys
+            for voucher in gs.get("shop_vouchers", [])
+        )
+
+    @staticmethod
+    def _cannot_be_last_bought_joker(signature: tuple[Any, ...] | None) -> bool:
+        return signature is not None and (
+            signature[0] == "j_diet_cola" or signature[2][2]
+        )
+
     def _pending_carrier_key(self) -> str:
         pending = self.env.pending
         if pending is None:
@@ -483,11 +517,13 @@ class ShopRewardWrapper(gymnasium.Wrapper):
         was_pending = self.env.pending is not None
         decoded, bought_joker, sold_joker = self._joker_transaction_state(action)
         skip_tag_decision = decoded is not None and decoded[0] is ShopActionFamily.SkipBlind
+        buy_sell_suppressed = self._buy_sell_is_suppressed(bought_joker, sold_joker)
         immediate_joker_sell = (
             decoded is not None
             and decoded[0] in (ShopActionFamily.SellJoker, ShopActionFamily.SellJokerExt)
             and self._last_bought_joker is not None
             and sold_joker == self._last_bought_joker
+            and not buy_sell_suppressed
         )
 
         obs, reward, terminated, truncated, info = self.env.step(action)
@@ -495,7 +531,11 @@ class ShopRewardWrapper(gymnasium.Wrapper):
 
         # This is deliberately a one-step tracker. A new joker purchase
         # overwrites the previous candidate; every other action clears it.
-        self._last_bought_joker = bought_joker if bought_joker is not None else None
+        self._last_bought_joker = (
+            None
+            if self._cannot_be_last_bought_joker(bought_joker)
+            else bought_joker
+        )
 
         bonus = self._schedules.blend_beta * rc["blind_bonus"]
 

@@ -60,10 +60,11 @@ class _JokerTransactionStub(gymnasium.Env):
     observation_space = spaces.Box(0, 1, (1,), dtype=np.float32)
     action_space = spaces.Discrete(NUM_TOTAL_ACTIONS_S1)
 
-    def __init__(self, jokers, shop_cards):
+    def __init__(self, jokers, shop_cards, shop_vouchers=None):
         self.raw_state = {
             "jokers": list(jokers),
             "shop_cards": list(shop_cards),
+            "shop_vouchers": list(shop_vouchers or []),
             "round_resets": {"ante": 1},
         }
         self.pending = None
@@ -102,6 +103,10 @@ def _joker(key="j_zany_joker", *, edition=None, **stickers):
         perishable=stickers.get("perishable", False),
         rental=stickers.get("rental", False),
     )
+
+
+def _voucher(key):
+    return SimpleNamespace(center_key=key)
 
 
 class TestSchedules:
@@ -214,12 +219,13 @@ class TestRewardWrapper:
         decay=True,
         jokers=None,
         shop_cards=None,
+        shop_vouchers=None,
         skip_tag_reward=None,
         skip_tag_decay=True,
     ):
         schedules = TrainingSchedules(blend_beta0=0.0, count_beta0=0.0)
         env = ShopRewardWrapper(
-            _JokerTransactionStub(jokers or [], shop_cards or []),
+            _JokerTransactionStub(jokers or [], shop_cards or [], shop_vouchers),
             schedules,
             CountBonus(),
             immediate_joker_sell_reward=reward,
@@ -250,6 +256,41 @@ class TestRewardWrapper:
 
         env.step(shop_action(ShopActionFamily.BuyCard, 0))
         _, reward, _, _, info = env.step(shop_action(ShopActionFamily.SellJoker, 0))
+
+        assert reward == 0.0
+        assert info["reward_components"]["immediate_joker_sell_reward"] == 0.0
+
+    @pytest.mark.parametrize("bought", [_joker("j_diet_cola"), _joker(rental=True)])
+    def test_diet_cola_and_rental_are_not_stored_as_last_bought(self, bought):
+        env, _ = self._make_transaction_stub(shop_cards=[bought])
+
+        env.step(shop_action(ShopActionFamily.BuyCard, 0))
+
+        assert env._last_bought_joker is None
+
+    @pytest.mark.parametrize(
+        ("jokers", "shop_cards", "shop_vouchers"),
+        [
+            ([_joker("j_campfire"), _joker()], [_joker()], []),
+            ([_joker()], [_joker("j_diet_cola")], []),
+            ([_joker()], [_joker(rental=True)], []),
+            ([_joker()], [_joker()], [_voucher("v_overstock_norm")]),
+            ([_joker()], [_joker()], [_voucher("v_overstock_plus")]),
+        ],
+    )
+    def test_buy_sell_reward_is_suppressed_by_special_cases(
+        self, jokers, shop_cards, shop_vouchers
+    ):
+        env, _ = self._make_transaction_stub(
+            jokers=jokers,
+            shop_cards=shop_cards,
+            shop_vouchers=shop_vouchers,
+        )
+
+        env.step(shop_action(ShopActionFamily.BuyCard, 0))
+        _, reward, _, _, info = env.step(
+            shop_action(ShopActionFamily.SellJoker, len(jokers))
+        )
 
         assert reward == 0.0
         assert info["reward_components"]["immediate_joker_sell_reward"] == 0.0
