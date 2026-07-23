@@ -88,6 +88,30 @@ def _target(target: dict[str, Any] | None) -> dict[str, Any] | None:
     }
 
 
+def _result_from_record(record: dict[str, Any]) -> dict[str, Any]:
+    """Summarize the run outcome recorded on a terminal shop decision."""
+    won = bool(record.get("won"))
+    pre = record.get("pre_state") or {}
+    post = record.get("post_state") or {}
+
+    # A win keeps the cleared blind in the pre-state. A loss keeps the failed
+    # blind and final score in the post-state.
+    state = pre if won else post if post.get("done") else None
+    blind = (state or {}).get("blind") or {}
+    final_score = (state or {}).get("chips")
+    required_score = blind.get("chips")
+    margin = None
+    if final_score is not None and required_score is not None:
+        margin = final_score - required_score
+
+    return {
+        "status": "won" if won else "lost",
+        "final_score": final_score,
+        "required_score": required_score,
+        "margin": margin,
+    }
+
+
 def _frame(record: dict[str, Any]) -> dict[str, Any]:
     pre = record["pre_state"]
     post = record.get("post_state") or {}
@@ -99,7 +123,7 @@ def _frame(record: dict[str, Any]) -> dict[str, Any]:
     current_round = pre.get("current_round") or {}
     dollars = pre.get("dollars", record.get("dollars", 0))
     dollars_after = post.get("dollars", dollars)
-    return {
+    frame = {
         "seed": record.get("seed"),
         "step": record.get("step"),
         "phase": pre.get("phase"),
@@ -131,6 +155,13 @@ def _frame(record: dict[str, Any]) -> dict[str, Any]:
         "terminal": bool(record.get("terminal", False)),
         "won": record.get("won"),
     }
+    if record.get("terminal"):
+        frame["result"] = _result_from_record(record)
+    return frame
+
+
+def _run_result(frames: list[dict[str, Any]]) -> dict[str, Any]:
+    return frames[-1].get("result") or {"status": "lost", "margin": None}
 
 
 def load_trace(path: Path) -> dict[str, list[dict[str, Any]]]:
@@ -170,6 +201,7 @@ class SlideshowHandler(SimpleHTTPRequestHandler):
                         "frames": len(frames),
                         "first_step": frames[0]["step"],
                         "last_step": frames[-1]["step"],
+                        "result": _run_result(frames),
                     }
                     for seed, frames in self.runs.items()
                 ]
@@ -181,7 +213,7 @@ class SlideshowHandler(SimpleHTTPRequestHandler):
             if frames is None:
                 self._send_json({"error": f"unknown seed: {seed}"}, status=404)
             else:
-                self._send_json({"seed": seed, "frames": frames})
+                self._send_json({"seed": seed, "frames": frames, "result": _run_result(frames)})
             return
         if parsed.path == "/":
             self.path = "/index.html"

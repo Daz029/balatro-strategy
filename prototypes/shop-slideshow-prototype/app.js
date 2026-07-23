@@ -6,8 +6,12 @@ const params = new URLSearchParams(window.location.search);
 const state = {
   runs: [],
   seed: params.get("seed"),
+  resultFilter: ["won", "lost"].includes(params.get("result"))
+    ? params.get("result")
+    : "all",
   frames: [],
   frameIndex: 0,
+  result: null,
 };
 
 const esc = (value) =>
@@ -19,6 +23,15 @@ const esc = (value) =>
     .replaceAll("'", "&#039;");
 
 const setClass = (value) => String(value || "card").toLowerCase().replaceAll(" ", "-");
+
+const formatNumber = (value) =>
+  value === null || value === undefined ? "—" : Number(value).toLocaleString();
+
+function filteredRuns() {
+  return state.resultFilter === "all"
+    ? state.runs
+    : state.runs.filter((run) => run.result?.status === state.resultFilter);
+}
 
 function targetMatches(frame, kind, slot) {
   const target = frame.target;
@@ -105,12 +118,15 @@ function updateUrl() {
   const next = new URLSearchParams(window.location.search);
   next.delete("variant");
   if (state.seed) next.set("seed", state.seed);
+  if (state.resultFilter === "all") next.delete("result");
+  else next.set("result", state.resultFilter);
   if (frame) next.set("step", frame.step);
   window.history.replaceState({}, "", `${window.location.pathname}?${next}`);
 }
 
 function controlsHTML(frame) {
-  const options = state.runs
+  const terminal = state.frameIndex === state.frames.length;
+  const options = filteredRuns()
     .map(
       (run) =>
         `<option value="${esc(run.seed)}" ${run.seed === state.seed ? "selected" : ""}>${esc(
@@ -120,19 +136,44 @@ function controlsHTML(frame) {
     .join("");
   return `<header class="transport">
     <div class="transport-brand"><span>POLICY</span><strong>SHOP REPLAY</strong></div>
-    <label class="seed-control">GAME<select data-control="seed">${options}</select></label>
+    <div class="run-picker">
+      <label class="result-filter">OUTCOME<select data-control="result-filter">
+        <option value="all" ${state.resultFilter === "all" ? "selected" : ""}>ALL (${state.runs.length})</option>
+        <option value="won" ${state.resultFilter === "won" ? "selected" : ""}>WON (${state.runs.filter((run) => run.result?.status === "won").length})</option>
+        <option value="lost" ${state.resultFilter === "lost" ? "selected" : ""}>LOST (${state.runs.filter((run) => run.result?.status === "lost").length})</option>
+      </select></label>
+      <label class="run-select">GAME<select data-control="seed">${options}</select></label>
+    </div>
     <div class="step-controls">
       <button data-action="previous" ${state.frameIndex === 0 ? "disabled" : ""}>◀</button>
       <button class="step-button" data-action="next" ${
-        state.frameIndex === state.frames.length - 1 ? "disabled" : ""
+        terminal ? "disabled" : ""
       }>STEP ▶</button>
-      <label>TIME STEP <input id="step-input" type="number" min="1" value="${esc(
-        frame.step,
-      )}" /></label>
-      <button data-action="jump">GO</button>
+      ${terminal ? '<span class="terminal-step">RUN RESULT</span>' : `<label>TIME STEP <input id="step-input" type="number" min="1" value="${esc(frame.step)}" /></label><button data-action="jump">GO</button>`}
     </div>
-    <div class="frame-count"><b>${state.frameIndex + 1}</b> / ${state.frames.length}<small>SPACE TO STEP</small></div>
+    <div class="frame-count"><b>${state.frameIndex + 1}</b> / ${state.frames.length + 1}<small>SPACE TO STEP</small></div>
   </header>`;
+}
+
+function terminalSlideHTML(result) {
+  const won = result.status === "won";
+  const hasMargin = result.margin !== null && result.margin !== undefined;
+  const margin = Number(result.margin);
+  const comparison = !hasMargin
+    ? "SCORE MARGIN UNAVAILABLE"
+    : won
+      ? `${formatNumber(margin)} CHIPS ABOVE THE GOAL`
+      : `${formatNumber(Math.abs(margin))} CHIPS SHORT`;
+  return `<section class="terminal-slide ${won ? "won" : "lost"}">
+    <small>EVALUATION COMPLETE</small>
+    <h1>${won ? "WON" : "LOST"}</h1>
+    <p>${comparison}</p>
+    <div class="terminal-scores">
+      <div><small>FINAL SCORE</small><strong>${formatNumber(result.final_score)}</strong></div>
+      <span>/</span>
+      <div><small>BLIND GOAL</small><strong>${formatNumber(result.required_score)}</strong></div>
+    </div>
+  </section>`;
 }
 
 function inventoryHTML(frame, compact = false) {
@@ -226,19 +267,22 @@ function actionRailHTML(frame) {
   </aside>`;
 }
 
-function DecisionDesk(frame) {
+function DecisionDesk(frame, terminal) {
   const pack = frame.phase === "pack_opening";
-  const mode = pack ? "pack-mode" : frame.phase === "blind_select" ? "blind-select-mode" : "shop-mode";
+  const mode = terminal
+    ? "terminal-mode"
+    : pack
+      ? "pack-mode"
+      : frame.phase === "blind_select"
+        ? "blind-select-mode"
+        : "shop-mode";
   return `<div class="prototype-shell decision-desk ${mode}">
     ${controlsHTML(frame)}
     <div class="desk-layout">
-      ${pack ? "" : actionRailHTML(frame)}
+      ${terminal || pack ? "" : actionRailHTML(frame)}
       <div class="desk-board">
-        ${inventoryHTML(frame, true)}
-        ${
-          pack
-            ? packStageHTML(frame)
-            : `<div class="desk-shop-grid">
+        ${terminal ? terminalSlideHTML(state.result) : `${inventoryHTML(frame, true)}
+        ${pack ? packStageHTML(frame) : `<div class="desk-shop-grid">
                 ${miniZone("SHOP", frame.shop_cards, 4, "shop_card", frame)}
                 ${miniZone("BOOSTERS", frame.boosters, 2, "booster", frame)}
                 ${miniZone("VOUCHER", frame.vouchers, 1, "voucher", frame)}
@@ -246,21 +290,22 @@ function DecisionDesk(frame) {
               <div class="desk-hud">$${frame.dollars}<span>ANTE ${frame.ante}</span><span>ROUND ${
                 frame.round
               }</span><span>${esc(frame.blind_on_deck || "")}</span></div>`
-        }
+        }`}
       </div>
     </div>
   </div>`;
 }
 
 function render() {
-  const frame = state.frames[state.frameIndex];
+  const terminal = state.frameIndex === state.frames.length;
+  const frame = terminal ? state.frames.at(-1) : state.frames[state.frameIndex];
   if (!frame) return;
-  app.innerHTML = DecisionDesk(frame);
+  app.innerHTML = DecisionDesk(frame, terminal);
   updateUrl();
 }
 
 function moveFrame(delta) {
-  state.frameIndex = Math.max(0, Math.min(state.frames.length - 1, state.frameIndex + delta));
+  state.frameIndex = Math.max(0, Math.min(state.frames.length, state.frameIndex + delta));
   render();
 }
 
@@ -283,6 +328,7 @@ async function loadRun(seed, requestedStep = null) {
   const payload = await response.json();
   state.seed = seed;
   state.frames = payload.frames || [];
+  state.result = payload.result;
   state.frameIndex = 0;
   if (requestedStep !== null) jumpToStep(requestedStep);
   else render();
@@ -300,6 +346,17 @@ app.addEventListener("click", (event) => {
 
 app.addEventListener("change", (event) => {
   if (event.target.matches('[data-control="seed"]')) loadRun(event.target.value);
+  if (event.target.matches('[data-control="result-filter"]')) {
+    state.resultFilter = event.target.value;
+    const runs = filteredRuns();
+    const firstRun = runs[0];
+    if (!firstRun) return;
+    if (!runs.some((run) => run.seed === state.seed)) loadRun(firstRun.seed);
+    else {
+      state.frameIndex = 0;
+      render();
+    }
+  }
 });
 
 app.addEventListener("keydown", (event) => {
@@ -323,9 +380,10 @@ async function init() {
   try {
     const response = await fetch("/api/runs");
     state.runs = await response.json();
-    const requestedSeed = state.runs.some((run) => run.seed === state.seed)
+    const runs = filteredRuns();
+    const requestedSeed = runs.some((run) => run.seed === state.seed)
       ? state.seed
-      : state.runs[0]?.seed;
+      : runs[0]?.seed;
     if (!requestedSeed) throw new Error("No shop frames found in the trace");
     await loadRun(requestedSeed, params.get("step"));
   } catch (error) {

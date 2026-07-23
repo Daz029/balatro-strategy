@@ -171,6 +171,51 @@ button {
   box-shadow: 0 0 0 3px rgba(255, 207, 69, 0.18);
 }
 
+.run-picker {
+  display: grid;
+  grid-template-columns: minmax(105px, 0.55fr) minmax(170px, 1.45fr);
+  gap: 8px;
+}
+
+.result-filter,
+.run-select {
+  display: grid;
+  gap: 3px;
+  color: #9ba9ad;
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.14em;
+}
+
+.result-filter select,
+.run-select select {
+  min-width: 0;
+  padding: 9px 10px;
+  color: #f4f2e8;
+  font-weight: 800;
+  background: #242b31;
+  border: 2px solid #3f4b52;
+  border-radius: 8px;
+  outline: none;
+}
+
+.result-filter select:focus,
+.run-select select:focus {
+  border-color: var(--gold);
+  box-shadow: 0 0 0 3px rgba(255, 207, 69, 0.18);
+}
+
+.terminal-step {
+  padding: 9px 13px;
+  color: var(--gold);
+  font-size: 10px;
+  font-weight: 1000;
+  letter-spacing: 0.13em;
+  background: #252d31;
+  border: 2px solid #56656b;
+  border-radius: 7px;
+}
+
 .step-controls {
   display: flex;
   gap: 7px;
@@ -969,9 +1014,136 @@ button {
   max-height: 230px;
 }
 
+.terminal-mode::before {
+  background:
+    radial-gradient(circle at 50% 48%, rgba(45, 170, 112, 0.28), transparent 38%),
+    #0c3029;
+}
+
+.terminal-mode .desk-layout {
+  grid-template-columns: minmax(650px, 1fr);
+}
+
+.terminal-mode .desk-board {
+  padding: 0;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+}
+
+.terminal-slide {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  min-height: 420px;
+  overflow: hidden;
+  color: #eafff3;
+  text-align: center;
+  background:
+    radial-gradient(circle at 50% 38%, rgba(74, 237, 148, 0.28), transparent 38%),
+    rgba(5, 40, 28, 0.9);
+  border: 5px solid #43d987;
+  border-radius: 24px;
+  box-shadow: inset 0 0 70px rgba(31, 210, 116, 0.14), 0 18px 38px rgba(0, 0, 0, 0.34);
+}
+
+.terminal-slide::before {
+  position: absolute;
+  inset: 12px;
+  content: "";
+  border: 2px dashed rgba(160, 255, 203, 0.24);
+  border-radius: 14px;
+}
+
+.terminal-slide > small {
+  color: #95efbb;
+  font-size: 11px;
+  font-weight: 1000;
+  letter-spacing: 0.24em;
+}
+
+.terminal-slide h1 {
+  margin: 6px 0 0;
+  font-family: Impact, "Arial Black", sans-serif;
+  font-size: clamp(72px, 10vw, 160px);
+  font-weight: 500;
+  line-height: 0.9;
+  letter-spacing: 0.06em;
+  text-shadow: 0 8px 0 rgba(0, 0, 0, 0.28), 0 0 30px rgba(67, 217, 135, 0.42);
+}
+
+.terminal-slide p {
+  margin: 13px 0 22px;
+  color: #adf3ca;
+  font-size: 12px;
+  font-weight: 1000;
+  letter-spacing: 0.15em;
+}
+
+.terminal-slide.lost {
+  color: #fff1ec;
+  background: radial-gradient(circle at 50% 38%, rgba(239, 75, 80, 0.3), transparent 38%), rgba(55, 12, 18, 0.92);
+  border-color: #ef4b50;
+  box-shadow: inset 0 0 70px rgba(239, 75, 80, 0.14), 0 18px 38px rgba(0, 0, 0, 0.34);
+}
+
+.terminal-slide.lost::before {
+  border-color: rgba(255, 172, 169, 0.25);
+}
+
+.terminal-slide.lost > small,
+.terminal-slide.lost p {
+  color: #ffaaa6;
+}
+
+.terminal-slide.lost h1 {
+  text-shadow: 0 8px 0 rgba(0, 0, 0, 0.3), 0 0 30px rgba(239, 75, 80, 0.42);
+}
+
+.terminal-scores {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(170px, 1fr) auto minmax(170px, 1fr);
+  gap: 24px;
+  align-items: center;
+  min-width: min(620px, 75%);
+  padding: 17px 25px;
+  background: rgba(5, 12, 13, 0.58);
+  border: 2px solid rgba(255, 255, 255, 0.13);
+  border-radius: 14px;
+}
+
+.terminal-scores div {
+  display: flex;
+  flex-direction: column;
+}
+
+.terminal-scores small {
+  color: #b9cbc5;
+  font-size: 8px;
+  font-weight: 1000;
+  letter-spacing: 0.14em;
+}
+
+.terminal-scores strong {
+  color: white;
+  font-family: Impact, "Arial Black", sans-serif;
+  font-size: clamp(32px, 4vw, 62px);
+  font-weight: 500;
+  line-height: 1;
+}
+
+.terminal-scores > span {
+  color: rgba(255, 255, 255, 0.35);
+  font: 35px Impact, sans-serif;
+}
+
 @media (max-width: 1100px) {
   .transport {
-    grid-template-columns: 150px 190px 1fr 80px;
+    grid-template-columns: 150px 250px 1fr 80px;
     padding-inline: 12px;
   }
 
