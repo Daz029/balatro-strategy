@@ -328,7 +328,10 @@ def _fire_new_blind_choice_tags(gs: dict[str, Any]) -> None:
             rr.setdefault("blind_choices", {})["Boss"] = new_boss
 
         if result.create_pack:
-            _open_tag_pack(gs, result.create_pack)
+            if gs.get("phase") == GamePhase.PACK_OPENING:
+                gs.setdefault("pending_tag_packs", []).append(result.create_pack)
+            else:
+                _open_tag_pack(gs, result.create_pack)
 
 
 def _open_tag_pack(gs: dict[str, Any], pack_key: str) -> None:
@@ -2419,6 +2422,13 @@ def _close_pack(gs: dict[str, Any]) -> None:
         pack_ids = set(id(c) for c in pack_hand)
         gs["hand"] = [c for c in hand if id(c) not in pack_ids]
         gs["pack_hand"] = []
+
+    pending_tag_packs = gs.get("pending_tag_packs", [])
+    if pending_tag_packs:
+        return_phase = gs.get("shop_return_phase", GamePhase.BLIND_SELECT)
+        _open_tag_pack(gs, pending_tag_packs.pop(0))
+        gs["shop_return_phase"] = return_phase
+        return
 
     # Restore phase
     gs["phase"] = gs.get("shop_return_phase", GamePhase.SHOP)
