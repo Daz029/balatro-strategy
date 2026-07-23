@@ -17,6 +17,7 @@ import pytest
 from jackdaw.agents.greedy_hand_policy import GreedyHandPolicy
 from jackdaw.engine.actions import (
     BuyCard,
+    Discard,
     GamePhase,
     NextRound,
     OpenBooster,
@@ -163,6 +164,32 @@ class TestPurchases:
 
 
 class TestFailLoud:
+    def test_empty_hand_after_draw_is_terminal_before_policy_call(self):
+        adapter = _adapter()
+        adapter.reset("b_red", 1, "EMPTY_HAND_AFTER_DRAW")
+        gs = adapter.raw_state
+
+        # Reproduce the Serpent/exhausted-deck boundary: the last card is
+        # discarded, no replacement can be drawn, and budget remains.
+        gs["phase"] = GamePhase.SELECTING_HAND
+        gs["hand"] = [gs["deck"].pop()]
+        gs["deck"] = []
+        gs["current_round"]["hands_left"] = 2
+        gs["current_round"]["discards_left"] = 1
+
+        calls = {"n": 0}
+
+        def unexpected_policy(_gs):
+            calls["n"] += 1
+            raise AssertionError("hand policy must not receive an empty hand")
+
+        adapter._hand_policy = unexpected_policy
+        state = adapter.step(Discard(card_indices=(0,)))
+
+        assert state.phase == GamePhase.GAME_OVER
+        assert not adapter.won
+        assert calls["n"] == 0
+
     def test_stuck_hand_policy_raises(self):
         calls = {"n": 0}
 

@@ -758,6 +758,8 @@ def _handle_play_hand(gs: dict[str, Any], indices: tuple[int, ...]) -> dict[str,
                 if 0 <= idx < len(hand):
                     hand[idx].ability["forced_selection"] = True
 
+        _end_round_if_hand_empty(gs)
+
     return gs
 
 
@@ -969,6 +971,8 @@ def _handle_discard(gs: dict[str, Any], indices: tuple[int, ...]) -> dict[str, A
             idx = dth["forced_card_index"]
             if 0 <= idx < len(hand):
                 hand[idx].ability["forced_selection"] = True
+
+    _end_round_if_hand_empty(gs)
 
     return gs
 
@@ -1528,6 +1532,19 @@ def _draw_hand(gs: dict[str, Any]) -> None:
             hand.append(deck.pop())
     # Sort hand descending by nominal (matches Lua CardArea:sort 'desc')
     _sort_hand_desc(hand)
+
+
+def _end_round_if_hand_empty(gs: dict[str, Any]) -> None:
+    """End a lost round when an action exhausts the hand and draw pile.
+
+    Leaving ``SELECTING_HAND`` with no cards exposes no legal play or discard
+    action, so an auto-resolved hand policy would be asked to decode an empty
+    hand.  The blind cannot be cleared from that state; mark it as a terminal
+    loss instead.
+    """
+    if not gs.get("hand"):
+        gs["phase"] = GamePhase.GAME_OVER
+        gs["won"] = False
 
 
 def _round_won(gs: dict[str, Any]) -> None:

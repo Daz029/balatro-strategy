@@ -148,6 +148,19 @@ class TestPlayHand:
         step(gs, PlayHand(card_indices=(0,)))
         assert gs["phase"] == GamePhase.GAME_OVER
 
+    def test_game_over_when_play_exhausts_hand_and_deck(self):
+        gs = self._setup_playing()
+        gs["hand"] = [gs["hand"][0]]
+        gs["deck"] = []
+        gs["current_round"]["hands_left"] = 2
+        gs["current_round"]["discards_left"] = 1
+        gs["blind"].chips = 999_999_999
+
+        step(gs, PlayHand(card_indices=(0,)))
+
+        assert gs["phase"] == GamePhase.GAME_OVER
+        assert gs["won"] is False
+
 
 # ---------------------------------------------------------------------------
 # Discard
