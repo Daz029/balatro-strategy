@@ -148,6 +148,19 @@ class TestPlayHand:
         step(gs, PlayHand(card_indices=(0,)))
         assert gs["phase"] == GamePhase.GAME_OVER
 
+    def test_game_over_when_play_exhausts_hand_and_deck(self):
+        gs = self._setup_playing()
+        gs["hand"] = [gs["hand"][0]]
+        gs["deck"] = []
+        gs["current_round"]["hands_left"] = 2
+        gs["current_round"]["discards_left"] = 1
+        gs["blind"].chips = 999_999_999
+
+        step(gs, PlayHand(card_indices=(0,)))
+
+        assert gs["phase"] == GamePhase.GAME_OVER
+        assert gs["won"] is False
+
 
 # ---------------------------------------------------------------------------
 # Discard
@@ -327,6 +340,41 @@ class TestPackOpening:
         step(gs, SkipPack())
         assert gs["phase"] == GamePhase.SHOP
         assert gs["pack_cards"] == []
+
+    def test_double_meteor_tag_packs_close_sequentially_when_picked(self):
+        gs = _init_gs("DOUBLE_METEOR_PICK")
+        gs["awarded_tags"] = [{"key": "tag_double", "result": None, "blind": "Small"}]
+        gs["round_resets"]["blind_tags"]["Small"] = "tag_meteor"
+
+        step(gs, SkipBlind())
+        assert gs["phase"] == GamePhase.PACK_OPENING
+
+        first_choices = gs["pack_choices_remaining"]
+        for _ in range(first_choices):
+            step(gs, PickPackCard(card_index=0))
+        assert gs["phase"] == GamePhase.PACK_OPENING
+        assert gs["pack_choices_remaining"] > 0
+
+        second_choices = gs["pack_choices_remaining"]
+        for _ in range(second_choices):
+            step(gs, PickPackCard(card_index=0))
+        assert gs["phase"] == GamePhase.BLIND_SELECT
+
+    def test_double_meteor_tag_packs_close_sequentially_when_skipped(self):
+        gs = _init_gs("DOUBLE_METEOR_SKIP")
+        gs["awarded_tags"] = [{"key": "tag_double", "result": None, "blind": "Small"}]
+        gs["round_resets"]["blind_tags"]["Small"] = "tag_meteor"
+
+        step(gs, SkipBlind())
+        assert gs["phase"] == GamePhase.PACK_OPENING
+
+        step(gs, SkipPack())
+        assert gs["phase"] == GamePhase.PACK_OPENING
+        assert gs["pack_choices_remaining"] > 0
+
+        step(gs, SkipPack())
+        assert gs["phase"] == GamePhase.BLIND_SELECT
+
 
 
 class TestUseConsumable:

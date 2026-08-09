@@ -14,6 +14,8 @@ Critical invariants:
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
@@ -24,9 +26,9 @@ import gymnasium  # noqa: E402
 import torch  # noqa: E402
 from eval_shop_policy import NextRoundPolicy, eval_seeds, load_policy, run_suite  # noqa: E402
 from gymnasium import spaces  # noqa: E402
-from sb3_contrib.common.maskable.distributions import MaskableCategorical  # noqa: E402
 from train_shop_ppo import (  # noqa: E402
     CountBonus,
+    NormalizedEntropyCallback,
     ScheduleCallback,
     ShopReservoir,
     ShopRewardWrapper,
@@ -42,6 +44,7 @@ from jackdaw.agents.shop_action_space import (  # noqa: E402
     NUM_TOTAL_ACTIONS,
     NUM_TOTAL_ACTIONS_S1,
     ShopActionFamily,
+    decode_shop_action,
     shop_action,
 )
 from jackdaw.env.shop_gym import ShopGymEnv, blind_clear_bonus  # noqa: E402
@@ -51,6 +54,59 @@ from jackdaw.env.shop_run_adapter import ShopRunConfig  # noqa: E402
 def _card_set(card) -> str:
     ability = getattr(card, "ability", None)
     return ability.get("set", "") if isinstance(ability, dict) else ""
+
+
+class _JokerTransactionStub(gymnasium.Env):
+    observation_space = spaces.Box(0, 1, (1,), dtype=np.float32)
+    action_space = spaces.Discrete(NUM_TOTAL_ACTIONS_S1)
+
+    def __init__(self, jokers, shop_cards, shop_vouchers=None):
+        self.raw_state = {
+            "jokers": list(jokers),
+            "shop_cards": list(shop_cards),
+            "shop_vouchers": list(shop_vouchers or []),
+            "round_resets": {"ante": 1},
+        }
+        self.pending = None
+
+    def reset(self, **kwargs):
+        return np.zeros(1, dtype=np.float32), {
+            "reward_components": {"blind_bonus": 0.0, "win": 0.0}
+        }
+
+    def step(self, action):
+        family, slot = decode_shop_action(action)
+        if family is ShopActionFamily.BuyCard:
+            card = self.raw_state["shop_cards"].pop(slot)
+            if _card_set(card) == "Joker":
+                self.raw_state["jokers"].append(card)
+        elif family is ShopActionFamily.SellJoker:
+            self.raw_state["jokers"].pop(slot)
+        return (
+            np.zeros(1, dtype=np.float32),
+            0.0,
+            False,
+            False,
+            {"reward_components": {"blind_bonus": 0.0, "win": 0.0}},
+        )
+
+    def action_masks(self):
+        return np.ones(NUM_TOTAL_ACTIONS_S1, dtype=bool)
+
+
+def _joker(key="j_zany_joker", *, edition=None, **stickers):
+    return SimpleNamespace(
+        center_key=key,
+        ability={"set": "Joker"},
+        edition=edition,
+        eternal=stickers.get("eternal", False),
+        perishable=stickers.get("perishable", False),
+        rental=stickers.get("rental", False),
+    )
+
+
+def _voucher(key):
+    return SimpleNamespace(center_key=key)
 
 
 class TestSchedules:
@@ -155,6 +211,162 @@ class TestRewardWrapper:
         )
         obs, info = env.reset(options={"episode_seed": seed})
         return env, schedules, obs, info
+
+    def _make_transaction_stub(
+        self,
+        *,
+        reward=-0.1,
+        decay=True,
+        jokers=None,
+        shop_cards=None,
+        shop_vouchers=None,
+        skip_tag_reward=None,
+        skip_tag_decay=True,
+    ):
+        schedules = TrainingSchedules(blend_beta0=0.0, count_beta0=0.0)
+        env = ShopRewardWrapper(
+            _JokerTransactionStub(jokers or [], shop_cards or [], shop_vouchers),
+            schedules,
+            CountBonus(),
+            immediate_joker_sell_reward=reward,
+            immediate_joker_sell_decay=decay,
+            skip_tag_reward=skip_tag_reward,
+            skip_tag_decay=skip_tag_decay,
+        )
+        env.reset()
+        return env, schedules
+
+    def test_immediate_duplicate_joker_sale_ignores_position(self):
+        env, _ = self._make_transaction_stub(
+            jokers=[_joker() for _ in range(3)],
+            shop_cards=[_joker()],
+        )
+
+        env.step(shop_action(ShopActionFamily.BuyCard, 0))
+        _, reward, _, _, info = env.step(shop_action(ShopActionFamily.SellJoker, 0))
+
+        assert reward == pytest.approx(-0.1)
+        assert info["reward_components"]["immediate_joker_sell_reward"] == pytest.approx(-0.1)
+
+    def test_tracker_requires_matching_stickers_and_editions(self):
+        env, _ = self._make_transaction_stub(
+            jokers=[_joker(edition={"foil": True}, rental=True), _joker()],
+            shop_cards=[_joker()],
+        )
+
+        env.step(shop_action(ShopActionFamily.BuyCard, 0))
+        _, reward, _, _, info = env.step(shop_action(ShopActionFamily.SellJoker, 0))
+
+        assert reward == 0.0
+        assert info["reward_components"]["immediate_joker_sell_reward"] == 0.0
+
+    @pytest.mark.parametrize("bought", [_joker("j_diet_cola"), _joker(rental=True)])
+    def test_diet_cola_and_rental_are_not_stored_as_last_bought(self, bought):
+        env, _ = self._make_transaction_stub(shop_cards=[bought])
+
+        env.step(shop_action(ShopActionFamily.BuyCard, 0))
+
+        assert env._last_bought_joker is None
+
+    @pytest.mark.parametrize(
+        ("jokers", "shop_cards", "shop_vouchers"),
+        [
+            ([_joker("j_campfire"), _joker()], [_joker()], []),
+            ([_joker()], [_joker("j_diet_cola")], []),
+            ([_joker()], [_joker(rental=True)], []),
+            ([_joker()], [_joker()], [_voucher("v_overstock_norm")]),
+            ([_joker()], [_joker()], [_voucher("v_overstock_plus")]),
+        ],
+    )
+    def test_buy_sell_reward_is_suppressed_by_special_cases(
+        self, jokers, shop_cards, shop_vouchers
+    ):
+        env, _ = self._make_transaction_stub(
+            jokers=jokers,
+            shop_cards=shop_cards,
+            shop_vouchers=shop_vouchers,
+        )
+
+        env.step(shop_action(ShopActionFamily.BuyCard, 0))
+        _, reward, _, _, info = env.step(
+            shop_action(ShopActionFamily.SellJoker, len(jokers))
+        )
+
+        assert reward == 0.0
+        assert info["reward_components"]["immediate_joker_sell_reward"] == 0.0
+
+    def test_any_intervening_action_clears_tracker_and_buy_overwrites_it(self):
+        env, _ = self._make_transaction_stub(
+            jokers=[_joker(), _joker("j_mad_joker")],
+            shop_cards=[_joker(), _joker("j_mad_joker")],
+        )
+
+        env.step(shop_action(ShopActionFamily.BuyCard, 0))
+        env.step(shop_action(ShopActionFamily.BuyCard, 0))
+        _, reward, _, _, info = env.step(shop_action(ShopActionFamily.SellJoker, 0))
+        assert reward == 0.0
+        assert info["reward_components"]["immediate_joker_sell_reward"] == 0.0
+
+        env.step(shop_action(ShopActionFamily.Reroll))
+        _, reward, _, _, info = env.step(shop_action(ShopActionFamily.SellJoker, 0))
+        assert reward == 0.0
+        assert info["reward_components"]["immediate_joker_sell_reward"] == 0.0
+
+    def test_reward_can_decay_or_remain_constant(self):
+        decayed, schedules = self._make_transaction_stub(
+            reward=-0.4, decay=True, jokers=[_joker()], shop_cards=[_joker()]
+        )
+        schedules.progress_remaining = 0.25
+        decayed.step(shop_action(ShopActionFamily.BuyCard, 0))
+        _, reward, _, _, _ = decayed.step(shop_action(ShopActionFamily.SellJoker, 0))
+        assert reward == pytest.approx(-0.1)
+
+        constant, schedules = self._make_transaction_stub(
+            reward=-0.4, decay=False, jokers=[_joker()], shop_cards=[_joker()]
+        )
+        schedules.progress_remaining = 0.25
+        constant.step(shop_action(ShopActionFamily.BuyCard, 0))
+        _, reward, _, _, _ = constant.step(shop_action(ShopActionFamily.SellJoker, 0))
+        assert reward == pytest.approx(-0.4)
+
+    def test_reward_flag_enables_feature_and_no_decay_requires_reward(self):
+        args = parse_args(
+            ["--immediate-joker-sell-reward", "-0.25", "--immediate-joker-sell-no-decay"]
+        )
+        assert args.immediate_joker_sell_reward == -0.25
+        assert args.immediate_joker_sell_no_decay is True
+
+        with pytest.raises(SystemExit):
+            parse_args(["--immediate-joker-sell-no-decay"])
+
+        args = parse_args(["--skip-tag-reward", "-0.3", "--skip-tag-no-decay"])
+        assert args.skip_tag_reward == -0.3
+        assert args.skip_tag_no_decay is True
+
+        with pytest.raises(SystemExit):
+            parse_args(["--skip-tag-no-decay"])
+
+    def test_skip_tag_reward_fires_only_on_skip_blind(self):
+        env, schedules = self._make_transaction_stub(skip_tag_reward=-0.4)
+        schedules.progress_remaining = 0.25
+
+        _, reward, _, _, info = env.step(shop_action(ShopActionFamily.SkipBlind))
+        assert reward == pytest.approx(-0.1)
+        assert info["reward_components"]["skip_tag_reward"] == pytest.approx(-0.1)
+
+        _, reward, _, _, info = env.step(shop_action(ShopActionFamily.NextRound))
+        assert reward == 0.0
+        assert info["reward_components"]["skip_tag_reward"] == 0.0
+
+    def test_skip_tag_reward_can_remain_constant(self):
+        env, schedules = self._make_transaction_stub(
+            skip_tag_reward=-0.4, skip_tag_decay=False
+        )
+        schedules.progress_remaining = 0.25
+
+        _, reward, _, _, info = env.step(shop_action(ShopActionFamily.SkipBlind))
+        assert reward == pytest.approx(-0.4)
+        assert info["reward_components"]["skip_tag_reward"] == pytest.approx(-0.4)
 
     def test_blends_blind_bonus(self):
         env, schedules, _, _ = self._make()
@@ -305,6 +517,33 @@ class TestLearnSmoke:
             assert result["mean_steps"] >= 1.0
 
 
+class TestNormalizedEntropy:
+    def test_logs_normalized_entropy(self):
+        schedules = TrainingSchedules()
+        model, _ = build_model(
+            win_ante=1,
+            schedules=schedules,
+            reservoir=ShopReservoir(seed=0),
+            seed=0,
+            n_envs=1,
+            n_steps=8,
+            batch_size=8,
+            device="cpu",
+        )
+        model.learn(
+            total_timesteps=16,
+            callback=[ScheduleCallback(schedules), NormalizedEntropyCallback()],
+        )
+
+        assert "rollout/normalized_entropy" in model.logger.name_to_value
+        normalized_entropy = model.logger.name_to_value["rollout/normalized_entropy"]
+        assert np.isfinite(normalized_entropy)
+        assert 0.0 <= normalized_entropy <= 1.0
+        assert "rollout/mean_legal_actions" in model.logger.name_to_value
+        mean_legal_actions = model.logger.name_to_value["rollout/mean_legal_actions"]
+        assert mean_legal_actions >= 1.0
+
+
 class TestS1Wiring:
     def test_load_hand_policy_threads_money_ordering(self, monkeypatch, tmp_path):
         captured = {}
@@ -405,6 +644,67 @@ class TestS1Wiring:
             s1_schema=True,
         )
         assert resumed.action_space.n == NUM_TOTAL_ACTIONS_S1
+
+    def test_init_temperature_raises_entropy_and_keeps_the_ranking(self, tmp_path):
+        """Softening must flatten the softmax without reordering preferences.
+
+        The warm start's learned ranking is the asset worth carrying to the
+        next horizon; only its confidence is pathological.
+        """
+
+        model, _ = build_model(
+            win_ante=1,
+            schedules=TrainingSchedules(),
+            reservoir=ShopReservoir(seed=0),
+            seed=0,
+            n_envs=1,
+            n_steps=8,
+            batch_size=8,
+            device="cpu",
+            s1_schema=True,
+        )
+        # A fresh head is near-uniform; saturate it so the test starts from
+        # the collapsed state a converged stage actually hands over.
+        with torch.no_grad():
+            model.policy.action_net.weight.mul_(50.0)
+            model.policy.action_net.bias.mul_(50.0)
+        checkpoint = tmp_path / "collapsed.zip"
+        model.save(str(checkpoint))
+
+        obs = model.env.reset()
+
+        def _logits(m):
+            obs_tensor, _ = m.policy.obs_to_tensor(obs)
+            with torch.no_grad():
+                return m.policy.get_distribution(obs_tensor).distribution.logits[0]
+
+        def _entropy(logits):
+            probs = torch.softmax(logits, dim=-1)
+            return float(-(probs * torch.log(probs.clamp_min(1e-12))).sum())
+
+        load_kwargs = dict(
+            win_ante=1,
+            schedules=TrainingSchedules(),
+            reservoir=ShopReservoir(seed=0),
+            init_from=checkpoint,
+            seed=0,
+            n_envs=1,
+            n_steps=8,
+            batch_size=8,
+            device="cpu",
+            s1_schema=True,
+        )
+        hot, _ = build_model(**load_kwargs)
+        cool, _ = build_model(**load_kwargs, init_temperature=10.0)
+
+        hot_logits, cool_logits = _logits(hot), _logits(cool)
+        assert _entropy(cool_logits) > _entropy(hot_logits)
+        # Uniform scaling is order-preserving, so argsort is identical.
+        assert torch.equal(torch.argsort(hot_logits), torch.argsort(cool_logits))
+
+    def test_init_temperature_requires_init_from(self):
+        with pytest.raises(SystemExit):
+            parse_args(["--init-temperature", "5.0"])
 
     def test_phi_requires_s1_and_replaces_nonzero_blend(self):
         with pytest.raises(SystemExit):
@@ -533,50 +833,6 @@ class TestFiniteGradGuard:
             model.policy.action_net.bias.view(-1)[1] = 0.0
         model.policy.action_net(torch.zeros(4, model.policy.action_net.in_features))
         assert model._finite_guard_logit_catches == 2  # finite forward: no bump
-
-    def test_stale_probs_cache_does_not_fail_the_simplex_check(self):
-        # The s1 crash (~320k steps). MaskableCategorical caches probs from the
-        # UNMASKED logits, and apply_masking's re-init re-validates that cache
-        # instead of the distribution it is building -- so the check fires on a
-        # tensor layer 3's clamp never touches, while the masked logits here are
-        # finite. Fails pre-guard with the reported Simplex ValueError.
-        build_model(
-            win_ante=1,
-            schedules=TrainingSchedules(),
-            reservoir=ShopReservoir(seed=0),
-            seed=0,
-            n_envs=1,
-            n_steps=8,
-            batch_size=8,
-            device="cpu",
-        )
-        dist = MaskableCategorical(logits=torch.randn(2, 8))
-        dist.probs = torch.full((2, 8), float("nan"))
-        dist.apply_masking(torch.ones(2, 8, dtype=torch.bool))
-        assert torch.isfinite(dist.probs).all()
-        assert torch.allclose(dist.probs.sum(-1), torch.ones(2), atol=1e-6)
-
-    def test_genuinely_nonfinite_masked_probs_are_repaired_not_raised(self):
-        # Real poison must survive as a near-no-op update rather than killing a
-        # multi-hour run -- and must stay a legal distribution.
-        build_model(
-            win_ante=1,
-            schedules=TrainingSchedules(),
-            reservoir=ShopReservoir(seed=0),
-            seed=0,
-            n_envs=1,
-            n_steps=8,
-            batch_size=8,
-            device="cpu",
-        )
-        dist = MaskableCategorical(logits=torch.randn(2, 8))
-        # Poison arriving AFTER construction: layer 3 keeps non-finite logits
-        # out of the constructor, so this is the shape real poison must take.
-        dist._original_logits = torch.full((2, 8), float("nan"))
-        dist.apply_masking(torch.ones(2, 8, dtype=torch.bool))
-        assert torch.isfinite(dist.probs).all()
-        assert torch.allclose(dist.probs.sum(-1), torch.ones(2), atol=1e-6)
-
 
 class TestEvalSuite:
     def test_eval_seeds_reserved_prefix(self):

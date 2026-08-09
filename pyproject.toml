@@ -14,6 +14,14 @@ dependencies = ["gymnasium>=1.0", "numpy>=1.24"]
 
 [project.optional-dependencies]
 train = ["sb3-contrib>=2.3", "stable-baselines3>=2.3", "tensorboard>=2.14", "torch>=2.0"]
+# Offline analysis of training artifacts (scripts/, never jackdaw/).
+analysis = [
+    "matplotlib>=3.8",
+    "plotly>=6.0",
+    "scikit-learn>=1.4",
+    "scipy>=1.11",
+    "umap-learn>=0.5",
+]
 
 [build-system]
 requires = ["setuptools>=68"]

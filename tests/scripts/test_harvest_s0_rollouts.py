@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import pickle
 
+import harvest_s0_rollouts as harvest_module
+import pytest
 from harvest_s0_rollouts import (
     DET_PREFIX,
     HarvestingHandPolicy,
@@ -29,6 +31,7 @@ from harvest_s0_rollouts import (
     extract_hand_meta,
     harvest_runs,
     load_metadata,
+    main,
 )
 
 from jackdaw.agents.greedy_hand_policy import GreedyHandPolicy
@@ -37,7 +40,14 @@ from jackdaw.engine.game import step as engine_step
 from jackdaw.env.shop_run_adapter import ShopRunConfig
 
 
-def _run_harvest(tmp_path, n_det=6, n_sampled=0, source="det", prefix=DET_PREFIX):
+def _run_harvest(
+    tmp_path,
+    n_det=6,
+    n_sampled=0,
+    source="det",
+    prefix=DET_PREFIX,
+    s1_schema=False,
+):
     sink = HarvestSink(tmp_path, git_sha_stamp="testsha", schema_note="note")
     n = harvest_runs(
         NextRoundPolicy(),
@@ -48,6 +58,7 @@ def _run_harvest(tmp_path, n_det=6, n_sampled=0, source="det", prefix=DET_PREFIX
         source=source,
         win_ante=2,
         max_steps=128,
+        s1_schema=s1_schema,
     )
     sink.close()
     return sink, n
@@ -120,6 +131,81 @@ class TestCaptureAndMetadata:
         for r in rows[:20]:
             gs = pickle.loads(_load_blob(tmp_path, r["run_seed"], r["record_id"]))
             assert gs["phase"] == GamePhase.SHOP
+
+    def test_s1_schema_records_and_restores_hand_state(self, tmp_path):
+        sink, _ = _run_harvest(tmp_path, n_det=6, s1_schema=True)
+        rows = load_metadata(tmp_path)
+        hand_rows = [r for r in rows if r["kind"] == "hand"]
+
+        assert (tmp_path / "metadata.jsonl").exists()
+        assert list((tmp_path / "blobs").glob("*.pkl"))
+        assert hand_rows
+        row = hand_rows[0]
+        gs = pickle.loads(_load_blob(tmp_path, row["run_seed"], row["record_id"]))
+        assert gs["phase"] == GamePhase.SELECTING_HAND
+
+
+class TestCliOptions:
+    def test_partner_money_ordering_requires_hand_policy(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "harvest_s0_rollouts.py",
+                "--output-dir",
+                str(tmp_path),
+                "--partner-money-ordering",
+            ],
+        )
+
+        with pytest.raises(SystemExit):
+            main()
+
+    def test_seed_prefixes_thread_to_both_passes(self, monkeypatch, tmp_path):
+        prefixes = []
+
+        class FakeShopModelPolicy:
+            def __init__(self, *args, **kwargs):
+                pass
+
+        class FakeHandCheckpointPolicy:
+            def __init__(self, *args, **kwargs):
+                pass
+
+        def fake_harvest_runs(*args, **kwargs):
+            prefixes.append(kwargs["seed_prefix"])
+            return 0
+
+        monkeypatch.setattr(harvest_module, "ShopModelPolicy", FakeShopModelPolicy)
+        monkeypatch.setattr(
+            "jackdaw.agents.hand_checkpoint_policy.HandCheckpointPolicy",
+            FakeHandCheckpointPolicy,
+        )
+        monkeypatch.setattr(harvest_module, "harvest_runs", fake_harvest_runs)
+
+        def run_cli(output_dir, *extra_args):
+            monkeypatch.setattr(
+                "sys.argv",
+                [
+                    "harvest_s0_rollouts.py",
+                    "--output-dir",
+                    str(output_dir),
+                    "--shop-policy",
+                    "shop.zip",
+                    "--hand-policy",
+                    "hand.zip",
+                    "--n-det",
+                    "1",
+                    "--n-sampled",
+                    "1",
+                    *extra_args,
+                ],
+            )
+            main()
+
+        run_cli(tmp_path / "default")
+        run_cli(tmp_path / "custom", "--seed-prefix", "HARVEST_H2")
+
+        assert prefixes == ["HARVEST", "HARVEST_S", "HARVEST_H2", "HARVEST_H2_S"]
 
 
 class TestRoundTrip:

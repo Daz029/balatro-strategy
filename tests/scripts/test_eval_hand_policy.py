@@ -125,6 +125,43 @@ class _ForcedPointerPolicy:
         return np.array([int(ActionType.PlayHand), 0, 40, 40, 40, 40], dtype=np.int64)
 
 
+class _AlwaysPlayFirstPointerPolicy:
+    obs_version = 2
+    action_version = 2
+
+    def act(self, obs):
+        return np.array([int(ActionType.PlayHand), 0, 40, 40, 40, 40], dtype=np.int64)
+
+
+def test_run_suite_can_dump_exact_hand_decisions(tmp_path: Path):
+    trace_path = tmp_path / "hand_trace.jsonl"
+
+    result = run_suite(
+        _AlwaysPlayFirstPointerPolicy(),
+        HandPlayConfig(),
+        n_episodes=1,
+        dump_decisions=trace_path,
+    )
+
+    records = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+    assert records
+    first = records[0]
+    assert result["n_episodes"] == 1
+    assert first["seed"] == "EVAL_00000000"
+    assert first["step"] == 1
+    assert first["action_type"] == "PlayHand"
+    assert first["selected_indices"] == [0]
+    assert first["selected_cards"] == [first["pre_state"]["hand"][0]]
+    assert first["pre_state"]["phase"] == "selecting_hand"
+    assert first["pre_state"]["current_round"]["hands_left"] >= 1
+    assert len(first["pre_state"]["hand"]) >= 1
+    assert "base" in first["pre_state"]["hand"][0]
+    assert "jokers" in first["pre_state"]
+    assert "consumables" in first["pre_state"]
+    assert "post_state" in first
+    assert isinstance(first["score_delta"], int)
+
+
 def test_pointer_fingerprint_uses_type_token_for_first_discard():
     rows = run_episodes(lambda env: _ForcedPointerPolicy(), HandPlayConfig(), n_episodes=3)
     assert rows[0]["first_discard"] is True

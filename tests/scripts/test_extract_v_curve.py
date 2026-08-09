@@ -24,6 +24,7 @@ import json
 
 import numpy as np
 import pytest
+import torch
 from extract_v_curve import (
     CellAccumulator,
     build_artifact,
@@ -41,8 +42,9 @@ from extract_v_curve import (
 from harvest_s0_rollouts import HarvestSink, NextRoundPolicy, harvest_runs
 
 from jackdaw.agents.greedy_hand_policy import GreedyHandPolicy
+from jackdaw.agents.shop_policy import ShopFeaturesExtractor
 from jackdaw.agents.v_curve import VCurve, load_v_curve
-from jackdaw.env.shop_obs import build_shop_observation
+from jackdaw.env.shop_obs import build_shop_observation, observation_space
 
 # ---------------------------------------------------------------------------
 # Shared tiny corpus -- real engine states via the real harvest pipeline
@@ -202,6 +204,56 @@ class DollarProbeCritic:
     def values(self, obs_batch: dict[str, np.ndarray]) -> np.ndarray:
         dollars = np.round(obs_batch["shop_context"][:, 0] * 50.0).astype(int)
         return np.array([self._fn(int(d)) for d in dollars], dtype=np.float32)
+
+
+class S1ExtractorCritic:
+    """Small real feature extractor reproducing an s1 checkpoint's input contract."""
+
+    s1_schema = True
+
+    def __init__(self):
+        self._extractor = ShopFeaturesExtractor(
+            observation_space(s1_schema=True), s1_schema=True
+        )
+        self._extractor.eval()
+
+    def values(self, obs_batch: dict[str, np.ndarray]) -> np.ndarray:
+        tensor_obs = {key: torch.as_tensor(value) for key, value in obs_batch.items()}
+        with torch.no_grad():
+            return self._extractor(tensor_obs)[:, 0].numpy()
+
+
+class ExplodingCritic:
+    def __init__(self):
+        self.calls = 0
+
+    def values(self, obs_batch: dict[str, np.ndarray]) -> np.ndarray:
+        self.calls += 1
+        raise ValueError("synthetic critic failure")
+
+
+class TestSchemaCompatibility:
+    def test_s1_critic_gets_s1_observations(self, corpus, blob_dir):
+        _tmp_path, rows = corpus
+        acc, failures = run_sweep(
+            rows[:1], blob_dir, [0], S1ExtractorCritic(), batch_size=1
+        )
+
+        assert not failures
+        assert acc.n_total == 1
+
+
+class TestFailureHandling:
+    def test_critic_failure_aborts_without_retrying_the_failed_batch(self, corpus, blob_dir):
+        _tmp_path, rows = corpus
+        critic = ExplodingCritic()
+
+        with pytest.raises(RuntimeError, match="critic forward failed") as caught:
+            run_sweep(rows[:2], blob_dir, [0], critic, batch_size=1)
+
+        assert critic.calls == 1
+        assert isinstance(caught.value.__cause__, ValueError)
+        assert str(caught.value.__cause__) == "synthetic critic failure"
 
 
 class TestStackObs:

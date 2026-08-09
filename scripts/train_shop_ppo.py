@@ -83,7 +83,6 @@ import gymnasium  # noqa: E402
 import torch  # noqa: E402
 from sb3_contrib import MaskablePPO  # noqa: E402
 from sb3_contrib.common.maskable.callbacks import MaskableEvalCallback  # noqa: E402
-from sb3_contrib.common.maskable.distributions import MaskableCategorical  # noqa: E402
 from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback  # noqa: E402
 from stable_baselines3.common.utils import FloatSchedule  # noqa: E402
 from stable_baselines3.common.vec_env import DummyVecEnv  # noqa: E402
@@ -93,10 +92,14 @@ from jackdaw.agents.phi_shaping import S0CriticPhi  # noqa: E402
 from jackdaw.agents.shop_action_space import (  # noqa: E402
     NUM_TOTAL_ACTIONS,
     NUM_TOTAL_ACTIONS_S1,
+    ShopActionFamily,
+    decode_shop_action,
+    joker_row_for_sell_action,
     target_combo_for_action,
 )
 from jackdaw.agents.shop_policy import ShopFeaturesExtractor  # noqa: E402
 from jackdaw.engine.actions import GamePhase  # noqa: E402
+from jackdaw.env.maskable_guard import install_stale_probs_guard  # noqa: E402
 from jackdaw.env.shop_gym import ShopGymEnv  # noqa: E402
 from jackdaw.env.shop_run_adapter import ShopRunConfig  # noqa: E402
 
@@ -154,6 +157,58 @@ class ScheduleCallback(BaseCallback):
         self.logger.record("shop/count_beta", self._schedules.count_beta)
         self.logger.record("shop/phi_beta", self._schedules.phi_beta)
         return True
+
+
+class NormalizedEntropyCallback(BaseCallback):
+    """Logs entropy normalized by the number of legal actions per state."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._last_normalized_entropy: float | None = None
+        self._last_mean_legal_actions: float | None = None
+
+    def _on_step(self) -> bool:
+        return True
+
+    def _on_rollout_end(self) -> None:
+        buf = self.model.rollout_buffer
+        if buf.buffer_size == 0 or not buf.full:
+            return
+
+        entropy_sum = torch.zeros((), device=self.model.device)
+        valid_count = torch.zeros((), dtype=torch.long, device=self.model.device)
+        legal_sum = torch.zeros((), device=self.model.device)
+        total_states = 0
+        # Exclude forced moves: they have no exploration signal and ln(1) is 0.
+        with torch.no_grad():
+            for batch in buf.get(batch_size=None):
+                dist = self.model.policy.get_distribution(
+                    batch.observations, action_masks=batch.action_masks
+                )
+                entropy = dist.entropy()
+                legal = batch.action_masks.reshape(entropy.shape[0], -1).sum(dim=1).float()
+                valid = legal > 1
+                norm = entropy[valid] / torch.log(legal[valid])
+                entropy_sum += norm.sum()
+                valid_count += valid.sum()
+                legal_sum += legal.sum()
+                total_states += entropy.shape[0]
+
+        if valid_count.item() > 0:
+            normalized_entropy = (entropy_sum / valid_count).item()
+            mean_legal_actions = (legal_sum / total_states).item()
+            self._last_normalized_entropy = normalized_entropy
+            self._last_mean_legal_actions = mean_legal_actions
+            self.logger.record(
+                "rollout/normalized_entropy", normalized_entropy
+            )
+            self.logger.record("rollout/mean_legal_actions", mean_legal_actions)
+
+    def _on_training_end(self) -> None:
+        # Keep the final diagnostics available after SB3's last logger dump.
+        if self._last_normalized_entropy is not None:
+            self.logger.record("rollout/normalized_entropy", self._last_normalized_entropy)
+            self.logger.record("rollout/mean_legal_actions", self._last_mean_legal_actions)
 
 
 class ReservoirCheckpointCallback(BaseCallback):
@@ -303,9 +358,13 @@ class ShopReservoir:
 class ShopRewardWrapper(gymnasium.Wrapper):
     """Blends reward components, adds count bonuses, harvests snapshots.
 
-    The wrapped env's reward stays the honest ``1{win}``; everything added
-    here is scheduled to zero by end of training. All extra terms are also
-    reported in ``info["reward_components"]`` for logging/diagnosis.
+    The wrapped env's reward stays the honest ``1{win}``; the existing shaping
+    terms are scheduled to zero by end of training. All extra terms are also
+    reported in ``info["reward_components"]`` for logging/diagnosis. When
+    configured, a joker bought on the immediately preceding step and then
+    sold receives the configured reward; any intervening action clears that
+    tracker. A configured skip-tag reward similarly fires on ``SkipBlind``.
+    Either reward's decay can be disabled explicitly for experiments.
     """
 
     def __init__(
@@ -317,6 +376,10 @@ class ShopRewardWrapper(gymnasium.Wrapper):
         harvest_prob: float = 0.02,
         seed: int = 0,
         phi: Callable[[dict[str, Any]], float] | None = None,
+        immediate_joker_sell_reward: float | None = None,
+        immediate_joker_sell_decay: bool = True,
+        skip_tag_reward: float | None = None,
+        skip_tag_decay: bool = True,
     ) -> None:
         super().__init__(env)
         self._schedules = schedules
@@ -325,8 +388,13 @@ class ShopRewardWrapper(gymnasium.Wrapper):
         self._harvest_prob = harvest_prob
         self._rng = np.random.default_rng(seed)
         self._prev_joker_set: tuple[str, ...] = ()
+        self._last_bought_joker: tuple[Any, ...] | None = None
         self._phi = phi
         self._phi_prev = 0.0
+        self._immediate_joker_sell_reward = immediate_joker_sell_reward
+        self._immediate_joker_sell_decay = immediate_joker_sell_decay
+        self._skip_tag_reward = skip_tag_reward
+        self._skip_tag_decay = skip_tag_decay
 
     # sb3-contrib discovers masking via this method; define it explicitly
     # rather than relying on Wrapper.__getattr__ forwarding.
@@ -336,6 +404,95 @@ class ShopRewardWrapper(gymnasium.Wrapper):
     def _joker_set(self) -> tuple[str, ...]:
         gs = self.env.raw_state
         return tuple(sorted(getattr(j, "center_key", "") for j in gs.get("jokers", [])))
+
+    @staticmethod
+    def _joker_signature(card: Any) -> tuple[Any, ...] | None:
+        """Return the identity used to match an immediate joker sale.
+
+        The list position is intentionally absent: buying a duplicate joker
+        can append it in a different position than the one the policy sells.
+        Editions are normalized so their dict insertion order is irrelevant,
+        and the three joker stickers are part of the identity.
+        """
+        ability = getattr(card, "ability", None)
+        if not isinstance(ability, dict) or ability.get("set") != "Joker":
+            return None
+
+        edition = getattr(card, "edition", None)
+        edition_key = tuple(
+            sorted((str(key), repr(value)) for key, value in (edition or {}).items())
+        )
+        stickers = tuple(
+            bool(getattr(card, sticker, False) or ability.get(sticker, False))
+            for sticker in ("eternal", "perishable", "rental")
+        )
+        return (getattr(card, "center_key", ""), edition_key, stickers)
+
+    @staticmethod
+    def _action_family_and_slot(action: int) -> tuple[ShopActionFamily, int] | None:
+        # The wrapper is also used with small test environments whose action
+        # spaces are not the canonical shop action space.
+        try:
+            return decode_shop_action(int(action))
+        except (TypeError, ValueError):
+            return None
+
+    def _joker_transaction_state(
+        self, action: int
+    ) -> tuple[tuple[ShopActionFamily, int] | None, tuple[Any, ...] | None, tuple[Any, ...] | None]:
+        """Capture the pre-step joker involved in a buy or sell action."""
+        decoded = self._action_family_and_slot(action)
+        if decoded is None:
+            return None, None, None
+
+        family, slot = decoded
+        gs = self.env.raw_state
+        bought_joker = None
+        sold_joker = None
+        if family is ShopActionFamily.BuyCard:
+            shop_cards = gs.get("shop_cards", [])
+            if slot < len(shop_cards):
+                bought_joker = self._joker_signature(shop_cards[slot])
+        elif family in (ShopActionFamily.SellJoker, ShopActionFamily.SellJokerExt):
+            joker_row = joker_row_for_sell_action(action)
+            jokers = gs.get("jokers", [])
+            if joker_row < len(jokers):
+                sold_joker = self._joker_signature(jokers[joker_row])
+        return decoded, bought_joker, sold_joker
+
+    def _buy_sell_is_suppressed(
+        self,
+        bought_joker: tuple[Any, ...] | None,
+        sold_joker: tuple[Any, ...] | None,
+    ) -> bool:
+        """Whether the immediate buy/sell shaping reward is inapplicable."""
+        gs = self.env.raw_state
+        if any(getattr(joker, "center_key", "") == "j_campfire" for joker in gs.get("jokers", [])):
+            return True
+
+        transaction_jokers = (bought_joker, sold_joker)
+        if any(
+            signature is not None and signature[0] == "j_diet_cola"
+            for signature in transaction_jokers
+        ):
+            return True
+        if any(
+            signature is not None and signature[2][2]
+            for signature in transaction_jokers
+        ):
+            return True
+
+        overstock_keys = {"v_overstock_norm", "v_overstock_plus"}
+        return any(
+            getattr(voucher, "center_key", "") in overstock_keys
+            for voucher in gs.get("shop_vouchers", [])
+        )
+
+    @staticmethod
+    def _cannot_be_last_bought_joker(signature: tuple[Any, ...] | None) -> bool:
+        return signature is not None and (
+            signature[0] == "j_diet_cola" or signature[2][2]
+        )
 
     def _pending_carrier_key(self) -> str:
         pending = self.env.pending
@@ -350,6 +507,7 @@ class ShopRewardWrapper(gymnasium.Wrapper):
     def reset(self, **kwargs: Any):
         obs, info = self.env.reset(**kwargs)
         self._prev_joker_set = self._joker_set()
+        self._last_bought_joker = None
         if self._phi is not None:
             self._phi_prev = self._phi(obs)
         return obs, info
@@ -357,9 +515,27 @@ class ShopRewardWrapper(gymnasium.Wrapper):
     def step(self, action: int):
         carrier_key_before = self._pending_carrier_key()
         was_pending = self.env.pending is not None
+        decoded, bought_joker, sold_joker = self._joker_transaction_state(action)
+        skip_tag_decision = decoded is not None and decoded[0] is ShopActionFamily.SkipBlind
+        buy_sell_suppressed = self._buy_sell_is_suppressed(bought_joker, sold_joker)
+        immediate_joker_sell = (
+            decoded is not None
+            and decoded[0] in (ShopActionFamily.SellJoker, ShopActionFamily.SellJokerExt)
+            and self._last_bought_joker is not None
+            and sold_joker == self._last_bought_joker
+            and not buy_sell_suppressed
+        )
 
         obs, reward, terminated, truncated, info = self.env.step(action)
         rc = info["reward_components"]
+
+        # This is deliberately a one-step tracker. A new joker purchase
+        # overwrites the previous candidate; every other action clears it.
+        self._last_bought_joker = (
+            None
+            if self._cannot_be_last_bought_joker(bought_joker)
+            else bought_joker
+        )
 
         bonus = self._schedules.blend_beta * rc["blind_bonus"]
 
@@ -388,6 +564,18 @@ class ShopRewardWrapper(gymnasium.Wrapper):
             rc["phi_term"] = phi_term
             rc["phi_beta"] = self._schedules.phi_beta
 
+        joker_sell_reward = 0.0
+        if immediate_joker_sell and self._immediate_joker_sell_reward is not None:
+            decay = self._schedules.progress_remaining if self._immediate_joker_sell_decay else 1.0
+            joker_sell_reward = self._immediate_joker_sell_reward * decay
+        rc["immediate_joker_sell_reward"] = joker_sell_reward
+
+        skip_tag_reward = 0.0
+        if skip_tag_decision and self._skip_tag_reward is not None:
+            decay = self._schedules.progress_remaining if self._skip_tag_decay else 1.0
+            skip_tag_reward = self._skip_tag_reward * decay
+        rc["skip_tag_reward"] = skip_tag_reward
+
         if (
             self._reservoir is not None
             and not (terminated or truncated)
@@ -399,6 +587,8 @@ class ShopRewardWrapper(gymnasium.Wrapper):
             self._reservoir.add(self.env.snapshot(), ante, pack_pending)
 
         total_reward = reward + bonus + count_bonus
+        total_reward += joker_sell_reward
+        total_reward += skip_tag_reward
         if self._phi is not None:
             total_reward += phi_term
         return obs, total_reward, terminated, truncated, info
@@ -435,6 +625,10 @@ def make_train_env(
     hand_policy: Callable[[dict[str, Any]], Any] | None = None,
     s1_schema: bool = False,
     phi: Callable[[dict[str, Any]], float] | None = None,
+    immediate_joker_sell_reward: float | None = None,
+    immediate_joker_sell_decay: bool = True,
+    skip_tag_reward: float | None = None,
+    skip_tag_decay: bool = True,
 ) -> DummyVecEnv:
     # One partner instance shared across all envs: DummyVecEnv is single-process
     # and the hand policy is a deterministic, stateless argmax, so sharing is
@@ -456,76 +650,15 @@ def make_train_env(
                 harvest_prob=harvest_prob,
                 seed=rank,
                 phi=phi,
+                immediate_joker_sell_reward=immediate_joker_sell_reward,
+                immediate_joker_sell_decay=immediate_joker_sell_decay,
+                skip_tag_reward=skip_tag_reward,
+                skip_tag_decay=skip_tag_decay,
             )
 
         return _make
 
     return DummyVecEnv([factory(rank) for rank in range(n_envs)])
-
-
-_STALE_PROBS_PATCHED = False
-
-
-def _install_stale_probs_guard() -> None:
-    """Layer 4: stop the simplex check firing on a tensor nobody is using.
-
-    ``MaskableCategorical`` caches ``self.probs`` at construction time (from the
-    UNMASKED logits).  ``apply_masking`` then re-runs ``Categorical.__init__``,
-    and ``Distribution.__init__`` validates every entry of ``arg_constraints``
-    that is present in ``__dict__`` -- so it re-validates that STALE cache
-    instead of the masked distribution it is building.  Verified directly: a
-    ``MaskableCategorical`` whose cached ``probs`` are corrupted raises the
-    Simplex error on the next ``apply_masking`` even when the masked logits are
-    perfectly finite.
-
-    That is why layers 1-3 could not stop the observed crash and why the same
-    crash reappeared under s1: layer 3 clamps ``action_net``'s output to +/-30,
-    which provably makes the MASKED probs a valid simplex (confirmed
-    end-to-end against the real widened s1 policy at a 1e30 logit blowup), yet
-    the exception is raised against a cache from an EARLIER pass that the clamp
-    never saw.
-
-    The fix drops the cache before the re-init, so validation sees the tensor
-    actually being constructed.  Genuine poison is still caught -- the masked
-    probs are checked explicitly afterwards -- but it is now repaired and
-    counted rather than killing a multi-hour run, and the offending batch is
-    dumped so the NEXT occurrence is diagnosable instead of inferred.
-    """
-    global _STALE_PROBS_PATCHED
-    if _STALE_PROBS_PATCHED:
-        return
-    _STALE_PROBS_PATCHED = True
-
-    original_apply_masking = MaskableCategorical.apply_masking
-    stats = {"catches": 0}
-
-    def _guarded_apply_masking(self, masks):  # type: ignore[no-untyped-def]
-        # Drop the stale cache: validation must judge the distribution being
-        # built, not the previous one. Categorical repopulates it downstream.
-        self.__dict__.pop("probs", None)
-
-        # Repair genuine poison BEFORE delegating -- the re-init validates the
-        # logits constraint too, so a post-hoc check never gets to run.
-        logits = self._original_logits
-        if not torch.isfinite(logits).all():
-            stats["catches"] += 1
-            n = stats["catches"]
-            bad_rows = (~torch.isfinite(logits).all(dim=-1)).nonzero().flatten().tolist()
-            if n == 1 or n % 100 == 0:
-                print(
-                    f"[stale-probs-guard] non-finite logits reached masking; "
-                    f"repaired (count={n}, rows={bad_rows[:8]}). Run continues.",
-                    file=sys.stderr,
-                    flush=True,
-                )
-            self._original_logits = torch.nan_to_num(
-                logits, nan=0.0, posinf=0.0, neginf=0.0
-            ).clamp(-30.0, 30.0)
-
-        original_apply_masking(self, masks)
-
-    MaskableCategorical.apply_masking = _guarded_apply_masking
-    MaskableCategorical._stale_probs_guard_stats = stats  # type: ignore[attr-defined]
 
 
 def _install_finite_grad_guard(model: MaskablePPO) -> None:
@@ -565,12 +698,13 @@ def _install_finite_grad_guard(model: MaskablePPO) -> None:
        masked positions are set to a huge negative downstream, unaffected.
 
     Layer 3 did NOT hold under s1 — the crash returned at ~320k steps. The
-    reason is in :func:`_install_stale_probs_guard` (layer 4, installed here):
+    reason is in :func:`jackdaw.env.maskable_guard.install_stale_probs_guard`
+    (layer 4, installed by that shared module):
     the simplex check fires on a STALE ``probs`` cache, not on the masked
     distribution layer 3 sanitizes, so no amount of logit clamping can prevent
     it.
     """
-    _install_stale_probs_guard()
+    install_stale_probs_guard()
 
     for param in model.policy.parameters():
         param.register_hook(
@@ -612,6 +746,40 @@ def _install_finite_grad_guard(model: MaskablePPO) -> None:
         return safe
 
     model.policy.action_net.register_forward_hook(_bound_logits)
+
+
+def soften_action_logits(model: MaskablePPO, temperature: float) -> None:
+    """Flatten a warm-started policy's action logits by ``temperature``.
+
+    A converged stage hands the next horizon a near-deterministic policy: the
+    a2 -> a4 transition was measured entering a4 at ~0.05 nats of entropy
+    within a few thousand steps, against 10-40 legal actions (uniform over 10
+    is 2.3 nats).  PPO cannot learn from a policy that never samples anything
+    but its argmax, and neither ``--ent-coef`` nor ``--learning-rate`` fixes
+    it: the bonus claws back against an already-saturated softmax, and a
+    smaller step size only holds the policy at the initialization more
+    faithfully.  The collapse is INHERITED, so it has to be undone at load.
+
+    Dividing the action head's weight AND bias by ``temperature > 1`` scales
+    every logit uniformly, which flattens the softmax while preserving the
+    complete preference ordering -- the argmax, and every ranking below it,
+    are untouched.  That is the property worth having: the previous stage's
+    learned ranking is the asset, its confidence is the pathology.
+
+    Applied only at warm start, never to a fresh model (whose head is already
+    near-uniform) and never mid-run.
+    """
+    if temperature == 1.0:
+        return
+    if temperature <= 0.0:
+        raise ValueError(f"init temperature must be positive, got {temperature}")
+
+    action_net = model.policy.action_net
+    with torch.no_grad():
+        action_net.weight.div_(temperature)
+        if action_net.bias is not None:
+            action_net.bias.div_(temperature)
+    print(f"Softened warm-started action logits by temperature {temperature}.")
 
 
 def _attach_widened_model(
@@ -661,6 +829,7 @@ def build_model(
     counts: CountBonus | None = None,
     reservoir: ShopReservoir | None = None,
     init_from: Path | None = None,
+    init_temperature: float = 1.0,
     seed: int = 0,
     n_envs: int = 4,
     n_steps: int = 256,
@@ -672,6 +841,10 @@ def build_model(
     hand_policy: Callable[[dict[str, Any]], Any] | None = None,
     s1_schema: bool = False,
     phi: Callable[[dict[str, Any]], float] | None = None,
+    immediate_joker_sell_reward: float | None = None,
+    immediate_joker_sell_decay: bool = True,
+    skip_tag_reward: float | None = None,
+    skip_tag_decay: bool = True,
 ) -> tuple[MaskablePPO, TrainingSchedules]:
     """Construct (or resume) the shop MaskablePPO with its training env."""
     schedules = schedules or TrainingSchedules()
@@ -695,6 +868,10 @@ def build_model(
             hand_policy=hand_policy,
             s1_schema=True,
             phi=phi,
+            immediate_joker_sell_reward=immediate_joker_sell_reward,
+            immediate_joker_sell_decay=immediate_joker_sell_decay,
+            skip_tag_reward=skip_tag_reward,
+            skip_tag_decay=skip_tag_decay,
         )
         _attach_widened_model(
             model,
@@ -707,6 +884,7 @@ def build_model(
         model.tensorboard_log = log_dir
         _install_finite_grad_guard(model)
         print(f"Widened s0 checkpoint {init_from} to the s1 schema (694 actions).")
+        soften_action_logits(model, init_temperature)
         return model, schedules
 
     env = make_train_env(
@@ -719,6 +897,10 @@ def build_model(
         hand_policy=hand_policy,
         s1_schema=s1_schema,
         phi=phi,
+        immediate_joker_sell_reward=immediate_joker_sell_reward,
+        immediate_joker_sell_decay=immediate_joker_sell_decay,
+        skip_tag_reward=skip_tag_reward,
+        skip_tag_decay=skip_tag_decay,
     )
 
     if init_from is not None:
@@ -738,6 +920,7 @@ def build_model(
         model = MaskablePPO.load(str(init_from), env=env, device=device)
         model.tensorboard_log = log_dir
         _install_finite_grad_guard(model)
+        soften_action_logits(model, init_temperature)
         return model, schedules
 
     model = MaskablePPO(
@@ -772,6 +955,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--win-ante", type=int, default=2, help="horizon-curriculum stage")
     parser.add_argument("--init-from", type=Path, default=None, help="previous stage .zip")
     parser.add_argument(
+        "--init-temperature",
+        type=float,
+        default=1.0,
+        help="divide warm-started action logits by this (>1 restores exploration "
+        "entropy without changing the loaded policy's preference ordering); "
+        "requires --init-from",
+    )
+    parser.add_argument(
         "--hand-policy",
         type=Path,
         default=None,
@@ -800,6 +991,30 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--phi-beta0", type=float, default=1.0)
     parser.add_argument("--s1-schema", action="store_true")
     parser.add_argument("--count-beta0", type=float, default=0.05)
+    parser.add_argument(
+        "--immediate-joker-sell-reward",
+        type=float,
+        default=None,
+        help="enable and set the reward for buying a joker then selling a matching "
+        "joker on the next action (for example -0.1); omit to disable",
+    )
+    parser.add_argument(
+        "--immediate-joker-sell-no-decay",
+        action="store_true",
+        help="keep --immediate-joker-sell-reward constant instead of decaying to zero",
+    )
+    parser.add_argument(
+        "--skip-tag-reward",
+        type=float,
+        default=None,
+        help="enable and set the reward for taking a SkipBlind/tag decision "
+        "(for example -0.1); omit to disable",
+    )
+    parser.add_argument(
+        "--skip-tag-no-decay",
+        action="store_true",
+        help="keep --skip-tag-reward constant instead of decaying to zero",
+    )
     parser.add_argument("--fresh-frac", type=float, default=0.5)
     parser.add_argument("--pack-frac", type=float, default=0.3)
     parser.add_argument("--harvest-prob", type=float, default=0.02)
@@ -831,6 +1046,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         and args.blend_beta0 != 0.0
     ):
         parser.error("--phi-checkpoint replaces --blend-beta0; pass --blend-beta0 0")
+    if args.init_temperature != 1.0:
+        if args.init_from is None:
+            parser.error("--init-temperature requires --init-from")
+        if args.init_temperature <= 0.0:
+            parser.error("--init-temperature must be positive")
+    if args.immediate_joker_sell_no_decay and args.immediate_joker_sell_reward is None:
+        parser.error("--immediate-joker-sell-no-decay requires --immediate-joker-sell-reward")
+    if args.skip_tag_no_decay and args.skip_tag_reward is None:
+        parser.error("--skip-tag-no-decay requires --skip-tag-reward")
     return args
 
 
@@ -869,6 +1093,7 @@ def main() -> None:
         schedules=schedules,
         reservoir=reservoir,
         init_from=args.init_from,
+        init_temperature=args.init_temperature,
         seed=args.seed,
         n_envs=args.n_envs,
         n_steps=args.n_steps,
@@ -880,6 +1105,10 @@ def main() -> None:
         hand_policy=hand_policy,
         s1_schema=args.s1_schema,
         phi=phi,
+        immediate_joker_sell_reward=args.immediate_joker_sell_reward,
+        immediate_joker_sell_decay=not args.immediate_joker_sell_no_decay,
+        skip_tag_reward=args.skip_tag_reward,
+        skip_tag_decay=not args.skip_tag_no_decay,
     )
 
     # Eval on the reserved EVAL_* stream: plain env, no wrapper — mean
@@ -895,6 +1124,7 @@ def main() -> None:
     )
     callbacks = [
         ScheduleCallback(schedules),
+        NormalizedEntropyCallback(),
         MaskableEvalCallback(
             eval_env,
             n_eval_episodes=args.eval_episodes,

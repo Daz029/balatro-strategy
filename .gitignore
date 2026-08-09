@@ -221,3 +221,9 @@ data/
 .pytest-tmp-*/
 .test-tmp-*/
 .temp-*/
+.pytest-*/
+pytest-*/
+.uv-*/
+
+# local scratch artifacts (plots, npz probes)
+.scratch/

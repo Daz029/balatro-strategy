@@ -225,7 +225,10 @@ class TestRiffRaff:
         from jackdaw.engine.game import _apply_setting_blind_mutations
 
         jokers = [_joker("j_joker") for _ in range(4)]  # 1 slot free
-        gs = {"joker_slots": 5}
+        # gs must alias gs["jokers"] to the passed list and carry an rng:
+        # Riff-raff now rolls the real Common pool via _resolve_create_descriptors
+        # (which appends to gs["jokers"]) instead of hardcoding j_joker.
+        gs = {"joker_slots": 5, "jokers": jokers, "rng": PseudoRandom("RIFFRAFF")}
         mutations = [{"create": {"type": "Joker", "rarity": "Common", "count": 2}}]
         _apply_setting_blind_mutations(gs, mutations, jokers)
         assert len(jokers) == 5  # created 1, not 2 -- capped at joker_slots
@@ -234,7 +237,7 @@ class TestRiffRaff:
         from jackdaw.engine.game import _apply_setting_blind_mutations
 
         jokers = [_joker("j_joker") for _ in range(5)]  # no room
-        gs = {"joker_slots": 5}
+        gs = {"joker_slots": 5, "jokers": jokers, "rng": PseudoRandom("RIFFRAFF")}
         mutations = [{"create": {"type": "Joker", "rarity": "Common", "count": 2}}]
         _apply_setting_blind_mutations(gs, mutations, jokers)
         assert len(jokers) == 5

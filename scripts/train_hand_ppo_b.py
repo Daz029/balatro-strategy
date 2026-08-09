@@ -66,6 +66,7 @@ class KLToBCPointerPPO(PPO):
         self,
         *args,
         bc_model: HandPointerBCModel | None = None,
+        leash_policy: PointerPPOPolicy | None = None,
         kl_beta0: float = 0.5,
         kl_target: float = 0.03,
         **kwargs,
@@ -75,35 +76,59 @@ class KLToBCPointerPPO(PPO):
         self.kl_target = kl_target
         self._kl_multiplier = 1.0
         self.bc_model: HandPointerBCModel | None = None
+        self.leash_policy: PointerPPOPolicy | None = None
+        if bc_model is not None and leash_policy is not None:
+            raise ValueError("exactly one of bc_model or leash_policy must be set")
         if bc_model is not None:
             self.set_bc_model(bc_model)
+        elif leash_policy is not None:
+            self.set_leash_policy(leash_policy)
 
     def set_bc_model(self, bc_model: HandPointerBCModel) -> None:
+        if self.leash_policy is not None:
+            raise ValueError("cannot set bc_model when leash_policy is already set")
         bc_model = bc_model.to(self.device)
         bc_model.eval()
         bc_model.requires_grad_(False)
         self.bc_model = bc_model
 
-    def _kl_to_bc(self, observations, actions: th.Tensor) -> th.Tensor:
-        """Mean active-step reverse KL for the taken action prefixes."""
+    def set_leash_policy(self, policy: PointerPPOPolicy) -> None:
+        if self.bc_model is not None:
+            raise ValueError("cannot set leash_policy when bc_model is already set")
+        policy = policy.to(self.device)
+        policy.eval()
+        policy.requires_grad_(False)
+        self.leash_policy = policy
 
-        assert self.bc_model is not None
-        current_type, current_pointer, active = self.policy.teacher_forced_step_distributions(
-            observations, actions
-        )
+    def _reference_step_distributions(
+        self, observations, actions: th.Tensor
+    ) -> tuple[th.Tensor, th.Tensor, th.Tensor]:
         with th.no_grad():
+            if self.leash_policy is not None:
+                return self.leash_policy.teacher_forced_step_distributions(observations, actions)
+
+            assert self.bc_model is not None
             bc_cards, bc_pooled = self.bc_model.features_extractor(observations)
             hands_left, discards_left = self.bc_model._budgets(observations)
-            bc_type, bc_pointer, bc_active = (
-                self.bc_model.pointer_head.teacher_forced_step_distributions(
+            return self.bc_model.pointer_head.teacher_forced_step_distributions(
                 bc_cards,
                 bc_pooled,
                 observations["hand_mask"],
                 hands_left,
                 discards_left,
                 *self.policy._labels_from_actions(actions),
-                )
             )
+
+    def _kl_to_bc(self, observations, actions: th.Tensor) -> th.Tensor:
+        """Mean active-step reverse KL for the taken action prefixes."""
+
+        assert (self.bc_model is not None) ^ (self.leash_policy is not None), (
+            "exactly one of bc_model or leash_policy must be set"
+        )
+        current_type, current_pointer, active = self.policy.teacher_forced_step_distributions(
+            observations, actions
+        )
+        bc_type, bc_pointer, bc_active = self._reference_step_distributions(observations, actions)
         if not th.equal(active, bc_active):
             raise RuntimeError("pointer policy and BC active-step masks diverged")
 
@@ -125,7 +150,9 @@ class KLToBCPointerPPO(PPO):
     def train(self) -> None:
         """stable-baselines3 2.7.1 PPO.train() plus the KL-to-BC leash."""
 
-        assert self.bc_model is not None, "call set_bc_model() before learn()"
+        assert (self.bc_model is not None) ^ (self.leash_policy is not None), (
+            "exactly one of bc_model or leash_policy must be set before learn()"
+        )
         self.policy.set_training_mode(True)
         self._update_learning_rate(self.policy.optimizer)
         clip_range = self.clip_range(self._current_progress_remaining)  # type: ignore[operator]
@@ -257,10 +284,22 @@ def make_vec_env(
     return DummyVecEnv([factory(rank) for rank in range(n_envs)])
 
 
+def load_trained_pointer_policy(
+    checkpoint: Path, device: str = "cpu"
+) -> PointerPPOPolicy:
+    loaded = KLToBCPointerPPO.load(checkpoint, device=device)
+    policy = loaded.policy
+    assert isinstance(policy, PointerPPOPolicy)
+    policy.eval()
+    policy.requires_grad_(False)
+    return policy
+
+
 def build_model(
-    bc_checkpoint: Path,
+    bc_checkpoint: Path | None,
     config: HandPlayConfig | list[HandPlayConfig],
     *,
+    init_from: Path | None = None,
     seed: int = 0,
     n_envs: int = 8,
     n_steps: int = 512,
@@ -274,6 +313,9 @@ def build_model(
     v_curve: VCurve | None = None,
     start_state_sampler: Callable[[], bytes | None] | None = None,
 ) -> KLToBCPointerPPO:
+    assert (bc_checkpoint is None) != (init_from is None), (
+        "provide exactly one of bc_checkpoint or init_from"
+    )
     # DummyVecEnv is single-process and resets workers sequentially, so one
     # seeded sampler stream is shared intentionally across every training env.
     env = make_vec_env(
@@ -283,10 +325,16 @@ def build_model(
         v_curve=v_curve,
         start_state_sampler=start_state_sampler,
     )
-    bc_model = load_bc_model(bc_checkpoint, device="cpu")
+    trained = None
+    if init_from is not None:
+        trained = load_trained_pointer_policy(init_from, device="cpu")
+    else:
+        assert bc_checkpoint is not None
+        bc_model = load_bc_model(bc_checkpoint, device="cpu")
     model = KLToBCPointerPPO(
         PointerPPOPolicy,
         env,
+        leash_policy=trained,
         learning_rate=learning_rate,
         n_steps=n_steps,
         batch_size=batch_size,
@@ -303,14 +351,19 @@ def build_model(
         tensorboard_log=log_dir,
         device=device,
     )
-    load_bc_weights(model.policy, bc_model)
-    model.set_bc_model(bc_model)
+    if trained is not None:
+        model.policy.load_state_dict(trained.state_dict(), strict=True)
+    else:
+        load_bc_weights(model.policy, bc_model)
+        model.set_bc_model(bc_model)
     return model
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--bc-checkpoint", type=Path, required=True)
+    reference_group = parser.add_mutually_exclusive_group(required=True)
+    reference_group.add_argument("--bc-checkpoint", type=Path, default=None)
+    reference_group.add_argument("--init-from", type=Path, default=None)
     parser.add_argument("--stages", default=",".join(DEFAULT_FINETUNE_STAGES))
     parser.add_argument("--stage", default=None)
     parser.add_argument("--total-timesteps", type=int, default=2_000_000)
@@ -346,6 +399,7 @@ def main() -> None:
     model = build_model(
         args.bc_checkpoint,
         configs,
+        init_from=args.init_from,
         seed=args.seed,
         n_envs=args.n_envs,
         n_steps=args.n_steps,
