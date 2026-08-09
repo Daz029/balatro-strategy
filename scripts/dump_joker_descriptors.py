@@ -6,35 +6,43 @@ measured that channel doing almost no work (twin/non-twin synergy gap ratio
 0.87), and §5.1 found why: it is both thin and partly WRONG.
 
 This script exists so the repair is done by INSPECTION rather than by another
-round of pattern-matching on ``config`` keys — the scaling-flag bug is exactly
-what heuristic extraction produces. It emits one reviewable record per joker
-containing:
+round of pattern-matching on ``config`` keys — that is exactly what produced
+the scaling-flag bug. Emits a CSV review sheet (one row per joker) plus an
+optional structured JSON.
 
-* the engine's own truth (raw ``config``, ``effect`` family label, rarity, cost,
-  ``blueprint_compat``, unlock/pool gates),
-* the ``trigger_match`` 4-class taxonomy — engine-derived, coverage-enforced at
-  import, and NOT currently represented in the descriptor at all,
-* what the descriptor CURRENTLY says (nonzero fields, named),
-* which other jokers share a bit-identical descriptor row,
-* auto-flags for the known defect classes,
-* an empty ``review`` block to fill in by hand.
+WHAT IS DERIVED vs WHAT IS PROPOSED — the columns are deliberately separated:
 
-AUTO-FLAGS ARE HINTS, NOT VERDICTS. They are themselves heuristics over the
-same config data that produced the bug; a joker with no flags can still be
-mis-described (Photograph carries FALSE_SCALING but its missing x2 mult is only
-visible by knowing what Photograph does). The flags rank the review queue, they
-do not replace it.
+* ``E_evidence_*`` columns are DERIVED from the joker's registered handler:
+  whether it writes back to its own ``card.ability`` (the signature of a joker
+  that changes over time), which fields it writes, whether it can return
+  ``JokerResult(remove=True)``, and whether it ever assigns a bare constant
+  (a reset). These are facts about what the code does.
+* ``E_proposed`` is a READING over that evidence — the growth category a human
+  inferred. It is NOT derived and is exactly what the review should check.
+
+That split is the whole point. The existing `scaling_flag` is what happens when
+a reading gets recorded as if it were a derivation: it reads `config` and
+concludes "grows over time", which is wrong for 60 of the 87 jokers it fires on
+(cross-checked against handler behaviour — see the module's ``--stats`` output).
+
+The handler derivation is not exhaustive: a joker storing state in ``gs``
+rather than ``card.ability`` would be invisible to it, and the three ``on_sell``
+jokers (Invisible Joker, Luchador, Diet Cola) act outside the scoring registry
+entirely. Those are review items, not derived values.
 
 Usage::
 
     uv run python scripts/dump_joker_descriptors.py
-    uv run python scripts/dump_joker_descriptors.py --output data/my_review.json
+    uv run python scripts/dump_joker_descriptors.py --json data/review.json
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
+import inspect
 import json
+import re
 from collections import defaultdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -42,6 +50,7 @@ from typing import Any
 
 import numpy as np
 
+import jackdaw.engine.jokers as joker_handlers
 from jackdaw.agents.joker_descriptors import DESCRIPTOR_DIM, DESCRIPTOR_MATRIX
 from jackdaw.engine.data.prototypes import CENTER_POOLS, JOKERS
 from jackdaw.env.observation import center_key_id
@@ -52,11 +61,11 @@ from jackdaw.env.trigger_match import (
     _CLASS4_NON_CARD,
 )
 
-DEFAULT_OUT = "data/joker_descriptors_review.json"
+DEFAULT_OUT = "data/joker_descriptors_review.csv"
 
-# Mirrors the frozen layout comment in joker_descriptors.py:34-58. Kept here as
-# (name, what it currently reads) so a reviewer can see the DERIVATION, not just
-# the value -- most defects are in the derivation.
+# Mirrors the frozen layout comment in joker_descriptors.py:34-58, as
+# (name, what it currently reads) — most defects are in the DERIVATION, not
+# the value, so a reviewer needs to see both.
 DESCRIPTOR_LAYOUT: list[tuple[str, str]] = [
     ("rarity", "proto.rarity / 4"),
     ("base_cost", "proto.cost / 10"),
@@ -85,50 +94,132 @@ DESCRIPTOR_LAYOUT: list[tuple[str, str]] = [
 ]
 assert len(DESCRIPTOR_LAYOUT) == DESCRIPTOR_DIM
 
-# Effect columns: everything except rarity/cost/type-flags/blueprint_compat.
-# All-zero here means the descriptor says nothing about what the joker DOES.
 EFFECT_COLUMNS = list(range(8, 23))
+SCALING_FLAG_COL = 20
 
-# embedding-analysis.md §8: conditionally pooled, so never seen in any obs.
 POOL_GATED = frozenset(
     {"j_cavendish", "j_glass", "j_lucky_cat", "j_steel_joker", "j_stone", "j_ticket"}
 )
 
+# A joker that changes over time must write back to its OWN ability dict.
+# `card` is the joker in every handler signature; other_card / target are the
+# playing cards it acts on, so Hiker (which writes perma_bonus to SCORED cards)
+# must not match — that is a block-C "modifies_cards" fact, not growth.
+_SELF_WRITE = re.compile(r"(?<!other_)(?<!target\.)\bcard\.ability\[[\"']([A-Za-z_]+)[\"']\]\s*=")
+_RESET_WRITE = re.compile(r"\bcard\.ability\[[\"'][A-Za-z_]+[\"']\]\s*=\s*[01](\.0)?\s*$")
+
+# A READING over the derived evidence, recorded so review is verification
+# rather than authoring. NOT derived — see the module docstring. Anything
+# absent is proposed `static`.
+PROPOSED_GROWTH: dict[str, str] = {
+    **dict.fromkeys(
+        [
+            "j_caino", "j_castle", "j_ceremonial", "j_constellation", "j_flash",
+            "j_glass", "j_hologram", "j_lucky_cat", "j_madness", "j_red_card",
+            "j_rocket", "j_runner", "j_trousers", "j_square", "j_vampire", "j_wee",
+        ],
+        "grows_permanently",
+    ),
+    **dict.fromkeys(
+        ["j_campfire", "j_hit_the_road", "j_obelisk", "j_ride_the_bus"], "grows_with_reset"
+    ),
+    "j_green_joker": "grows_bidirectionally",
+    **dict.fromkeys(
+        ["j_ice_cream", "j_popcorn", "j_ramen", "j_turtle_bean"], "decays_then_expires"
+    ),
+    "j_selzer": "countdown_then_expires",
+    **dict.fromkeys(["j_invisible", "j_yorick"], "countdown_then_payoff"),
+    "j_egg": "sell_value_growth",
+}
+
+# Destruction cause, for the 10 handlers that can return remove=True. Split
+# four ways because "self destructs" conflates unrelated behaviours — the
+# destruction is the PRICE, not the effect.
+PROPOSED_DESTRUCTION: dict[str, str] = {
+    **dict.fromkeys(
+        ["j_ice_cream", "j_popcorn", "j_ramen", "j_selzer", "j_turtle_bean"],
+        "expires_when_depleted",
+    ),
+    **dict.fromkeys(["j_gros_michel", "j_cavendish"], "random_destruction"),
+    **dict.fromkeys(["j_sixth_sense", "j_trading"], "consumed_on_use"),
+    "j_mr_bones": "destroyed_on_save",
+}
+
+# Act on the SELL path, outside the scoring registry, so the handler
+# derivation structurally cannot see them. Review items, not derived values.
+KNOWN_ON_SELL = ("j_invisible", "j_luchador", "j_diet_cola")
+
+
+def _check_proposals() -> None:
+    """Import-time guard on the hand-written tables above.
+
+    Modelled on ``trigger_match._check_taxonomy``: a mistyped center key would
+    silently fall through to ``static``/``""`` and be indistinguishable from a
+    deliberate classification. That is precisely the failure mode this whole
+    review exists to remove, so it hard-fails rather than defaults. Caught
+    ``j_glass_joker`` (really ``j_glass``) and ``j_ride_bus`` (really
+    ``j_ride_the_bus``) on first run.
+
+    The second check pins the PROPOSAL against the DERIVATION: every joker
+    proposed non-static must be one whose handler actually writes back to its
+    own ability, and vice versa. A divergence means either a typo or a reading
+    that the evidence does not support — both worth stopping for.
+    """
+    pool = set(CENTER_POOLS.get("Joker", []))
+    unknown = sorted((set(PROPOSED_GROWTH) | set(PROPOSED_DESTRUCTION) | set(KNOWN_ON_SELL)) - pool)
+    if unknown:
+        raise RuntimeError(
+            f"proposal tables reference {len(unknown)} non-joker center key(s): {unknown} — "
+            "a typo here silently reads as 'static', so it is fatal by design"
+        )
+
+    derived = {k for k in pool if handler_evidence(k)["self_mutates"] == "yes"}
+    proposed = set(PROPOSED_GROWTH)
+    if derived != proposed:
+        raise RuntimeError(
+            "E_proposed disagrees with the handler derivation — "
+            f"mutates but proposed static: {sorted(derived - proposed)}; "
+            f"proposed non-static but never mutates: {sorted(proposed - derived)}"
+        )
+
+    remove_capable = {k for k in pool if handler_evidence(k)["can_remove"] == "yes"}
+    if remove_capable != set(PROPOSED_DESTRUCTION):
+        raise RuntimeError(
+            "E_destruction_proposed disagrees with the handler derivation — "
+            f"can remove but unclassified: {sorted(remove_capable - set(PROPOSED_DESTRUCTION))}; "
+            f"classified but cannot remove: {sorted(set(PROPOSED_DESTRUCTION) - remove_capable)}"
+        )
+
 
 def trigger_class(key: str) -> str:
-    """The trigger_match 4-class taxonomy label for a joker key.
-
-    Read from the taxonomy's own tables rather than restated here: a second
-    copy of that classification is the drift class the module's import-time
-    coverage check exists to prevent.
-    """
-    if key in _CLASS1_PREDICATES:
-        return "class1_per_card_static"
-    if key in _CLASS2_PREDICATES:
-        return "class2_per_card_state_dependent"
-    if key in _CLASS3_SET_LEVEL:
-        return "class3_set_level"
-    if key in _CLASS4_NON_CARD:
-        return "class4_non_card"
+    """The trigger_match 4-class label, read from the taxonomy's own tables
+    rather than restated — a second copy is the drift its import-time
+    coverage check exists to prevent."""
+    for members, label in (
+        (_CLASS1_PREDICATES, "C1_per_card_static"),
+        (_CLASS2_PREDICATES, "C2_per_card_state_dep"),
+        (_CLASS3_SET_LEVEL, "C3_set_level"),
+        (_CLASS4_NON_CARD, "C4_non_card"),
+    ):
+        if key in members:
+            return label
     return "UNCLASSIFIED"
 
 
-def auto_flags(key: str, proto: Any, desc: np.ndarray, dupes: list[str]) -> list[str]:
-    cfg = proto.config or {}
-    extra = cfg.get("extra")
-    flags: list[str] = []
-
-    if key in POOL_GATED:
-        flags.append("POOL_GATED_NEVER_OBSERVED")
-    if isinstance(extra, (int, float)) and desc[20] > 0:
-        flags.append("FALSE_SCALING_SUSPECT")
-    if dupes:
-        flags.append(f"DUPLICATE_DESCRIPTOR_x{len(dupes) + 1}")
-    if not np.any(desc[EFFECT_COLUMNS]):
-        flags.append("EFFECT_UNCAPTURED")
-    if isinstance(extra, dict) and "suit" in extra and desc[11] == 0:
-        flags.append("SUIT_PRESENT_BUT_UNCAPTURED")
-    return flags
+def handler_evidence(key: str) -> dict[str, Any]:
+    """Derived facts about what the joker's registered handler DOES."""
+    handler = joker_handlers._REGISTRY.get(key)
+    if handler is None:
+        return {"self_mutates": "", "fields": "", "can_remove": "", "has_reset": ""}
+    src = inspect.getsource(handler)
+    fields = sorted(set(_SELF_WRITE.findall(src)))
+    has_reset = any(_RESET_WRITE.search(line) for line in src.splitlines())
+    return {
+        "self_mutates": "yes" if fields else "no",
+        "fields": ",".join(fields),
+        "can_remove": "yes" if "remove=True" in src else "no",
+        "has_reset": "yes" if has_reset else "no",
+    }
 
 
 def build_records() -> tuple[list[dict[str, Any]], dict[str, list[str]]]:
@@ -146,29 +237,52 @@ def build_records() -> tuple[list[dict[str, Any]], dict[str, list[str]]]:
     for key in sorted(keys, key=lambda k: JOKERS[k].order):
         proto = JOKERS[key]
         desc = DESCRIPTOR_MATRIX[center_key_id(key)]
-        dupes = [k for k in by_row[desc.tobytes()] if k != key]
+        dupes = [JOKERS[k].name for k in by_row[desc.tobytes()] if k != key]
         nonzero = {
             DESCRIPTOR_LAYOUT[i][0]: round(float(v), 4) for i, v in enumerate(desc) if v != 0
         }
+        ev = handler_evidence(key)
+
+        flags = []
+        if key in POOL_GATED:
+            flags.append("POOL_GATED_NEVER_OBSERVED")
+        if isinstance((proto.config or {}).get("extra"), (int, float)) and desc[SCALING_FLAG_COL]:
+            flags.append("FALSE_SCALING_SUSPECT")
+        if dupes:
+            flags.append(f"DUPLICATE_x{len(dupes) + 1}")
+        if not np.any(desc[EFFECT_COLUMNS]):
+            flags.append("EFFECT_UNCAPTURED")
+        if key in KNOWN_ON_SELL:
+            flags.append("ON_SELL_OUTSIDE_HANDLER")
+
         records.append(
             {
                 "key": key,
                 "name": proto.name,
-                "order": proto.order,
                 "rarity": proto.rarity,
                 "cost": proto.cost,
-                "blueprint_compat": proto.blueprint_compat,
-                "engine_config": proto.config,
-                "engine_effect_label": proto.effect or None,
                 "trigger_class": trigger_class(key),
-                "unlock_condition": proto.unlock_condition,
-                "enhancement_gate": proto.enhancement_gate,
-                "descriptor_nonzero": nonzero,
-                "descriptor_raw": [round(float(v), 5) for v in desc],
-                "duplicate_group": group_of.get(key),
-                "duplicate_with": dupes,
-                "auto_flags": auto_flags(key, proto, desc, dupes),
-                "review": {"effect_summary": "", "should_encode": [], "notes": ""},
+                "blueprint_compat": int(proto.blueprint_compat),
+                "engine_config": json.dumps(proto.config, sort_keys=True) if proto.config else "",
+                "engine_effect_label": proto.effect or "",
+                "current_descriptor": "; ".join(f"{k}={v}" for k, v in nonzero.items()),
+                "current_says_scaling": "yes" if desc[SCALING_FLAG_COL] else "no",
+                "dup_group": group_of.get(key, ""),
+                "dup_with": "; ".join(dupes),
+                "auto_flags": "; ".join(flags),
+                "E_evidence_self_mutates": ev["self_mutates"],
+                "E_evidence_fields": ev["fields"],
+                "E_evidence_can_remove": ev["can_remove"],
+                "E_evidence_has_reset": ev["has_reset"],
+                "E_proposed": PROPOSED_GROWTH.get(key, "static"),
+                "E_destruction_proposed": PROPOSED_DESTRUCTION.get(key, ""),
+                # --- blank review columns below ---
+                "E_confirm": "",
+                "B_when": "",
+                "C_what": "",
+                "D_gated_by": "",
+                "F_depends_on": "",
+                "notes": "",
             }
         )
     return records, dup_groups
@@ -177,73 +291,53 @@ def build_records() -> tuple[list[dict[str, Any]], dict[str, list[str]]]:
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--output", type=Path, default=Path(DEFAULT_OUT))
+    p.add_argument("--json", type=Path, default=None, help="also write structured JSON")
     args = p.parse_args()
 
+    _check_proposals()
     records, dup_groups = build_records()
-    flagged = defaultdict(int)
-    for r in records:
-        for f in r["auto_flags"]:
-            flagged[f.split("_x")[0]] += 1
-
-    payload = {
-        "_meta": {
-            "generated_utc": datetime.now(UTC).isoformat(),
-            "n_jokers": len(records),
-            "descriptor_dim": DESCRIPTOR_DIM,
-            "context": (
-                "docs/embedding-analysis.md §5.1 — descriptor channel is thin "
-                "and partly wrong"
-            ),
-        },
-        "_how_to_review": {
-            "effect_summary": "one line: what the joker ACTUALLY does in game",
-            "should_encode": (
-                "list the mechanical facts a shop agent needs to judge this joker's "
-                "synergy, e.g. ['xmult', 'triggers on face cards', 'retrigger']. "
-                "Free text — we derive the column set AFTER seeing what the pool needs, "
-                "rather than fitting jokers to the columns that already exist."
-            ),
-            "notes": "anything the current descriptor gets actively wrong",
-            "warning": (
-                "auto_flags are heuristics over the same config data that produced the "
-                "scaling bug. An unflagged joker can still be mis-described — Photograph "
-                "is flagged FALSE_SCALING but its uncaptured x2 mult is only visible to "
-                "someone who knows the joker."
-            ),
-        },
-        "_descriptor_layout": [
-            {"index": i, "name": n, "derived_from": src}
-            for i, (n, src) in enumerate(DESCRIPTOR_LAYOUT)
-        ],
-        "_known_defects": {
-            "false_scaling": (
-                "76/150 jokers use a bare-numeric `extra`; the extractor reads any bare "
-                "number as a growth rate, so 76 of the 87 scaling flags are false. The "
-                "idiom is shared by genuine scalers (Obelisk) and flat effects (Credit "
-                "Card, Banner, Mime), so the column cannot discriminate."
-            ),
-            "dead_columns": "cols 3-7 are always 0 on jokers; col 2 is constant 1",
-            "duplicates": f"{sum(len(v) for v in dup_groups.values())}/150 jokers share a "
-            f"bit-identical row across {len(dup_groups)} groups",
-            "not_represented": (
-                "the trigger_match 4-class taxonomy is engine-derived and "
-                "coverage-enforced but absent from the descriptor"
-            ),
-        },
-        "_flag_counts": dict(sorted(flagged.items(), key=lambda kv: -kv[1])),
-        "_duplicate_groups": dup_groups,
-        "jokers": records,
-    }
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(payload, indent=2))
+    with args.output.open("w", newline="", encoding="utf-8") as fh:
+        w = csv.DictWriter(fh, fieldnames=list(records[0]))
+        w.writeheader()
+        w.writerows(records)
 
-    print(f"wrote {args.output}  ({len(records)} jokers)")
-    print(f"duplicate groups: {len(dup_groups)} covering "
+    if args.json:
+        args.json.write_text(
+            json.dumps(
+                {
+                    "_meta": {
+                        "generated_utc": datetime.now(UTC).isoformat(),
+                        "n_jokers": len(records),
+                        "context": "docs/embedding-analysis.md §5.1 / §5.4",
+                    },
+                    "_descriptor_layout": [
+                        {"index": i, "name": n, "derived_from": s}
+                        for i, (n, s) in enumerate(DESCRIPTOR_LAYOUT)
+                    ],
+                    "_duplicate_groups": dup_groups,
+                    "jokers": records,
+                },
+                indent=2,
+            )
+        )
+
+    # Cross-check: the config-derived flag against the handler-derived truth.
+    changes = {r["key"] for r in records if r["E_evidence_self_mutates"] == "yes"}
+    flagged = {r["key"] for r in records if r["current_says_scaling"] == "yes"}
+    print(f"wrote {args.output}  ({len(records)} jokers, {len(records[0])} columns)")
+    if args.json:
+        print(f"wrote {args.json}")
+    print(f"\nduplicate groups: {len(dup_groups)} covering "
           f"{sum(len(v) for v in dup_groups.values())} jokers")
-    print("\nflag counts:")
-    for f, n in sorted(flagged.items(), key=lambda kv: -kv[1]):
-        print(f"  {n:>4}  {f}")
+    print("\nscaling_flag vs handler behaviour:")
+    print(f"{'':<24}{'handler: changes':>18}{'handler: static':>18}")
+    print(f"{'descriptor: scaling':<24}{len(flagged & changes):>18}{len(flagged - changes):>18}")
+    print(f"{'descriptor: static':<24}{len(changes - flagged):>18}"
+          f"{len(records) - len(flagged | changes):>18}")
+    missed = sorted(JOKERS[k].name for k in changes - flagged)
+    print(f"\nmissed by the flag: {missed}")
     return 0
 
 
