@@ -28,10 +28,14 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import contextlib
+import dataclasses
+import enum
 import json
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -41,14 +45,120 @@ for _p in (str(_SCRIPTS_DIR), str(_REPO_ROOT)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from jackdaw.agents.hand_action_space import action_to_combo  # noqa: E402
 from jackdaw.agents.hand_checkpoint_policy import (  # noqa: E402,F401
     _pointer_class_record,
     _zip_policy_kind,
 )
+from jackdaw.env.action_space import ActionType  # noqa: E402
 from jackdaw.env.hand_play_adapter import HandPlayConfig  # noqa: E402
-from jackdaw.env.hand_play_gym import HandPlayGymEnv, observation_space  # noqa: E402
+from jackdaw.env.hand_play_gym import (  # noqa: E402
+    POINTER_MAX_PICKS,
+    POINTER_STOP_INDEX,
+    HandPlayGymEnv,
+    observation_space,
+)
 
 EVAL_SEED_PREFIX = "EVAL"
+
+
+def _serialize_card(card: Any) -> dict[str, Any]:
+    """Capture a card's visible identity and mutable decision state."""
+    base = getattr(card, "base", None)
+    base_data = None
+    if base is not None:
+        base_data = {
+            "suit": _jsonable(getattr(base, "suit", None)),
+            "rank": _jsonable(getattr(base, "rank", None)),
+            "id": getattr(base, "id", None),
+            "nominal": getattr(base, "nominal", None),
+            "times_played": getattr(base, "times_played", None),
+        }
+    return {
+        "sort_id": getattr(card, "sort_id", None),
+        "center_key": getattr(card, "center_key", None),
+        "card_key": getattr(card, "card_key", None),
+        "name": getattr(card, "ability", {}).get("name", ""),
+        "set": getattr(card, "ability", {}).get("set", ""),
+        "ability": _jsonable(getattr(card, "ability", {})),
+        "base": base_data,
+        "edition": _jsonable(getattr(card, "edition", None)),
+        "seal": getattr(card, "seal", None),
+        "debuff": bool(getattr(card, "debuff", False)),
+        "facing": getattr(card, "facing", None),
+        "eternal": bool(getattr(card, "eternal", False)),
+        "perishable": bool(getattr(card, "perishable", False)),
+        "rental": bool(getattr(card, "rental", False)),
+    }
+
+
+def _jsonable(value: Any) -> Any:
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, enum.Enum):
+        return value.value
+    if hasattr(value, "center_key") and hasattr(value, "ability"):
+        return _serialize_card(value)
+    if dataclasses.is_dataclass(value):
+        return {
+            field.name: _jsonable(getattr(value, field.name))
+            for field in dataclasses.fields(value)
+        }
+    if isinstance(value, dict):
+        return {str(_jsonable(key)): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    return repr(value)
+
+
+def _serialize_hand_levels(levels: Any) -> dict[str, Any] | None:
+    if levels is None:
+        return None
+    hands = getattr(levels, "_hands", None)
+    if hands is None:
+        return _jsonable(levels)
+    return {
+        str(getattr(hand_type, "value", hand_type)): _jsonable(state)
+        for hand_type, state in hands.items()
+    }
+
+
+def _serialize_state(gs: dict[str, Any]) -> dict[str, Any]:
+    """Keep the complete decision-visible hand board in each trace frame."""
+    rr = gs.get("round_resets", {})
+    return {
+        "phase": _jsonable(gs.get("phase")),
+        "ante": rr.get("ante", 1),
+        "round": gs.get("round", 0),
+        "dollars": gs.get("dollars", 0),
+        "chips": gs.get("chips", 0),
+        "blind_on_deck": gs.get("blind_on_deck"),
+        "blind": _jsonable(gs.get("blind") or rr.get("blind")),
+        "current_round": _jsonable(gs.get("current_round", {})),
+        "round_resets": _jsonable(rr),
+        "last_score_result": _jsonable(gs.get("last_score_result")),
+        "hand_levels": _serialize_hand_levels(gs.get("hand_levels")),
+        "hand_size": gs.get("hand_size"),
+        "joker_slots": gs.get("joker_slots", 5),
+        "consumable_slots": gs.get("consumable_slots", 2),
+        "hand": [_serialize_card(card) for card in gs.get("hand", [])],
+        "jokers": [_serialize_card(card) for card in gs.get("jokers", [])],
+        "consumables": [_serialize_card(card) for card in gs.get("consumables", [])],
+        "deck_count": len(gs.get("deck", [])),
+        "discard_count": len(gs.get("discard_pile", [])),
+    }
+
+
+def _decode_decision(action: int | np.ndarray, action_version: int) -> tuple[ActionType, list[int]]:
+    if action_version == 1:
+        action_type, indices = action_to_combo(int(action))
+        return ActionType(action_type), list(indices)
+
+    vector = np.asarray(action)
+    padded = vector[1:]
+    stop_positions = np.flatnonzero(padded == POINTER_STOP_INDEX)
+    length = int(stop_positions[0]) if len(stop_positions) else POINTER_MAX_PICKS
+    return ActionType(int(vector[0])), [int(index) for index in padded[:length]]
 
 
 def eval_seeds(n_episodes: int) -> list[str]:
@@ -175,7 +285,12 @@ def load_policy(policy_path: Path, device: str):
     raise ValueError(f"unsupported policy checkpoint suffix: {policy_path.suffix!r}")
 
 
-def run_suite(policy, config: HandPlayConfig, n_episodes: int) -> dict:
+def run_suite(
+    policy,
+    config: HandPlayConfig,
+    n_episodes: int,
+    dump_decisions: Path | None = None,
+) -> dict:
     env = HandPlayGymEnv(
         config=config,
         obs_version=policy.obs_version,
@@ -183,18 +298,61 @@ def run_suite(policy, config: HandPlayConfig, n_episodes: int) -> dict:
     )
     clears: list[bool] = []
     steps_total = 0
-    for seed in eval_seeds(n_episodes):
-        obs, info = env.reset(options={"episode_seed": seed})
-        while True:
-            if policy.action_version == 1:
-                action = policy.act(obs, info["action_mask"])
-            else:
-                action = policy.act(obs)
-            obs, reward, terminated, truncated, info = env.step(action)
-            steps_total += 1
-            if terminated or truncated:
-                clears.append(bool(info["balatro/cleared"]))
-                break
+    with contextlib.ExitStack() as stack:
+        trace_file = None
+        if dump_decisions is not None:
+            dump_decisions.parent.mkdir(parents=True, exist_ok=True)
+            trace_file = stack.enter_context(dump_decisions.open("w", encoding="utf-8"))
+
+        for seed in eval_seeds(n_episodes):
+            obs, info = env.reset(options={"episode_seed": seed})
+            episode_step = 0
+            while True:
+                gs = env._adapter.raw_state
+                pre_state = _serialize_state(gs)
+                if policy.action_version == 1:
+                    mask = info["action_mask"]
+                    action = policy.act(obs, mask)
+                    n_legal = int(mask.sum())
+                else:
+                    action = policy.act(obs)
+                    n_legal = None
+                action_type, selected_indices = _decode_decision(
+                    action, policy.action_version
+                )
+                selected_cards = [pre_state["hand"][index] for index in selected_indices]
+
+                obs, reward, terminated, truncated, info = env.step(action)
+                episode_step += 1
+                steps_total += 1
+                terminal = bool(terminated or truncated)
+                post_state = _serialize_state(env._adapter.raw_state)
+                if trace_file is not None:
+                    raw_action = (
+                        int(action)
+                        if policy.action_version == 1
+                        else _jsonable(action.tolist())
+                    )
+                    record = {
+                        "seed": seed,
+                        "step": episode_step,
+                        "action_version": policy.action_version,
+                        "action": raw_action,
+                        "action_type": action_type.name,
+                        "selected_indices": selected_indices,
+                        "selected_cards": selected_cards,
+                        "n_legal": n_legal,
+                        "reward": float(reward),
+                        "score_delta": int(post_state["chips"] - pre_state["chips"]),
+                        "terminal": terminal,
+                        "cleared": bool(info.get("balatro/cleared", False)) if terminal else None,
+                        "pre_state": pre_state,
+                        "post_state": post_state,
+                    }
+                    trace_file.write(json.dumps(record) + "\n")
+                if terminal:
+                    clears.append(bool(info["balatro/cleared"]))
+                    break
     return {
         "n_episodes": n_episodes,
         "clear_rate": float(np.mean(clears)),
@@ -256,6 +414,14 @@ def main() -> None:
         help="Cache file for the (expensive) solver ceiling",
     )
     parser.add_argument("--output", type=Path, default=None)
+    parser.add_argument(
+        "--dump-decisions",
+        type=Path,
+        default=None,
+        help="write one rich JSONL record per play/discard decision, including "
+        "the exact hand, selected card indices, jokers, consumables, counters, "
+        "blind, and pre/post score state",
+    )
     parser.add_argument("--device", default="cpu")
     args = parser.parse_args()
 
@@ -267,7 +433,7 @@ def main() -> None:
         config = HandPlayConfig()
 
     policy = load_policy(args.policy, args.device)
-    result = run_suite(policy, config, args.n_episodes)
+    result = run_suite(policy, config, args.n_episodes, dump_decisions=args.dump_decisions)
     result["policy"] = str(args.policy)
     result["stage"] = args.stage
 
