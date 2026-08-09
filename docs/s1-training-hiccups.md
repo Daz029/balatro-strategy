@@ -823,3 +823,323 @@ a8. A temperature-3.0 a4 rerun was started to sanity-check the softening angle,
 but the diagnosis says temperature is orthogonal to a reward-density failure;
 expect it to diffuse the same way (watch whether its eval climbs *above* the
 ~0.22 warm-start line or decays while `normalized_entropy` inflates past ~0.3).
+
+# harvest → h2 ran, and it WORKED — `hand_ppo_b/h2` (2026-07-22)
+
+The a4_pr2 verdict sent us to harvest → h2. h2 (Candidate-B pointer, PPO
+fine-tuned against the s1-induced distribution) trained to 2M steps. **The
+first read nearly produced a wrong pivot; the honest answer is that h2 is a
+measurably better hand partner and s2 is back on.**
+
+## The near-miss — an un-co-adapted pair eval is not a partner measurement
+
+**[MEASURED] h2 looks like a no-op when you pair it with s1.** h2's own
+`eval/mean_reward` is flat across training (0.15 → 0.18, no trend), and a
+14-checkpoint sweep of `s1_a3_pr2/best_model` + h2 at ante 3 (200 ep, identical
+`EVAL_0..199`, *paired*) is flat at **~0.526** with no trend from 100k to 1.4M —
+statistically the same as the shop's number with **h1** (0.505–0.525). Its
+`best_model` is the ~100k lottery pick (Issue 2, one level up).
+
+Read naively this says "harvest → h2 was a no-op, the bootstrap converged, pivot
+to the economy problem." **That read is wrong, and it is the exact trap this
+doc keeps naming:** `s1_a3_pr2` was optimized against **h1**, so pairing it with
+h2 (Future-worry #5) routes to builds tuned for h1's play and cannot reveal a
+better partner. **An un-co-adapted pair eval measures the pair, not the
+partner.** Do not conclude convergence from it.
+
+## What actually settled it — divergence, then clear-rate
+
+Two throwaway diagnostics, both in `scripts/hand_policy_divergence.py`
+(self-tested h1-vs-h1 → 1.0 agreement / 0 divergence before trusting either):
+
+**[MEASURED] h2's policy genuinely MOVED.** On `data/harvest_s1` (n=800):
+agreement 0.825, type-agreement 0.9175 (movement is mostly *which cards*, not
+play-vs-discard), Jeffrey log-prob gap 0.055, value-gap 0.275. Not a near-copy —
+so the flat pair eval is distance-blind, not proof of no change.
+
+**[MEASURED] and it moved to something BETTER, not just different** — the
+`--clear-rate` mode: paired per-blind rollouts from restored `harvest_s1`
+snapshots, boxed by first-action (dis)agreement. h2 clears blinds h1 fails at
+~3:1. Sweep of h2 1.4M–2.0M vs h1 (n=2000 each, h1 baseline clear 0.741):
+
+| h2 ckpt | overall clear | net discordant (only_b−only_a) | disagree-box diff |
+|---|---|---|---|
+| 1.4M | 0.7715 | +61 (96/35) | +0.076 |
+| 1.5M | 0.7755 | +69 (87/18) | +0.065 |
+| 1.6M | 0.7655 | +49 (74/25) | +0.039 |
+| 1.7M | 0.763  | +44 (67/23) | +0.003 (lateral) |
+| 1.8M | 0.7685 | +55 (83/28) | +0.063 |
+| 1.9M | 0.778  | +74 (105/31)| +0.035 |
+| **2.0M** | **0.784** | **+86 (110/24)** | **+0.070** |
+
+Every checkpoint beats h1 (McNemar on the discordant pairs, p ≪ 1e-3 throughout;
+2.0M χ² ≈ 54). The advantage holds in BOTH boxes and is *bigger* in the
+first-action-agree box — meaning even when they open a blind identically, h2
+plays the rest better, so divergence **compounds** over the multi-turn blind and
+the 0.825 single-decision agreement *understated* h2. The 1.7M dip (disagreements
+went lateral) is the documented PPO wander — the reason to select the measured
+best, not a mid checkpoint.
+
+**Why a +3–4pp per-blind edge is invisible at full-run:** run outcome is
+build-dominated (Issue 3's surviving low-leverage reading) and the shop is
+h1-tuned. The mechanism to cash h2's better play into wins **is** s2 —
+co-adapt the shop to h2.
+
+## Process lessons (new)
+
+- **An un-co-adapted pair eval cannot measure a partner.** "sN+hM ≈ sN+hM−1" is
+  consistent with both "hM is a no-op" and "hM improved but sN can't exploit it."
+  Hold one side fixed and measure the other directly.
+- **Distance ≠ quality.** The divergence number (0.825 agree) says h2 moved; it
+  does NOT say better. Only the paired clear-rate rollout did. Measure the
+  objective (clears), not the proxy (action agreement).
+- **Box by disagreement.** On the ~82% of states where the first action agrees,
+  the signal is diluted; the disagreement subset is where a partner change can
+  pay off. (Though here the agree-box downstream divergence carried even more.)
+
+## Next step — s2, WARM-STARTED from s1_a3_pr2, partner = h2@2.0M
+
+**[DECISION] Lock h2@2.0M** (`runs/hand_ppo_b/h2/checkpoints/hand_ppo_b_2000000_steps.zip`,
+the final ckpt — NOT `best_model`, the lottery pick). Partner is fixed and
+deterministic in s2, so only clear-rate matters, not entropy: pick the measured
+best, which is the final checkpoint at the tail of a clean upward trend.
+
+**[DECISION] Warm-start from `s1_a3_pr2/best_model` against h2 — do NOT rebuild
+from s0.** The pr2 chain rebuilt from `s0_a4_v4` ONLY because it was the first
+fixed-engine shop and the flawed-engine s1 stages were non-baselines — a one-time
+engine reset, not a bootstrap principle. We are fixed-engine throughout now, and
+h2 was trained on `s1_a3_pr2`'s OWN induced distribution, so they are a
+near-matched pair: warm-starting is a small co-adaptation, restarting from s0
+relearns antes 1–3 from a far worse base. Drop `--init-temperature` (the a3/a4_pr2
+recovery-tax finding).
+
+**[OPEN — horizon gated on a cheap density measurement, a3 is NOT the default].**
+a3-vs-a4 hinges on ONE number we have not measured: h2's zero-shot ante-4 density
+with `s1_a3_pr2`. `s1_a4_pr2` collapsed because that density was **0.22 with h1**
+— a reward-starvation failure (sparse terminal `1{won}` + `ent-coef` diffuses the
+policy), NOT a partner-quality failure. Training a4 directly co-adapts antes 1–4
+*and* attacks the wall in one run — strictly more than re-running a3, whose
+terminal reward does not even credit ante-4 positioning. So a3-first is a weak
+middle option; the real fork is **a4-directly vs economy-pivot**, decided by:
+
+```
+uv run python scripts/eval_shop_policy.py --policy runs/shop_ppo/s1_a3_pr2/best_model/best_model.zip \
+  --win-ante 4 --n-episodes 200 --s1-schema \
+  --hand-policy runs/hand_ppo_b/h2/checkpoints/hand_ppo_b_2000000_steps.zip --partner-money-ordering
+```
+
+(plus one non-lottery neighbor ckpt, not just `best_model`). The bar is *above*
+the 0.22 that already failed — target **~0.30**:
+- **≥ ~0.30** → launch a4 directly (`--win-ante 4`, `--init-from`/`--init-reservoir`
+  from `s1_a3_pr2`, `--phi-checkpoint s0_a4_v4`, `--blend-beta0 0 --phi-beta0 0.1`,
+  `--hand-policy` h2@2.0M `--partner-money-ordering`, `--ent-coef 0.01`,
+  no `--init-temperature`, `--log-dir runs/shop_ppo/s2_a4`). The clear-rate math
+  is encouraging (h2 0.784 vs h1 0.741 per-blind → naively ~0.15 vs ~0.09
+  win-through-ante-4), but deep blinds beat the harvest average, so MEASURE.
+- **still ~0.22** → a4 will diffuse exactly like a4_pr2 and re-running a3 won't
+  lift the density either → the ante-4 wall is the economy/build-scaling sub-game,
+  NOT the partner, and only THEN is the economy pivot earned.
+
+h2 being a genuinely better partner is the necessary precondition for either
+branch to have a chance; that precondition now holds. (An a3 co-adaptation run is
+worth it only as a fallback if the density lands in an awkward ~0.25 middle —
+enough to be worth nudging up but too thin to train a4 straight.)
+
+## [MEASURED 2026-07-22] Density came back ~0.22 — the economy pivot is EARNED
+
+`s1_a3_pr2/best_model` + h2@2.0M zero-shots ante 4 at **~0.22** (rolls around
+0.22 across checkpoints/seeds), i.e. UNCHANGED from the h1 number. A genuinely
+better partner (+4pp per-blind on the s1 distribution) does not move the
+full-run ante-4 density at all. **The two facts reconcile only one way: the
+ante-4 wall is a BUILD/ECONOMY ceiling, not a play ceiling.** h2's extra clears
+are marginal early-blind rescues; runs that reach ante 4 die there because the
+build cannot produce the chips, and better card-selection cannot manufacture
+chips the build lacks. Issue 3's low-leverage EV reading, confirmed by a partner
+swap instead of inferred.
+
+Not a hunch-repeat of a4_pr2 either: a4 training from `s1_a3_pr2` at 0.22 density
+ALREADY reward-starved and diffused (the a4_pr2 section), and the only variable
+changed since — the partner — does not raise the starting density, so a4-direct
+from here would starve identically. Launching it is a 1M-step re-run of a known
+failure. **This is the harvest→h2 branch's designed exit: partner ruled out by
+measurement, so the lever is the shop's build/economy sub-game.**
+
+**[SPECULATION — pivot direction, gated on confirming the wall LOCATES at ante 4
+via `mean_final_ante` ~3.0–3.2].** Root cause is that every ante-4 training state
+is reached by barely surviving antes 1–3, so the ante-4 data is sparse AND biased
+toward the weak builds that squeaked through — PPO never sees a strong build *at*
+ante 4 densely enough to learn build→clear. Lever: MANUFACTURE that experience —
+extend the shop env's `start_state_sampler` (reservoir hook exists) to inject
+domain-randomized STRONG ante-3-entry builds (synergistic joker sets a good shop
+would produce), not just reservoir snapshots of the current policy's doomed
+builds. Breaks the survival-bottleneck circularity and hands PPO a dense ante-4
+gradient. Cheaper-but-weaker alt: re-derive Φ from a deep-ante-aware critic to
+densify the advantage signal — but a4_pr2 already had weak Φ (phi-beta0 0.1) and
+still diffused, so bet on the start-state injection. Per Future-worry #2, a8
+stays off the table regardless.
+
+Deferred refinements (do NOT fold into this first run — they confound the
+"did co-adaptation help" read): re-derive Φ from `s1_a3_pr2` rather than
+`s0_a4_v4` (Future-worry #6, self-consistent with the warm start; Φ decays so it
+cannot corrupt the objective).
+
+Tooling added: `scripts/hand_policy_divergence.py` — single-step divergence
+(agreement / Jeffrey / value-gap over harvested snapshots) and `--clear-rate`
+(paired per-blind rollouts, boxed by first-action agreement). Self-tests via
+same-checkpoint A==B (1.0 agreement / identical clear rate / empty disagree box).
+
+# The joker embedding table is a RANDOM IDENTITY CODE — `s2_a4` (2026-07-28)
+
+Triggered by a UMAP of the shop's learned joker embeddings
+(`scripts/extract_shop_joker_embeddings.py`, `data/joker_embeddings_s2_a3.npz`)
+showing a featureless blob — no interpretable clusters, semantically random
+nearest neighbours (blueprint↔mad, rocket↔sixth_sense). **The plot is correct
+and the embedding is fine; the DIAGNOSTIC is measuring the wrong object.**
+
+**FULL RECORD: `docs/embedding-analysis.md`** — this section is the condensed
+version. The open question (does the policy generalize to unseen joker
+PAIRINGS?), the two probe designs that answer it, and the gated fix options all
+live there; keep the two in sync.
+
+## [MEASURED] The table never trains — displacement is diffusion
+
+Trained `s2_a3` embeddings vs a fresh untrained `nn.Embedding` are
+statistically indistinguishable on every geometry metric:
+
+| metric | fresh init | trained s2_a3 |
+|---|---|---|
+| std | 1.0106 | 0.9883 |
+| row-norm median | 3.961 | 3.960 |
+| pairwise cosine std | 0.2490 | 0.2496 |
+| effective rank | 14.55 / 16 | 14.46 / 16 |
+
+Rows DO receive gradient (~0.32 displacement over `s1_a3_pr2 → s2_a4`), but it
+is a random walk, confirmed arithmetically. Adam normalizes step size to ~`lr`
+per update regardless of gradient magnitude, so distance travelled becomes a
+readable function of update count. From the checkpoint's own optimizer state
+(Adam, `lr=3e-4`, betas `(0.9, 0.999)`, `weight_decay=0`, **85,504 steps**) and
+the MEASURED minibatch hit rate below (0.812 → ~69,400 effective updates):
+
+| hypothesis | predicted displacement | observed |
+|---|---|---|
+| coherent drift `lr·N·√d` | ~83 | 0.32 |
+| random walk `lr·√N·√d` | **0.316** | **0.32** |
+
+Match within 1%; coherent learning is off by 260×.
+
+**Appearance rate — the objection this survives.** A per-shop-slot model
+("~0.7 jokers per slot, so rows update rarely") undercounts by two orders of
+magnitude and would have rescued the coherent hypothesis (it needs a 0.3% hit
+rate). The gradient unit is the MINIBATCH, not the shop visit: **owned jokers
+sit in `joker_ids` in every observation for the rest of the run**, and a
+minibatch pools `batch_size=256` timesteps across 8 concurrent envs at
+different antes and builds. Measured over 5,523 eval observations: median
+P(present in one obs) = 0.011 → **P(present in a 256-obs minibatch) = 0.812**
+(empirical, resampled honoring the 8×256 buffer structure; naive-independent
+estimate 0.942). Coupon-collector does the work — even 1% per-obs presence
+lands in `1−0.99²⁵⁶` = 92% of minibatches.
+
+## [MEASURED] …and yet the table is LOAD-BEARING
+
+Ablation on `s2_a4/best_model`, 200 episodes, identical eval seeds, win-ante 4,
+partner h2@2.0M `--partner-money-ordering`:
+
+| arm | win rate | mean final ante |
+|---|---|---|
+| **base** | **32.5%** | 3.42 |
+| zeroed (embedding block = 0) | 6.5% | 2.27 |
+| **permuted** (rows shuffled among ids) | **6.5%** | **2.27** |
+| `nextround` floor | 0.0% | 1.64 |
+
+**The permuted arm is the whole result.** It preserves the input distribution
+EXACTLY and destroys only the identity→vector mapping — and it costs precisely
+what zeroing costs (0.065 vs 0.065; ante 2.265 vs 2.270). Had the network
+merely adapted to "some nonzero input", the in-distribution permutation would
+have hurt far less than the wildly-OOD zeroing. It didn't. What the policy
+depends on is the MAPPING, not the values, the distribution, or the geometry.
+
+## Verdict — random-projection identity code
+
+Both facts are true and consistent. **A random 16-d vector is already a
+perfectly good unique identifier** — random projections separate 150 items in
+16 dimensions trivially. The rows never needed to move because they were BORN
+useful; `joker_encoder` learned to decode those fixed random codes, so all the
+actual learning went into the DECODER weights, which are not per-joker and
+cannot be plotted this way. This is a random-features architecture, arrived at
+by accident, and it works: joker identity is worth ~26 of the 32.5 points
+(~80% of the policy's value over the floor). The residual 6.5% is what the
+frozen descriptors and numeric features buy alone — buying by cost, rarity and
+effect family without knowing WHICH joker.
+
+**Consequence for CLAUDE.md**: the shop-obs design's stated diagnostic —
+"Embedding table is inspectable mid-training (t-SNE = is synergy learning
+happening at all)" — is unanswerable as written. The geometry carries no
+information BY DESIGN, so no amount of training makes it cluster. Amend that
+line rather than re-running the plot with different UMAP parameters.
+
+**The probe that WOULD answer the original question** (not built): hold a shop
+state fixed, swap each joker into a slot, read the critic's V. That yields a
+learned per-joker value under real context — the actual object of interest,
+and clusterable.
+
+## [MEASURED] Byproduct — six jokers never receive a single gradient
+
+Bit-identical rows across every consecutive checkpoint pair
+(`s1_a3_pr2 → s1_a4_pr2 → s2_a3 → s2_a4`). All six are conditionally pooled by
+`pools.py::_filter_joker`, so they never appeared in ANY observation:
+`cavendish` (needs flag `gros_michel_extinct`), `glass` (`m_glass` in deck),
+`lucky_cat` (`m_lucky`), `steel_joker` (`m_steel`), `stone` (`m_stone`),
+`ticket` (`m_gold`). Exactly zero rather than merely small because Adam's
+moment buffers stay at zero, so the update is exactly `0/(0+ε)`.
+
+Two riders: (a) this means the agent has **never held a deck containing a
+glass/steel/stone/gold/lucky card at shop-generation time** across all of
+s1+s2 — it is essentially never using enhancement tarots, which is a
+behavioural finding independent of the embedding question; (b) those six have
+random codes AND an untrained decoder pathway, so if a deck ever does acquire
+those enhancements the policy reads them as noise rather than as
+unknown-but-typed items.
+
+**Zero movement is a POOL-AVAILABILITY signal, not a broken-effect signal.** A
+joker whose passive is inert would still move — the row is looked up whenever
+the joker is merely PRESENT, so it would just learn "worthless". The embedding
+table structurally cannot detect the dead-joker bug class (cf. the five
+integration-seam joker bugs). Checked explicitly: the hand-size family and
+Showman (`j_ring_master`, no `showman` key) all move at or above the median
+0.304 — `turtle_bean` 0.540 (3rd largest of all 150), `stuntman` 0.391,
+`ring_master` 0.367, `troubadour` 0.329, `juggler` 0.313.
+
+## Process lessons (new)
+
+- **An ablation needs a distribution-preserving arm.** Zeroing alone proves
+  nothing: any large OOD input perturbation degrades a policy whether or not
+  the removed content was meaningful. The permutation arm — same marginals,
+  broken mapping — is what converted "the policy got worse" into "the MAPPING
+  is what matters". Build it into every future ablation here.
+- **"Never moved from init" and "essential" are compatible**, and the intuition
+  that they conflict is what made this look strange. Static ≠ unused.
+- **A wrong recommendation, caught by the permuted arm and recorded so it is
+  not re-proposed**: the pre-ablation reading was "the embedding is noise
+  drowning the descriptors (78% of identity-signal variance), so shrink the
+  init to `std≈0.02` and retrain". That is BACKWARDS — small init collapses the
+  150 codes toward each other, destroys separability, and would reproduce this
+  exact 5× collapse. The large `N(0,1)` init is load-bearing. Do not "fix" it.
+- **Adam's normalized step size is a measurement instrument**, not just an
+  optimizer: because step ≈ `lr` per update, observed displacement compared
+  against `lr·N·√d` vs `lr·√N·√d` discriminates learning from diffusion. It
+  requires the update count (checkpoint optimizer state) and the row hit rate
+  (measure it — do not model it from game rules).
+
+## Caveats
+
+- The ablation zeroed/permuted the WHOLE table (all ~300 center keys), so
+  consumables/vouchers/boosters were ablated alongside jokers. "Identity
+  mapping is load-bearing" holds; the split ACROSS entity types is not
+  isolated. A joker-ids-only variant would separate them.
+- Adam's `|exp_avg|/√exp_avg_sq` (median 0.0012) was initially read as direct
+  evidence of gradient cancellation. It is confounded: `exp_avg` decays over
+  ~10 steps, so rows whose joker was absent recently read near-zero from
+  SPARSITY, not from noise. The displacement arithmetic is the load-bearing
+  evidence; that ratio is not.
+- Raw data: `data/embedding_ablation.json` (arms + appearance rates),
+  `data/joker_embeddings_s2_a3.npz`.

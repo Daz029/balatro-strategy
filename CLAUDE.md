@@ -176,8 +176,11 @@ the two tracks ended up with different training strategies.
   corrupts neighbors) and makes synergy a 150x150 pointwise lookup; embeddings give
   learnable geometry, descriptors (trigger type / effect family / scaling rate, from the
   engine's own joker config data) give day-one generalization and pool-transfer; each
-  covers the other's failure mode. Embedding table is inspectable mid-training (t-SNE =
-  is synergy learning happening at all).
+  covers the other's failure mode. ~~Embedding table is inspectable mid-training
+  (t-SNE = is synergy learning happening at all).~~ DISPROVEN 2026-07-28: the table
+  never trains but IS load-bearing — it works as a random identity code, so its
+  geometry can never show synergy. See `docs/embedding-analysis.md` for the
+  measurements, the open question, and the gated fix options.
 - **Hand phases resolved by a `hand_policy` callable** on the env (game_state -> engine
   action; same pattern as `adapter_factory`): `GreedyHandPolicy`
   (rank_templates_cheaply-based, ms-fast, deterministic — the test fixture, since tests

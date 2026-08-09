@@ -5,16 +5,17 @@ Example::
     python scripts/extract_shop_joker_embeddings.py \
         --checkpoint runs/shop_ppo/s2_a4/shop_ppo_final.zip \
         --output data/shop_joker_embeddings.npz \
-        --image-output data/shop_joker_embeddings_umap.png
+        --image-output data/shop_joker_embeddings_umap.png \
+        --3d
 
 The checkpoint's learned identity vectors are exported separately from the
 frozen engine-derived descriptors. The UMAP plot is computed from the learned
 vectors only, so its geometry reflects the PPO trunk's embedding table rather
 than the hand-authored descriptor features.
 
-UMAP and matplotlib are imported lazily. Loading/extracting the vectors can
-therefore be used independently, while plotting reports an actionable install
-hint when ``umap-learn`` is not available.
+UMAP, matplotlib, and Plotly are imported lazily. Loading/extracting the
+vectors can therefore be used independently, while plotting reports an
+actionable install hint when an optional visualization package is unavailable.
 """
 
 from __future__ import annotations
@@ -103,18 +104,21 @@ def save_embeddings(output: Path, data: dict[str, Any]) -> None:
 def project_umap(
     embeddings: np.ndarray,
     *,
+    n_components: int = 2,
     n_neighbors: int = 15,
     min_dist: float = 0.1,
     metric: str = "cosine",
     random_state: int = 42,
 ) -> np.ndarray:
-    """Project embedding rows to two dimensions with reproducible UMAP."""
+    """Project embedding rows to 2D or 3D with reproducible UMAP."""
     if embeddings.ndim != 2:
         raise ValueError(f"embeddings must be a 2D array, got shape {embeddings.shape}")
     if len(embeddings) < 3:
         raise ValueError("UMAP requires at least three embedding rows")
     if n_neighbors < 2:
         raise ValueError(f"n_neighbors must be at least 2, got {n_neighbors}")
+    if n_components not in (2, 3):
+        raise ValueError(f"n_components must be 2 or 3, got {n_components}")
     if not 0.0 <= min_dist:
         raise ValueError(f"min_dist must be non-negative, got {min_dist}")
 
@@ -127,7 +131,7 @@ def project_umap(
         ) from exc
 
     reducer = UMAP(
-        n_components=2,
+        n_components=n_components,
         n_neighbors=min(n_neighbors, len(embeddings) - 1),
         min_dist=min_dist,
         metric=metric,
@@ -144,7 +148,7 @@ def save_umap_plot(
     label_points: bool = True,
     title: str = "Shop PPO Joker embeddings (UMAP)",
 ) -> None:
-    """Render and save a labeled 2D UMAP scatter plot."""
+    """Render and save a labeled 2D or 3D UMAP scatter plot."""
     try:
         import matplotlib
 
@@ -154,30 +158,111 @@ def save_umap_plot(
         import matplotlib.pyplot as plt
     except ImportError as exc:  # pragma: no cover - depends on local extras
         raise RuntimeError(
-            "Plotting requires matplotlib. Install the project's train extra first."
+            "Plotting requires matplotlib. Install the project's analysis extra first."
         ) from exc
 
-    if coordinates.shape != (len(center_keys), 2):
+    n_components = coordinates.shape[1] if coordinates.ndim == 2 else None
+    if n_components not in (2, 3) or coordinates.shape[0] != len(center_keys):
         raise ValueError(
-            f"coordinates must have shape ({len(center_keys)}, 2), "
+            f"coordinates must have shape ({len(center_keys)}, 2 or 3), "
             f"got {coordinates.shape}"
         )
 
     plot_path.parent.mkdir(parents=True, exist_ok=True)
-    fig, ax = plt.subplots(figsize=(16, 12), constrained_layout=True)
-    ax.scatter(coordinates[:, 0], coordinates[:, 1], s=34, alpha=0.85)
+    fig = plt.figure(figsize=(16, 12), constrained_layout=True)
+    if n_components == 3:
+        ax = fig.add_subplot(111, projection="3d")
+        ax.scatter(coordinates[:, 0], coordinates[:, 1], coordinates[:, 2], s=34, alpha=0.85)
+    else:
+        ax = fig.add_subplot(111)
+        ax.scatter(coordinates[:, 0], coordinates[:, 1], s=34, alpha=0.85)
     if label_points:
-        for (x, y), key in zip(coordinates, center_keys, strict=True):
+        for point, key in zip(coordinates, center_keys, strict=True):
             label = str(key)
             if label.startswith("j_"):
                 label = label[2:]
-            ax.annotate(label, (x, y), xytext=(4, 4), textcoords="offset points", fontsize=7)
+            if n_components == 3:
+                ax.text(point[0], point[1], point[2], label, fontsize=7)
+            else:
+                ax.annotate(
+                    label,
+                    (point[0], point[1]),
+                    xytext=(4, 4),
+                    textcoords="offset points",
+                    fontsize=7,
+                )
     ax.set_title(title)
     ax.set_xlabel("UMAP-1")
     ax.set_ylabel("UMAP-2")
+    if n_components == 3:
+        ax.set_zlabel("UMAP-3")
     ax.grid(alpha=0.2)
     fig.savefig(plot_path, dpi=180)
     plt.close(fig)
+
+
+def save_interactive_plot(
+    plot_path: Path,
+    coordinates: np.ndarray,
+    center_keys: np.ndarray,
+    *,
+    label_points: bool = True,
+    title: str,
+) -> None:
+    """Write an interactive Plotly HTML scatter plot in 2D or 3D."""
+    try:
+        import plotly.graph_objects as go
+    except ImportError as exc:  # pragma: no cover - depends on optional extra
+        raise RuntimeError(
+            "Interactive plotting requires 'plotly'. Install the project's "
+            "analysis extra first."
+        ) from exc
+
+    n_components = coordinates.shape[1] if coordinates.ndim == 2 else None
+    if n_components not in (2, 3) or coordinates.shape[0] != len(center_keys):
+        raise ValueError(
+            f"coordinates must have shape ({len(center_keys)}, 2 or 3), "
+            f"got {coordinates.shape}"
+        )
+
+    labels = np.asarray(
+        [str(key)[2:] if str(key).startswith("j_") else str(key) for key in center_keys]
+    )
+    label_template = "<b>%{text}</b><br>" if label_points else ""
+    hovertemplate = (
+        label_template
+        + "UMAP-1: %{x:.3f}<br>UMAP-2: %{y:.3f}"
+        + ("<br>UMAP-3: %{z:.3f}" if n_components == 3 else "")
+        + "<extra></extra>"
+    )
+    trace_args = dict(
+        mode="markers+text" if label_points else "markers",
+        text=labels if label_points else None,
+        textposition="top center" if label_points else None,
+        hovertemplate=hovertemplate,
+        marker=dict(size=5 if n_components == 3 else 8, opacity=0.85),
+    )
+    if n_components == 3:
+        trace = go.Scatter3d(
+            x=coordinates[:, 0], y=coordinates[:, 1], z=coordinates[:, 2], **trace_args
+        )
+    else:
+        trace = go.Scatter(x=coordinates[:, 0], y=coordinates[:, 1], **trace_args)
+
+    fig = go.Figure(trace)
+    fig.update_layout(title=title, template="plotly_white", width=1200, height=900)
+    if n_components == 3:
+        fig.update_layout(
+            scene=dict(
+                xaxis_title="UMAP-1",
+                yaxis_title="UMAP-2",
+                zaxis_title="UMAP-3",
+            )
+        )
+    else:
+        fig.update_layout(xaxis_title="UMAP-1", yaxis_title="UMAP-2")
+    plot_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.write_html(plot_path, include_plotlyjs=True)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -198,7 +283,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--metric", default="cosine")
     parser.add_argument("--seed", type=int, default=42, help="UMAP random seed")
     parser.add_argument(
+        "--3d",
+        dest="three_d",
+        action="store_true",
+        help="use a 3D UMAP projection and render a 3D plot instead of 2D",
+    )
+    parser.add_argument(
         "--no-labels", action="store_true", help="omit Joker names from the scatter plot"
+    )
+    parser.add_argument(
+        "--interactive-output",
+        type=Path,
+        default=None,
+        help="optional interactive Plotly HTML output path",
     )
     return parser
 
@@ -211,6 +308,7 @@ def main(argv: list[str] | None = None) -> None:
     plot_path = args.plot or args.output.with_suffix(".png")
     coordinates = project_umap(
         data["embeddings"],
+        n_components=3 if args.three_d else 2,
         n_neighbors=args.n_neighbors,
         min_dist=args.min_dist,
         metric=args.metric,
@@ -225,9 +323,28 @@ def main(argv: list[str] | None = None) -> None:
         coordinates,
         data["center_keys"],
         label_points=not args.no_labels,
+        title=(
+            "Shop PPO Joker embeddings (3D UMAP)"
+            if args.three_d
+            else "Shop PPO Joker embeddings (UMAP)"
+        ),
     )
+    if args.interactive_output is not None:
+        save_interactive_plot(
+            args.interactive_output,
+            coordinates,
+            data["center_keys"],
+            label_points=not args.no_labels,
+            title=(
+                "Shop PPO Joker embeddings (3D UMAP)"
+                if args.three_d
+                else "Shop PPO Joker embeddings (UMAP)"
+            ),
+        )
     print(f"Extracted {len(data['center_keys'])} Joker embeddings to {args.output}")
     print(f"Saved UMAP plot to {plot_path}")
+    if args.interactive_output is not None:
+        print(f"Saved interactive Plotly graph to {args.interactive_output}")
 
 
 if __name__ == "__main__":

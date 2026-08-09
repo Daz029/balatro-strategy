@@ -59,7 +59,28 @@ def test_save_embeddings_round_trip(tmp_path):
 
 def test_image_output_alias_sets_plot_path():
     args = extract.build_parser().parse_args(
-        ["--checkpoint", "model.zip", "--output", "vectors.npz", "--image-output", "plot.png"]
+        [
+            "--checkpoint",
+            "model.zip",
+            "--output",
+            "vectors.npz",
+            "--image-output",
+            "plot.png",
+            "--interactive-output",
+            "plot.html",
+            "--3d",
+        ]
     )
 
     assert args.plot.name == "plot.png"
+    assert args.interactive_output.name == "plot.html"
+    assert args.three_d is True
+
+
+def test_save_umap_plot_accepts_three_dimensions(tmp_path):
+    output = tmp_path / "plot_3d.png"
+    coordinates = np.asarray([[0.0, 1.0, 2.0], [1.0, 2.0, 3.0], [2.0, 3.0, 4.0]])
+
+    extract.save_umap_plot(output, coordinates, np.asarray(["j_a", "j_b", "j_c"]))
+
+    assert output.exists()
