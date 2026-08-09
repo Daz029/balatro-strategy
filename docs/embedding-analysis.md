@@ -258,6 +258,198 @@ here is NOT critical, coverage of broad effect families is." Coarse is fine;
 76/76 false positives on the densest column is not coarseness, it is a column
 that actively misinforms.
 
+### 5.2 Why the embedding "won" — and where learned geometry actually lives
+
+Two measurements taken to answer a direct question: *nothing can make
+hand-authored descriptors explain everything, so did something go WRONG in
+training the embedding, and will repairing descriptors fix it?*
+
+**Measurement 1 — the decoder does not prefer the embedding.** Mean per-dim L2
+of `joker_encoder`'s first-layer weights, by input segment: row features 1.88,
+embedding 1.80, descriptors 1.68. The always-zero `is_tarot` column sits at
+exactly 1.4142 = sqrt(2), i.e. untouched orthogonal init with gain sqrt(2) —
+a free baseline confirming the other columns did train, and by a modest 15-30%
+in norm. All three channels are weighted about equally.
+
+**Measurement 2 — the input variance is the whole story.** Between-joker
+variance injected into that layer: **embedding 51.46 (94.0%), descriptors 3.27
+(6.0%)**. And within the 6%, `scaling_flag` contributes 24.5% and
+`scaling_rate` 12.7% — so ~37% of the descriptor channel's contribution is the
+§5.1 bug. Real descriptor signal is ~3.8% of what distinguishes one joker from
+another.
+
+**Reading: nothing went wrong in training. The embedding WON.** Not because
+the decoder favours it — the weights say otherwise — but because it supplies 16
+dimensions of unit-variance identity per joker while the descriptors supply two
+or three real numbers and a pile of near-constants. The failure is in the
+DESIGN PREMISE, not the optimizer: a per-row embedding has no mechanism to
+discover similarity, because nothing couples Blueprint's row to Brainstorm's.
+
+**Where the latent geometry actually is.** It is NOT absent — it lives in the
+ENCODER's weights. Given a random code for Baron, `joker_encoder` can learn
+"this code -> the held-card-mult region of 64-d space", and that mapping is
+genuine learned latent structure. It simply is not per-joker-plottable, which
+is the §4.1 point restated from the other side. So the model CAN discover a
+behavioural axis the descriptors missed — from experience with that specific
+joker. What it cannot do is share the discovery, because random codes have no
+structure to share through.
+
+| what | where it lives | transfers across jokers? |
+|---|---|---|
+| which joker is this | embedding (random code) | — |
+| where it sits in behaviour space | encoder weights, per code | **NO** |
+| what that space means for value | trunk, over pooled features | **YES** |
+
+The third row is why the architecture works at all: synergy expressed as a
+function of the pooled aggregate is inherently compositional, so a never-seen
+raw-mult + xmult pair pools where a seen pair did and the learned value
+transfers for free. The second row is the entire bottleneck, and is exactly
+what the 0.87 ratio measured.
+
+**Root cause, stated as narrowly as possible: two jokers' embedding rows
+receive CORRELATED gradient only if something in the architecture ties them
+together, and today nothing does.** That single fact explains both findings at
+once — no correlation means no shared geometry, and no shared direction means
+per-row updates sign-flip into the random walk of §1.2. The complete list of
+things that could tie two rows:
+
+1. a shared input channel both pass through (**descriptors** — the current
+   design's intent, currently carrying ~3.8% of the variance),
+2. a shared projection producing both codes (**§7 rung 2**),
+3. an explicit loss coupling them (**§7 rung 3**).
+
+Everything else is downstream of one of those. A partial fourth mechanism is
+already present and worth crediting: **max-pooling preserves per-joker spikes**,
+so a specific joker can leave a distinctive mark in a specific dimension. That
+is bandwidth-limited genuine pair MEMORIZATION, not transfer — but it is
+presumably part of how the current policy earns its 32.5%.
+
+**Will repairing the descriptors fix the embedding? No — and it should not.**
+The embedding will almost certainly still be a random identity code after the
+repair. What changes is the 94/6 split. The correct division of labour is
+`embedding = which one is it` (identity, memorization, needs no training) and
+`descriptors = what is it like` (similarity, transfer). We are not repairing
+the embedding; we are giving the other channel something to say, because that
+is the only channel where generalization can live.
+
+### 5.3 Sequencing — rung 1, then MEASURE, then rung 3 only if earned
+
+Follows directly from 5.2, and supersedes any reading of §7 as a menu to pick
+from.
+
+- **Rung 1 (fix + enrich descriptors) is first**, because mechanism 1 is the
+  cheapest coupling and is currently near-empty AND partly wrong.
+- **Rung 2 does NOT answer "find an axis the descriptors missed"** — recorded
+  as a correction, since an earlier framing in this document called it "the
+  most direct repair". `e_j = A·d_j + r_j` shares gradient only through `A`,
+  which is a function of the descriptors, so it can only discover axes
+  expressible in DESCRIPTOR SPACE. Anything the descriptors fail to encode
+  stays in the free per-joker residual `r_j` and random-walks exactly like
+  today's table. Rung 2 fixes "similar-descriptor jokers should start close";
+  it does not fix "discover what the descriptors missed". Different gaps.
+- **Rung 3 is the only option aimed at that second gap.** An auxiliary loss
+  coupling rows via a signal OTHER than descriptors — contrastive on
+  behavioural/value similarity — can find structure no hand-authored column
+  contains. Costs stand: a loss-weight hyperparameter and a tuning burden, and
+  the co-occurrence variant remains partly circular (it learns from the
+  policy's own coverage); the value-similarity variant is less circular and
+  more expensive.
+- **The residual is measurable, not arguable.** Fix descriptors, retrain,
+  re-run the probe against the 0.87 baseline. Ratio drops a lot => the
+  descriptors were the bottleneck, stop. Ratio stays high => the residual
+  matters and rung 3 is earned.
+- **Do NOT stack rung 1 and rung 3 into one retrain.** Two changes at the same
+  seam make a regression unattributable — the same argument that deferred
+  attention to h2 in the trigger-matrix design.
+- Re-running the probe requires ONE modification: post-repair there will be few
+  exact descriptor twins left, so the exact-twin/random contrast must become a
+  scale-free continuous form (regress synergy gap on descriptor DISTANCE across
+  all pairs). Compute the pre-repair value on the current checkpoint so the
+  comparison is anchored. Re-running against `s2_a4` with repaired descriptors
+  is NOT meaningful — those weights were shaped by the broken table, so it
+  would be an OOD measurement, the same mistake the zeroed ablation arm makes.
+
+### 5.4 Descriptor schema redesign — decisions settled so far
+
+In progress; recorded here so the rationale is not re-derived. The layout is
+being reorganized around behavioural axes rather than grown column-by-column,
+which deliberately BREAKS the append-only contract at `joker_descriptors.py:20`
+— accepted, since a schema bump + shop retrain was already the cost of rung 1.
+
+Blocks: **A** meta (rarity, cost, blueprint_compat) · **B** WHEN it fires
+(scored / held / on-hand-played / on-discard / round-end / blind / shop /
+on-sell / passive) · **C** WHAT it does (chips / mult / xmult / dollars /
+retrigger / creates-cards / modifies-cards / changes-rules / slot-and-size
+mods, split per resource / copies-other-joker) · **D** GATED BY (hand-type
+one-hot, suit one-hot, rank condition, enhancement condition, probability,
+set-level, condition-is-variable) · **E** HOW IT GROWS (static /
+grows-permanently / decays / expires-when-depleted / destroyed-on-trigger +
+coarse rate) · **F** DEPENDS ON (deck composition / money / other jokers /
+consumables / hands-and-discards remaining).
+
+Settled decisions:
+
+- **One-hots for categoricals, never ordinals.** The existing `suit_ordinal`
+  (H=0 D=1 C=2 S=3 / 3) is precisely the false-geometry mistake the embedding
+  was introduced to avoid — it asserts Hearts is nearer Diamonds than Spades.
+  Rarity STAYS scalar: common < uncommon < rare < legendary is genuinely
+  ordinal.
+- **Variable conditions fill EVERY reachable value, not zero.** Ancient Joker
+  (suit re-rolled per round) sets all four suit bits, with
+  `condition_is_variable` as a MODIFIER on a filled one-hot rather than a
+  replacement for it. All-zeros would place Ancient among jokers with no card
+  condition at all, which is wrong; all-filled keeps it structurally near
+  Wrathful (fixed Spades) and far from Odd Todd (rank parity). This is the
+  CANDIDACY semantics `trigger_match` already uses ("Photograph marks all
+  faces, not just the first"), so it is the established convention, not a new
+  one. Rejected: weighting variable one-hots by 1/n — false precision, and it
+  would make Ancient look narrower on an axis where it is maximally general.
+- **Destruction is the PRICE, not the effect.** An earlier `self_destructs`
+  bucket conflated three unrelated behaviours; split into `on_sell` (Invisible
+  Joker, Luchador, Diet Cola — a stored action, and a genuinely shop-relevant
+  purchase consideration, so it belongs in block B not E), `decays` /
+  `expires_when_depleted` (Ice Cream, Popcorn, Ramen, Seltzer, Turtle Bean),
+  and `destroyed_on_trigger` (Gros Michel random, Mr. Bones on death).
+- **The table is shared with tarots/planets/vouchers/boosters, and several axes
+  genuinely TRANSFER across types — wiring them is where cross-type synergy
+  comes from.** Planets carry `cfg['hand_type']` (Mercury=Pair, Jupiter=Flush),
+  which is the SAME axis as jokers' `cfg['type']`; tarots carry `mod_conv`
+  (Magician->`m_lucky`, Empress->`m_mult`), which is the same axis as the
+  enhancement gates jokers pay off on (Lucky Cat needs `m_lucky`, Steel Joker
+  `m_steel`, Ticket `m_gold`). **This is a probable mechanism for §8's dangling
+  behavioural finding**: the agent "never held a deck containing a
+  glass/steel/stone/gold/lucky card at shop-generation time across all of
+  s1+s2" because NOTHING in the obs represents that the tarot which creates an
+  enhancement and the joker which pays off on it are related. It is not
+  declining to build enhancement decks; it has no channel that could suggest
+  one. Also note cols 3-7 are dead on JOKERS but are the type discriminator for
+  non-jokers — keep that block.
+- **No log-scaling on descriptor magnitudes.** Log is right in the obs where
+  values span orders of magnitude (blind chips 300 -> millions); descriptor
+  magnitudes do not (mult 2-15, chips 30-100, xmult 1.5-3, dollars 1-25), and
+  log would compress exactly the distinctions that matter (+12 vs +4 mult is
+  3x). Per-channel LINEAR normalization against that channel's own max.
+- **Sell price REJECTED as a descriptor column.** `card.py:481` gives
+  `sell_cost = max(1, floor(cost/2)) + extra_value`, and `extra_value` is 0 in
+  a static per-center-key view — so it is collinear with `base_cost`. The LIVE
+  sell value is already in the joker obs row (`encode_joker` feature 3) where
+  it correctly tracks accumulated `extra_value`. "Worth holding to sell" is the
+  `on_sell` bit, not a magnitude.
+- **`trigger_class` NOT added as its own one-hot** — largely redundant once
+  blocks B and D are filled properly (its scored/held split IS block B, its
+  class1-vs-class2 split IS `condition_is_variable`). It remains the derivation
+  SOURCE for those fields.
+
+Auto-derivable vs hand-authored: B's scored/held channel comes from
+`trigger_match` predicates (the return is `(scored, held)` and
+`_scored_*`/`_held_*` bake the channel in structurally);
+`condition_is_variable` from class1-vs-class2; hand-type from `cfg['type']` and
+`cfg['hand_type']`; probability from `extra.odds`; chips/mult/xmult/dollars and
+slot mods from `cfg`. Blocks **E** and **F** are almost entirely hand — which
+is the point, since E is what pattern-matching got wrong and F is the most
+synergy-predictive axis and does not exist in any config field.
+`scripts/dump_joker_descriptors.py` emits the review file.
+
 ---
 
 ## 6. PROBE OPTIONS
@@ -445,8 +637,15 @@ Ordered by cost, cheapest first:
 2. **Factored embedding** — `embedding = A · descriptor + free residual`, with
    the projection learned and shared. Similar jokers START close (restoring
    learnable geometry) while the residual preserves the separability that §2
-   proved load-bearing. The most direct repair of Gap 1 and it does not risk the
-   collapse that a small init would.
+   proved load-bearing, and it does not risk the collapse that a small init
+   would. **SCOPE CORRECTED 2026-08-09 (§5.3): this was called "the most direct
+   repair of Gap 1", which overstates it.** `A` is a function of the
+   descriptors, so shared gradient only flows along descriptor-expressible
+   directions; anything the descriptors fail to encode stays in the free
+   per-joker residual and random-walks exactly like today's table. Rung 2 fixes
+   "similar-descriptor jokers should start close". It does NOT fix "discover an
+   axis the descriptors missed" — that is rung 3 alone. Strictly downstream of
+   rung 1 for the ~half of the pool that currently shares a descriptor row.
 3. **Auxiliary loss on the table** — contrastive on co-occurrence, or predict
    descriptors from the embedding. Shapes geometry without changing the forward
    architecture. Adds a loss-weight hyperparameter and a tuning burden.
