@@ -2,6 +2,11 @@
 
 Status: **DESIGN LOCKED 2026-07-25** (findings validated 2026-07-23; estimator
 selection measured 2026-07-25; not yet built).
+**Wiring grilled against the code and amended 2026-08-09** — §Plan, §Wiring,
+§Cost, §Tests and §Open questions rewritten; Findings 1–3 unchanged. The
+2026-07-25 wiring sketch did not survive contact with the source: five of its
+specifics were wrong or unbuildable, and one would have silently corrupted the
+objective. Each is marked **AMENDED 2026-08-09** below.
 Scope: the shop agent (s2 line, a4 horizon). Hand agent untouched.
 
 > **SUPERSEDED SECTIONS.** The 2026-07-23 plan called for (1) training an
@@ -301,8 +306,75 @@ snapshot. **The realized boss play is itself a valid sample** — the run plays 
 for real regardless — so use it: `p̂ = (realized + N redeals) / (N + 1)`, a free
 extra sample.
 
-Everything else is untouched: `c_ante` / `blind_bonus`, `Φ` shaping, count
-bonuses, and the churn/skip-tag terms all keep their current behaviour.
+#### "Horizon boss" is NOT "terminal boss" — AMENDED 2026-08-09
+
+The horizon boss is `ante == win_ante`. The **terminal** boss is the deepest one
+the run reached, i.e. for a losing run, *where it died* — typically ante 2 or 3
+at the a4 rung. These are different bosses and only the first is correct.
+
+This matters because the probe captures the **terminal** one:
+`BossCapturingShopRunAdapter` fires at every boss and overwrites, so
+`last_boss_capture` is whichever came last. The 2026-07-25 wiring said to
+promote that adapter into production — lifting it verbatim yields terminal-boss
+semantics, which pays p̂ at the ante-2 boss for a run that died at ante 2. That
+is exactly the earlier-boss case that **breaks unbiasedness** (see Open
+questions), and it fails silently: p̂ looks reasonable, training runs, the
+objective is quietly wrong. The production observer MUST filter on
+`ante == win_ante`, and that filter gets its own test.
+
+#### `blind_bonus` is overridden too — AMENDED 2026-08-09
+
+The 2026-07-25 text said "everything else is untouched." That leaves the reward
+saying two contradictory things about one event: a build that reaches the
+horizon boss at p̂ = 0.6 and loses the draw is paid 0.6 on the win term (correct
+— we are integrating out the coin flip) but **0** on `blind_bonus`, because the
+blind genuinely was not cleared. The variance the exercise exists to remove is
+still sitting in the `c_ante` term.
+
+So p̂ substitutes into both, under **one** λ:
+
+```
+win term   = (1 − λ)·1{won}     + λ·p̂
+bonus term = blend_beta · c_ante(win_ante) · [ (1 − λ)·1{cleared} + λ·p̂ ]
+```
+
+This introduces no new bias: it is the same Rao-Blackwellization applied to the
+same indicator, so the term's expectation is unchanged and it still decays under
+`blend_beta` as before. λ = 0 reverts *both* terms exactly.
+
+Wiring consequence: the wrapper currently receives only the product
+`rc["blind_bonus"] = cleared × blind_clear_bonus(ante_before)`, and `ante_before`
+is env-internal — so on a **lost** horizon boss the product is 0 and `c_ante` is
+unrecoverable. The env must also emit `rc["blind_bonus_coeff"] =
+blind_clear_bonus(ante_before)` every step. Same p̂, drawn once per episode,
+feeds both terms.
+
+`Φ` shaping, count bonuses, and the churn/skip-tag terms keep their current
+behaviour.
+
+#### Free bias check on the pooled estimate — AMENDED 2026-08-09
+
+`p̂` mixes two draws produced by *different mechanisms*. The realized deal comes
+from a naturally-evolved stream state: `nr{ante}` is advanced once per blind
+(`game.py:254`), so the ante-4 boss deal is the **third** advance of that LCG.
+`prepare_redeal` resets the stream to `pseudohash("nr4" + seed)` — a fresh
+state, structurally the **first** advance. Pooling is only legitimate if those
+are identically distributed. They almost certainly are, and nobody has checked.
+
+The check is free and requires no seed study: every horizon-boss episode emits
+one realized outcome and N redeal outcomes, so log `mean(realized)` and
+`mean(redeal-only p̂)` and let them accumulate. Agreement confirms the mechanism;
+divergence is a **bias in p̂**, which is not cosmetic — `E[p̂|s] = P(win|s)` is
+the entire justification for substitution over multiplication.
+
+> **TRAP — `data/boss_clear_probe.jsonl` CANNOT settle this.** It looks like the
+> obvious corpus (1,880 builds with both quantities) and it is structurally
+> useless here: the probe snapshots the deepest boss reached, which by
+> construction is the boss the run **failed** (except outright wins). Realized is
+> ≈ 0 there *by selection*, against `sampled_clear` averaging 0.39. Anyone
+> validating from that file will "find" a huge fake discrepancy. In training
+> there is no such selection — every episode reaching the horizon boss is
+> counted, win or lose.
 
 ### Why substitution and not multiplication (W2, not W1)
 
@@ -351,75 +423,300 @@ signal.
 Because the alteration is horizon-only, the "restrict scaling to calibrated
 antes" gate is **moot** — at `win_ante=4` the horizon boss is always ante 4.
 
+**λ is a documented exception to the decay discipline (AMENDED 2026-08-09).**
+`blend_beta` and `phi_beta` both decay to zero, so at convergence the reward is
+p̂ alone — whose expectation is exactly `P(win)`. λ is therefore the first term in
+this project deliberately *not* decayed, and that is legitimate precisely because
+it is not a shaping term. Recorded explicitly so it does not later read as an
+oversight against the standing "everything decays to zero" rule.
+
 ### Monitoring consequence
 
-Under W2, `ep_rew_mean` stops equalling win rate. Given "checkpoint selection is
-a lottery" is a CONFIRMED issue (`docs/s1-training-hiccups.md` Issue 2), do not
-read the TensorBoard reward series as win rate; honest evaluation stays with
-`eval_shop_policy.py` rollouts.
+**AMENDED 2026-08-09 — the original claim here was wrong.** It said `ep_rew_mean`
+stops equalling win rate. It does not: episodes that never reach the horizon boss
+pay 0, and `E[p̂ | reach] = P(clear | reach)`, so
+`E[reward] = P(reach)·P(clear|reach) = P(win)`. The reward series remains an
+**unbiased, lower-variance** estimate of win rate — strictly more readable than
+before, not less. What muddies it is the other shaping terms, exactly as it was
+pre-alteration.
 
-## Wiring — three seams, all from existing machinery
+The real monitoring hazard is unchanged and lives elsewhere: "checkpoint
+selection is a lottery" is a CONFIRMED issue (`docs/s1-training-hiccups.md`
+Issue 2), so honest evaluation still means `eval_shop_policy.py` rollouts on the
+reserved `EVAL_` suite. See Open questions for what actually constitutes evidence
+that the alteration helped.
+
+## Wiring — three seams — REWRITTEN 2026-08-09
 
 The env-emits-honest-components / wrapper-blends discipline
 (`shop_gym.py:389-395`) decides the layout: the sampling loop lives in the
 training wrapper, never in the env.
 
+**Timing constraint that forces the shape.** The pre-`SelectBlind` boss state
+exists for one instant *inside* `ShopRunAdapter._advance`, mid-`step()`. Before
+the wrapper calls `env.step()` the agent is still in the shop; after it returns,
+the boss has already been played and the episode is over. So the wrapper can
+never reach that state itself — something inside the env must pickle it at that
+instant. A lazy thunk does **not** work: the live `gs` mutates the moment
+`SelectBlind` runs, so the decision to snapshot has to be taken at fire time.
+
 1. **`jackdaw/env/shop_run_adapter.py`** — add
-   `boss_entry_observer: Callable[[bytes, int, str], None] | None` alongside the
-   existing `hand_decision_observer`, fired in `_advance` at
-   `on_deck == "Boss"` immediately before `engine_step(SelectBlind())`, handing
-   out `snapshot_state()`. This promotes the probe's script-local
-   `BossCapturingShopRunAdapter` into production and deletes the subclass.
-2. **`jackdaw/env/shop_gym.py`** — pass the observer through, buffer captures,
-   and surface them in `info["reward_components"]["boss_entry"]`. The boss is
-   played out inside a single shop `step()`, so capture and outcome land in the
-   same step. The env computes no `p̂` and holds no torch.
-3. **`scripts/train_shop_ppo.py`** — `ShopRewardWrapper` replays the boss N
-   times using the partner **already threaded through `make_train_env`**. The
-   replay loop is `probe_boss_clear_spread.prepare_redeal` +
-   `_play_opening`, lifted from the probe. New CLI:
-   `--p-clear-playouts N` (0 = off), `--p-clear-lambda0`, `--p-clear-decay`,
-   with `λ` on the existing `TrainingSchedules` pattern
-   (`train_shop_ppo.py:117-144`). Blob never crosses a process boundary — the
-   wrapper wraps each env inside the factory, and the vec env is `DummyVecEnv`.
+   `boss_entry_observer: Callable[[int, str, Callable[[], bytes]], None] | None`
+   alongside the existing `hand_decision_observer`, fired in `_advance` at
+   `on_deck == "Boss"` immediately before `engine_step(SelectBlind())`, receiving
+   `(ante, boss_key, self.snapshot_state)`. The observer decides whether to call
+   the thunk. Do **not** promote `BossCapturingShopRunAdapter` verbatim — its
+   last-boss-wins semantics are wrong in production (see "Horizon boss is NOT
+   terminal boss").
+2. **`jackdaw/env/shop_gym.py`** — pass the observer straight through, and add
+   `rc["blind_bonus_coeff"]`. The env buffers nothing and knows nothing about p̂.
+   The boss is played out inside a single shop `step()`, so capture and outcome
+   land in the same step.
+3. **`scripts/train_shop_ppo.py`** — a `BossEntryCapture` object is built in the
+   `make_train_env` factory and handed to **both** the env (as
+   `boss_entry_observer`) and the wrapper. It owns the `ante == win_ante` filter
+   and holds the blob for the few microseconds until the wrapper's reward code
+   runs (`capture.take()`). `ShopRewardWrapper` then replays the boss N times.
+   New CLI: `--p-clear-playouts N` (0 = off), `--p-clear-lambda0`,
+   `--p-clear-decay`. Blob never crosses a process boundary — the wrapper wraps
+   each env inside the factory, and the vec env is `DummyVecEnv`.
 
-### Landmine — `card._sort_id_counter`
+**Why a shared observer object rather than `info` or an env attribute.** All
+three park the blob for the same instant and none differ in correctness; the
+tiebreakers are that (a) the `win_ante` filter stays wrapper-side, so the
+widening question is a one-line change rather than an env change, and (b)
+`eval_shop_policy.py` builds `ShopGymEnv` too — passing no observer costs
+exactly zero, whereas an env-side capture would pickle a full engine state per
+eval episode that nothing reads, needing a disable flag. This makes
+`boss_entry_observer` a second instance of the existing `hand_decision_observer`
+pattern (opt-in, `None` by default, documented as costly) rather than a new one.
+Routing bytes through `info` additionally pushes them into `DummyVecEnv`'s info
+collection and every callback, and breaks `reward_components` being flat floats.
 
-`prepare_redeal` **assigns** the process-global sort-id counter
-(`probe_boss_clear_spread.py:231`) to reproduce a capture byte-exactly.
-`DummyVecEnv` is single-process, so **all 8 envs share that global**; rewinding
-it under live episodes can collide sort ids, which Death's direction rule reads.
-In-training we do not need byte-exact reproduction of a capture, only a legal
-deal — so **do not restore the counter; let it advance.** Monotonicity is what
-matters, and burning ids on replays is harmless. Pin it with a test.
+### Replay driver — engine-direct, NOT `_play_opening` — AMENDED 2026-08-09
 
-### Cost
+The 2026-07-25 text said to lift `prepare_redeal` + `_play_opening` from the
+probe. `prepare_redeal` is reusable; **`_play_opening` is not.** It drives
+`HandPlayGymEnv` and calls `partner.act(obs, mask)`, which bypasses
+`HandCheckpointPolicy.__call__` — the path the *live* boss play actually takes
+(`shop_run_adapter.py:174`). Concretely it drops `money_aware_ordering`, the flag
+`load_hand_policy` sets for the s1/s2 partner, so p̂ would estimate a **different
+policy than the run plays**. That is fatal, not cosmetic: `E[p̂|s] = P(win|s)`
+requires p̂ to be the conditional expectation of *the indicator the run actually
+realizes*. It also demands the `ProbePartner` protocol
+(`obs_version`/`action_version`), which the training partner does not implement,
+and builds observations for a critic value no longer used.
+
+Mirror `_advance` instead — restore into a `HandPlayAdapter`, loop
+`hand_policy(gs)` until `done`, read `cleared` as `phase == ROUND_EVAL`. That is
+byte-identical in policy path to the live run and is exactly how
+`hand_play_gym.py:671,687` defines `balatro/cleared` (`hand_play_adapter.py:553-560`).
+
+Corollary: whatever the partner does, the replay must do. The question "is
+money-aware ordering optimal at a terminal blind" never arises — though for the
+record it is clear-lossless by construction, since
+`make_clear_gated_money_objective` (`ordering_objective.py:37-40`) is
+lexicographic with clearing dominant and only prefers dollars among orderings
+that already win the round.
+
+**Partner handle.** `make_train_env` passes `hand_policy=None` for the greedy
+baseline, in which case each `ShopGymEnv` builds its own `GreedyHandPolicy`
+internally and the wrapper has no handle. Expose `ShopGymEnv.hand_policy` and
+replay with *the env's own* partner — making "same partner as the run"
+structurally true rather than by convention, and keeping the greedy ablation
+baseline working.
+
+### Landmine — `card._sort_id_counter` — REWRITTEN 2026-08-09
+
+The 2026-07-25 call ("do not restore the counter; let it advance") was reasoned
+from the wrong premise and is superseded.
+
+**What the counter is.** Every `Card` takes a creation-order stamp from a
+module-global counter (`card.py:176` → `_next_sort_id`), mirroring Balatro's
+`G.sort_id`. `reset_sort_id_counter()` zeroes it and is **never called in
+production** — only in tests — so in a training process it climbs forever across
+every episode and every env.
+
+**What actually has to stay bounded.** Three of the four readers care only about
+relative order (Death's rightmost rule `consumables.py:443`, the deterministic
+pre-sorts `rng.py:371-395`, `unique_val` in `card.py:587`). The fourth does not:
+`_card_nominal` / `_card_nominal_suit` (`card_area.py:153,170`) fold
+`0.000001 * sort_id` arithmetically into the **hand sort key**, alongside a
+card's rank. A constant offset common to every card in a state cancels, so
+absolute magnitude is irrelevant — the bounded quantity is
+`1e-6 × (max_sort_id − min_sort_id)` **within one game state**, which must stay
+far below the ~1-per-rank gap between `_card_nominal` values.
+
+**Why a bare reset is worse than doing nothing.** Reset to 0 before a replay and
+the restored cards still carry their original ids (~10⁶) while newly created ones
+get 1, 2, 3 — a 10⁶ spread inside one state, ≈ 1.0 on the tiebreaker, reordering
+cards across ranks. You would have manufactured the corruption *inside* the
+replay, and on exit the live envs inherit a rewound counter.
+
+**The correct form is scoped, and seeds from the blob:**
+
+```python
+saved = card_module._sort_id_counter
+card_module._sort_id_counter = _max_sort_id(restored_gs)   # prepare_redeal's existing fallback
+try:     ...run the replay...
+finally: card_module._sort_id_counter = saved
+```
+
+`DummyVecEnv` is single-process and steps envs sequentially, so no other env can
+run inside that window — the original collision warning assumed an *unscoped*
+assignment, which is what `prepare_redeal` does today (it assigns in **both**
+branches, with no "leave it alone" path; it needs an explicit mode).
+
+Scoped, this also buys what "let it advance" cannot: replays contribute zero net
+burn to the global, so they cannot inflate the within-episode id spread of the
+other seven live envs — and p̂ becomes a pure function of `(blob, redeal seeds)`
+rather than of process history, which is what makes the determinism test below
+meaningful rather than flaky.
+
+### Redeal seeding — AMENDED 2026-08-09
+
+The probe derives redeal seeds from `run_seed`. That does not transfer: restored
+(reservoir) episodes all carry `_episode_seed == "<restored>"`
+(`shop_gym.py:322`), so every restored episode would reuse
+`<restored>_REDEAL_0000`. Use a **dedicated** per-wrapper RNG drawing a nonce per
+episode — kept separate from `ShopRewardWrapper._rng` so the flag-off path leaves
+the harvest sampling stream byte-identical to today's.
+
+### Build guard — keep it, but fix what it measures — AMENDED 2026-08-09
+
+Run `_build_guard` in-loop on every redeal. Its cost is a few hundred
+microseconds of dataclass serialization against a replay costing several torch
+forward passes plus engine scoring — single-digit percent of the thing it guards.
+
+But it must be repaired first. In `build_probe_record`, `predeal` is unpickled
+**once, outside the loop**, and `_opening_build(predeal, opening)` computes
+`deck_signature` from `predeal` — not from the replayed state. So the expensive
+component is *identical across redeals by construction* and has **zero detection
+power**; what actually varies is jokers / hand_levels / vouchers / dollars /
+hands_left / discards_left, all read off `opening`, and those are the cheap
+parts. Computing the deck signature from the **opening** state instead makes it
+earn its cost: `_deck_signature` sorts by `sort_id` across deck + hand + discard
++ played, so a reshuffle leaves it invariant while a redeal that adds, drops or
+mutates a card changes it. That also catches a `prepare_redeal` that corrupts
+every redeal identically — which the current form cannot, since all redeals would
+agree. (In the probe the deck signature's job is *recording* build identity in
+the JSONL, which is legitimate but different.)
+
+### Failure handling — AMENDED 2026-08-09
+
+The probe raises on every anomaly, correct for an offline script. In training
+that exception lands inside `step()` and kills a multi-hour run, so **fall back
+to λ = 0 for that episode** — which is not ad hoc, but a special case of the
+safety valve λ already defines.
+
+A bare fallback is not enough, because it converts "my sampler is wrong" into
+"training looks healthy while the reward quietly reverted for X% of episodes" —
+the exact class of bug this project keeps finding late. Apply the C2 labelling
+precedent: tag every failure by exception type, count it, surface the rate on
+TensorBoard, and hard-stop above ~1% after a warmup (tighter than C2's 3%
+precisely because the expected rate is zero).
+
+Two classes, handled identically at the catch site but tagged separately so a
+nonzero count in the second reads differently from the first:
+
+- **Deal-dependent engine/env edges.** Genuinely transient — a redeal is a
+  different deal against an identical build, so it can walk into an edge the live
+  deal missed. `7cb9984` ("Fix empty-hand shop training crash": play or discard
+  exhausted both hand and draw pile, leaving `SELECTING_HAND` with no legal
+  action) is a real production instance of this class, now fixed to resolve as a
+  clean `GAME_OVER`. Here the counter is really an *engine* bug detector.
+- **Invariant violations that cannot be deal-dependent** — boss key changed
+  across a redeal, phase not `SELECTING_HAND` after `SelectBlind`, build drift.
+  These mean the mechanism is wrong, so every p̂ is suspect.
+
+Restoration itself is not a risk: `restore_state` is exercised constantly by the
+reservoir already.
+
+### Cost — AMENDED 2026-08-09
 
 Only episodes that actually reach the horizon boss pay. At the measured ~0.22
-ante-4 density that is `0.22 × 8 ≈ 1.8` extra boss blinds per episode against
-the ~7–9 an episode already plays: **roughly +20% wall clock**, rising as the
-agent improves (~+45% at 0.5 density). N is a CLI knob.
+ante-4 density that is `0.22 × 8 ≈ 1.8` extra boss blinds per episode against the
+~7–9 an episode already plays: roughly +20% wall clock, ~+45% at 0.5 density.
+**Accepted (user call): ~+40% is fine, training is fast enough.**
 
-### Tests
+Two reasons that is not a ceiling, so measure rather than model:
+
+- **The model prices a replay as one average blind.** A boss is the most
+  expensive blind in an episode (more hands and discards consumed than a Small),
+  so 8 replays cost more than 8 average blinds of partner forwards. Shop-policy
+  forward passes dilute this in the other direction.
+- **Density rises with competence, and that is the goal.** 0.22 is today's reach
+  rate. The reservoir compounds it: `fresh_frac=0.5` means half of episodes start
+  from a harvested snapshot sampled uniformly over ante strata, so a good
+  fraction begin one or two blinds from the horizon boss — short episodes that
+  are nearly certain to trigger a replay, the worst ratio in the mix.
+
+A timed `N=0` vs `N=8` comparison over a few thousand steps settles it in
+minutes. Log the realized horizon-boss density alongside, since that is the term
+that drifts. N is a CLI knob if it disappoints.
+
+### Tests — REWRITTEN 2026-08-09
 
 1. Observer fires exactly once per boss, pre-`SelectBlind`, with a blob that
-   round-trips; the probe reproduces its published numbers through the
-   production hook.
-2. Replay determinism (same blob + seeds → same p̂) and the build-guard
-   invariant, reusing `_build_guard`'s drift assertion.
-3. sort-id monotonicity across replays with two interleaved envs.
-4. `--p-clear-playouts 0` reproduces today's reward **byte-identically** (the
+   round-trips; the probe reproduces its published numbers through the production
+   hook.
+2. **Horizon filter**: an episode that dies at the ante-2 boss with `win_ante=4`
+   produces **no** capture and falls through to the honest indicator. This is the
+   test that stops the terminal-vs-horizon confusion from shipping.
+3. Replay determinism (same blob + seeds → same p̂, independent of process
+   history) and the repaired build-guard invariant.
+4. sort-id: the counter is byte-identical before and after a replay, and the
+   within-state spread of a replayed opening stays bounded. Two interleaved envs.
+5. Replay policy path: the replayed boss uses the same partner configuration as
+   the live play (pin that `money_aware_ordering` reaches the replay).
+6. Failure handling: an injected replay exception falls back to λ = 0 for that
+   episode, is counted under its own tag, and does not propagate.
+7. `--p-clear-playouts 0` reproduces today's reward **byte-identically** (the
    same flag-off discipline as `s1_schema`); `λ=1` pays p̂ on reach regardless of
-   outcome; truncation pays 0.
+   outcome, on **both** the win term and `blind_bonus`; truncation pays 0.
 
 ## Open questions
 
 - **N**: 8 by default, 4 if throughput demands it (Findings 3). Revisit only
   against measured wall clock.
-- **Wider than the horizon boss?** Applying p̂ at *earlier* bosses reintroduces
-  the myopia the locked design already rejected for shop-visit-scoped episodes
-  (economy / scaling / banking pay off *later* than an ante-2 boss). Start
-  horizon-only; widen only on evidence the signal is too thin.
+- **Wider than the horizon boss? CLOSED 2026-08-09 — no, and for a stronger
+  reason than the one recorded.** The original entry filed this under myopia
+  (economy / scaling / banking pay off *later* than an ante-2 boss). That
+  undersells it: widening is a **correctness** failure, not a preference. At the
+  horizon boss, clearing the boss *is* winning, so
+  `p̂ = P(clear boss | s_boss) = P(win | s_boss)`, and by the tower property
+  `E[p̂ | s] = P(win | s)` at every shop state — which is the whole control-variate
+  guarantee. At an earlier boss `p̂ = P(clear that blind)` while `P(win | s)` also
+  requires surviving the antes above it, so the identity breaks and p̂ becomes a
+  **biased shaping term**, dragging W2 back into exactly the regime this design
+  escaped. Earlier states are already served by the existing reward (`c_ante`, Φ,
+  terminal win). Not to be revisited on "the signal is too thin" grounds.
+- **What counts as evidence it worked? (added 2026-08-09.)** Not a higher best
+  checkpoint. Two traps: picking the best checkpoint by eval is a max over a
+  noisy estimate, so a bigger eval suite shrinks per-checkpoint noise but not the
+  selection bias, and it inflates *more* with more checkpoints — only safe if both
+  arms get identical treatment. And W2's own theory says the objective is
+  unchanged in expectation, so the predicted effect is **variance, not mean**:
+  faster and more *reliable* convergence, not a higher asymptote.
+  - `--p-clear-lambda0 0` reverts through the *same code path*, so the A/B is one
+    flag rather than branch-vs-main — no confounds.
+  - Run several seeds per arm, evaluate on the reserved `EVAL_` suite at matched
+    step counts, and read the **across-seed spread**. Shrinking spread is the
+    mechanism's fingerprint; one seed landing higher is what the confirmed
+    lottery produces by chance.
+  - Cheaper precursor: Findings 3 gives estimator variance as `σ²/N`, so log the
+    variance of the terminal reward term across episodes with p̂ on and off. If
+    the variance reduction is not landing, nothing downstream can work — and that
+    shows up in one short run rather than after a full rung.
+- **Warm start (added 2026-08-09).** `--init-from` an existing a4 checkpoint stays
+  valid, and for a stronger reason than "ante 4 is where the wall is": the
+  identity above means the critic's targets are unchanged *in expectation*, so a
+  critic fit against the old terminal reward is fit against the same `V`. Its
+  targets merely become lower-variance — it was regressing a Bernoulli and now
+  regresses a continuous mean, so it should *sharpen* near the horizon boss. If
+  the value head does look miscalibrated, reset **only the value head** (trunk and
+  policy retained), not a retrain; policy temperature is a different lever and
+  does not address calibration.
 - **Per-bootstrap refresh**: p̂ is partner-specific by construction (it is
   sampled with the deployed partner), so it refreshes each bootstrap iteration
   for free. No artifact to re-extract.
@@ -462,8 +759,15 @@ agent improves (~+45% at 0.5 density). N is a CLI knob.
 ## Pointers
 
 - Probe / ground-truth sampler: `scripts/probe_boss_clear_spread.py`
-  (+ `tests/scripts/test_probe_boss_clear_spread.py`). `prepare_redeal` and
-  `_play_opening` are the reusable pieces for the training-time sampler.
+  (+ `tests/scripts/test_probe_boss_clear_spread.py`). **AMENDED 2026-08-09:**
+  `prepare_redeal` is the reusable piece — but it needs an explicit sort-id mode
+  (today it *assigns* the global in both branches, with no "leave it alone"
+  path), and `_build_guard`'s deck signature must be computed from the opening
+  state. `_play_opening` is **not** reusable (see "Replay driver"). Extract the
+  shared machinery to `jackdaw/env/boss_replay.py` and have the probe import it,
+  rather than the training script importing a sibling script from `scripts/`;
+  the probe keeps `"capture"`/`"max"` sort-id modes for byte-exact reproduction,
+  training uses the scoped save/restore.
 - Raw corpus: `data/boss_clear_probe.jsonl` (1,880 × 40, complete per-build
   joker/state records — aggregation is downstream).
 - Figure: `data/boss_clear_probe_analysis.png`.
