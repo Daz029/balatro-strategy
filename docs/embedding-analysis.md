@@ -15,6 +15,11 @@ A condensed version of the measurements lives in `docs/s1-training-hiccups.md`
 under "The joker embedding table is a RANDOM IDENTITY CODE". This document is
 the full record plus the forward plan.
 
+**UPDATE 2026-08-09 — §5's open question is ANSWERED (memorization dominates),
+the §7 fixes are unblocked, and §5.1 records a descriptor-extraction BUG found
+en route: 76 of 150 jokers are falsely flagged as scaling jokers. Read §5
+before acting on §§1-4, which pre-date it.**
+
 ---
 
 ## 1. Measured — the table never trains
@@ -179,15 +184,79 @@ of pair memorization is possible. Which mode dominates is empirical.
 
 ---
 
-## 5. THE OPEN QUESTION
+## 5. THE OPEN QUESTION — ANSWERED 2026-08-09: MEMORIZATION DOMINATES
 
 > Does the shop policy generalize to joker pairings it has rarely or never seen
 > (e.g. a fresh raw-mult + xmult combination), or has it memorized the pairs its
 > own rollouts happened to cover?
 
-Nothing measured so far answers this. The ablation cannot: it removes identity
-wholesale and measures an OOD state. **This is the gate for every fix in §7** —
-do not change the architecture before measuring, per project standard.
+**Memorized.** Option A (§6.2) ran on `s2_a4/best_model`;
+`scripts/probe_joker_synergy.py`, artifacts `data/joker_synergy_probe.json` +
+three seed replicates. The gate is therefore OPEN for the §7 fixes — this is no
+longer a "do nothing" outcome.
+
+**Headline — twin/non-twin gap ratio 0.87** (seeds 0/1/2/3: 0.882, 0.934,
+0.805, 0.867; 95% bootstrap CIs exclude 1.0 in three of four). Making two
+jokers descriptor-IDENTICAL shrinks the difference in their learned synergy by
+only ~13%. If the descriptor channel drove generalization the ratio would
+approach 0; ~0.87 means the non-descriptor identity channels (random embedding
++ the ordinal `center_key_id` in row feature 0) account for ~87% of it.
+
+**The positive control is what makes that readable.** If the critic's second
+differences were noise, twins and non-twins would BOTH be noise and the ratio
+would sit at ~1.0 for reasons unrelated to memorization — a vacuous pass. So
+every run splits base states into disjoint halves and correlates each cell's
+mean synergy across them: **r = 0.79-0.92** over ~950 cells. Synergy is a
+reproducible function of the pair; the null is real. Mean |synergy| 0.023-0.05
+in P(win) units (max 0.30), so the quantity has real magnitude too.
+
+**Structure inside the result** (seed 0, 27 twin groups): 21 of 27 fall below
+1.0, and which ones is the tell. The tightest are jokers that genuinely ARE
+mechanically alike — `mime/dusk` 0.35, `wily/devious` 0.39, `crazy/zany` 0.51
+(the last two being the same hand-type-conditional family with different
+trigger hands). The loosest are pure descriptor COLLISIONS —
+`blue_joker/photograph` 2.05, `onyx_agate/arrowhead` 1.41, `juggler/drunkard`
+1.38. So the descriptor channel transfers when it happens to be right, and
+transfers nothing when it is merely degenerate.
+
+### 5.1 Why generalization failed — the descriptor channel is thin AND wrong
+
+Two measurements taken while interpreting the above; together they explain the
+result and re-rank §7.
+
+**Thin.** Of 24 descriptor dims, cols 3-7 are other-item type flags
+(structurally 0 on every joker) and col 2 `is_joker` is constant 1. The
+effect-family columns are extremely sparse across the 150-joker pool: flat
++mult 9, +chips 3, xmult 10, suit-conditional 4, hand-type-conditional 17,
+economy 5, probabilistic 4, hand-size 6. Only `scaling` (87),
+`scaling_rate` (87) and `blueprint_compat` (121) are dense. **103 distinct
+descriptor rows for 150 jokers — 77 jokers (51%) sit in one of 30 exact
+duplicate groups**, e.g. `(four_fingers, shortcut, midas_mask, smeared)`.
+
+**Wrong.** `j_onyx_agate` (Clubs) and `j_arrowhead` (Spades) are exact twins
+despite a dedicated suit column, which exposed the defect: both configs are a
+BARE NUMERIC `extra` (`{'extra': 7}` / `{'extra': 50}`), so the suit branch
+(which requires `extra` to be a dict) never fires, and the bare-numeric branch
+at `joker_descriptors.py:114-122` flags them as SCALING jokers with an
+arbitrary rate. **76 of 150 jokers use the bare-numeric idiom and all 76 are
+flagged scaling — 76 of the 87 total scaling flags.** The idiom carries
+wildly different meanings: Credit Card's $20 debt allowance, Banner's 30 chips
+per remaining discard, Mime's retrigger count, Photograph's x2 mult (whose
+xmult ALSO never registers, since col 10 reads `cfg["Xmult"]` which Photograph
+lacks). It cannot be fixed by excluding the idiom either — Obelisk
+(`{'Xmult': 1, 'extra': 0.2}`) genuinely scales through it while Runner and
+Green Joker scale through dict keys. The column does not discriminate.
+
+Consequence: with `scaling` mostly false-positive, `blueprint_compat`
+near-constant and `is_joker` constant, a typical joker's descriptor reduces to
+**(rarity, cost)**. That is the mechanism behind the 51% duplicate rate, and it
+closes the loop on §3 — the embedding had to serve as a pure identity code
+because nothing else was carrying identity.
+
+The module docstring calls this layer "coarse by design" and says "precision
+here is NOT critical, coverage of broad effect families is." Coarse is fine;
+76/76 false positives on the densest column is not coarseness, it is a column
+that actively misinforms.
 
 ---
 
@@ -214,22 +283,45 @@ critic is a small MLP and this batches — thousands of pairs in seconds.
 - **Observational** — real shop states from rollouts, owned sets as the policy
   actually built them. In-distribution so V is trustworthy, but the pairs of
   interest are by definition rare or absent. Use as the SANITY ANCHOR.
-- **Constructed** — write chosen joker ids into the owned rows of a base state.
-  The only way to present never-co-occurred pairs. Same counterfactual-obs-edit
-  method the `V_curve` money sweep already uses, so there is precedent.
+- **Constructed** — inject chosen jokers into a base state. The only way to
+  present never-co-occurred pairs.
 
-**Three implementation traps:**
+  **CORRECTED 2026-08-09 (this sentence originally said "same
+  counterfactual-obs-edit method the `V_curve` money sweep already uses").
+  `extract_v_curve.py` states the OPPOSITE as its one hard rule:
+  counterfactuals edit ENGINE STATE and re-encode, never obs vectors.** A joker
+  fans out into far more derived obs features than dollars does — the joker's
+  own 15 row features, `get_hand_eval_flags` in the GC (`observation.py:1107`;
+  inject Four Fingers by obs-edit and the state claims Four Fingers while every
+  hand-structure feature disagrees), the hand-analysis block
+  (`observation.py:837-843`), and the per-shop-row buyability flag
+  `len(jokers) < joker_slots` (`observation.py:554`). The implemented path is
+  restore blob → mutate `gs["jokers"]` → `build_shop_observation` → critic.
 
-1. **Consistency.** Writing a `center_key_id` is not enough — also set the mask
-   bit AND any joker-count feature in `global_context`. Miss one and the critic
-   sees a contradictory state (a joker present in the rows but absent from the
-   count) and you are measuring its response to nonsense.
-2. **Cardinality artifact.** `masked_pool`'s mean denominator changes 1→2 when
-   the second joker is added, mechanically shifting the pooled vector *even if
-   the second joker were a duplicate of the first*. So `synergy(a,b)` is nonzero
-   for purely structural reasons. Control it: measure `synergy(a, a′)` for a
-   near-duplicate as a floor and subtract.
-3. **Dollars are not decremented** for the injected joker. This is FINE — the
+**Implementation traps (revised against the built probe):**
+
+1. **Injected jokers need their `add_to_deck` passives** (`card.py:746`).
+   Skipping it is the pre-regen B1 bug verbatim — `HandPlayAdapter.reset`
+   injected with a bare `create_joker` and never applied acquisition passives,
+   so every demo sampling Juggler/Turtle Bean carried a hand size the engine
+   would never deal. (This SUPERSEDES the original trap 1, which was about
+   keeping a hand-written obs edit self-consistent — re-encoding makes mask
+   bits and derived counts correct for free.)
+2. **Cardinality artifact — solved by construction, not by subtraction.**
+   `masked_pool`'s mean denominator changes when the joker COUNT changes, so an
+   addition-form second difference carries a structural offset. The original
+   remedy was to measure `synergy(a, a′)` as a floor and subtract it. The
+   probe instead uses the REPLACEMENT form against a fixed filler `f`:
+   `V(O∪{a,b}) − V(O∪{a,f}) − V(O∪{f,b}) + V(O∪{f,f})`. Every arm injects
+   exactly two jokers, so cardinality is pinned at 2 and the artifact never
+   arises. Still an exact second difference — `f` is just the baseline level
+   instead of absence, and enters all four terms symmetrically.
+3. **Slot positions must match across arms.** `masked_pool` is
+   permutation-invariant but `encode_joker` feature 9 is `position / 20`
+   (`observation.py:443`), so rows are not. Inject at the same indices in every
+   arm, and filter base states to those with two free joker slots so
+   `_check_joker_overfill` (`shop_obs.py:190`) never truncates an arm.
+4. **Dollars are not decremented** for the injected joker. This is FINE — the
    inconsistency is identical across all four terms and cancels in the second
    difference to first order. Stated explicitly so nobody "fixes" it and
    reintroduces a money confound.
@@ -250,6 +342,24 @@ against `synergy(a′,b)`.
 
 This is the structure of CLAUDE.md's own "Hack-vs-descriptor-twin" objection
 from the trigger-matrix design, repurposed as a measurement.
+
+**Two amendments from the build (2026-08-09):**
+
+- **No similarity threshold is needed** — "near-identical" turned out to
+  understate it. 77 of 150 jokers share a BIT-IDENTICAL descriptor row with
+  another joker (30 exact groups), so the descriptor channel is provably unable
+  to distinguish a twin pair and any measured difference is attributable to the
+  non-descriptor identity channels. One knob avoided.
+- **"Close" and "far apart" need a SCALE, so the probe adds a reference arm.**
+  A raw gap of 0.042 is uninterpretable alone. Every run therefore computes the
+  same gap statistic over random NON-twin pairs, and reports the ratio. ~1.0 =
+  twins no more alike than strangers = memorization; ≪1.0 = descriptor-driven
+  transfer. Without this arm the verdict would rest on eyeballing an absolute
+  number against nothing.
+- **A positive control is MANDATORY, not optional** — see §5. A noise-only
+  critic yields ratio ~1.0 trivially, so the split-half reliability check is
+  what separates "memorization confirmed" from "measurement failed". Report it
+  alongside the ratio every time.
 
 ### 6.3 Option B — nested regression (if twins are ambiguous)
 
@@ -292,11 +402,32 @@ survivable. M1 collapsing there while M2 fits ⟹ memorization confirmed.
 
 ---
 
-## 7. FIX OPTIONS — all gated on §5/§6, none decided
+## 7. FIX OPTIONS — GATE PASSED 2026-08-09, re-ranked
 
-If the probe shows composition works, **do nothing**: the architecture is fine
-and only the diagnostic (§4.1) needs amending. The options below apply only if
-memorization dominates.
+The gate condition was: *"If the probe shows composition works, do nothing;
+the options below apply only if memorization dominates."* **Memorization
+dominates (§5), so the options are live.**
+
+§5.1 also re-ranks them, and the gap between rungs 1 and 2 is much larger than
+the original ordering implies:
+
+- **Rung 1 is no longer merely "cheapest" — it has the best evidence, and part
+  of it is a BUG FIX rather than enrichment.** The transfer channel is ~5
+  informative dims wide for a typical joker, collapses half the pool to exact
+  duplicates, and its densest column (`scaling`) is 76/87 false positives.
+- **Rung 2 is strictly DOWNSTREAM of rung 1, not an independent alternative.**
+  A factored embedding `A·desc + residual` gives twins the same `A·desc` by
+  construction — so while half the pool shares a descriptor row, the entire
+  distinction falls back into the free residual, i.e. back into a random code.
+  Doing 2 before 1 buys transfer only among the 73 descriptor-unique jokers.
+- **Rung 3's contrastive-on-co-occurrence variant is partly self-defeating**:
+  it would shape geometry from the co-occurrence statistics of the policy's own
+  rollouts, which is the very coverage sparsity §5 just confirmed. The
+  predict-descriptors-from-embedding variant is the safer one — and is likewise
+  bounded by rung 1's content.
+- **Rung 0, free, not previously listed**: §11's first caveat (the arms ablated
+  all ~300 center keys, so the joker-vs-consumable/voucher split is not
+  isolated) is one line of the harness. Settle it before scoping any fix.
 
 **Note what is already available and NOT missing:** `joker_encoder` is shared
 across all jokers and already receives the descriptors concatenated, so a
@@ -402,6 +533,20 @@ median 0.304 — `turtle_bean` 0.540 (3rd largest of all 150), `stuntman` 0.391,
 
 - Extraction + UMAP: `scripts/extract_shop_joker_embeddings.py`
   (`--checkpoint`, `--output`, `--3d`, `--interactive-output`).
+- **Option A probe (§5): `scripts/probe_joker_synergy.py`.** Defaults target
+  `runs/shop_ppo/s2_a4/best_model/best_model.zip` + that run's `reservoir.pkl`
+  (2048 shop snapshots; 40 sampled with >=2 free joker slots, pack-pending
+  strata excluded). `--n-states`, `--n-partners`, `--max-groups` (smoke),
+  `--filler`, `--seed`, `--n-boot`. ~26 s and ~41k critic forwards for the
+  full run. `s1_schema` is RECOVERED from the checkpoint's observation space
+  rather than passed, since a mismatch there is a silent garbage-in
+  measurement. Artifacts: `data/joker_synergy_probe.json` (+ `_seed{1,2,3}`).
+- Φ-shaping check for any run whose critic is being read for magnitudes:
+  `shop/phi_beta` / `shop/blend_beta` / `shop/count_beta` are logged to
+  TensorBoard by `train_shop_ppo.py:156`. For `s2_a4`: phi_beta0=0.1 decaying
+  to 6e-5, blend_beta identically 0 — so V is effectively in P(win) units at
+  the final checkpoint. §6.4's "you may not be able to check" is resolved for
+  any run that still has its event file.
 - Floor: `scripts/eval_shop_policy.py --policy nextround --win-ante 4
   --n-episodes 200 --s1-schema --hand-policy
   runs/hand_ppo_b/h2/checkpoints/hand_ppo_b_2000000_steps.zip
@@ -409,12 +554,16 @@ median 0.304 — `turtle_bean` 0.540 (3rd largest of all 150), `stuntman` 0.391,
 - Artifacts: `data/embedding_ablation.json`,
   `data/joker_embeddings_s2_a3.npz` / `.png` (`data/` is gitignored).
 
-**TODO — not yet checked in:** the ablation/appearance-rate harness (three arms
-with shared eval seeds + minibatch hit-rate resampling) and the fresh-init
-control were written as ad-hoc scripts for this session. If the probe work in §6
-goes ahead, promote them to `scripts/` first so the arms and the probe share one
-state-construction path — a divergence between them is the solver/env-divergence
-bug class applied to analysis tooling.
+**TODO — PARTLY CLOSED 2026-08-09.** The probe is now checked in
+(`scripts/probe_joker_synergy.py`) and owns a documented state-construction
+path (restore → mutate `gs` → re-encode). Still ad-hoc and NOT checked in: the
+three-arm ablation / appearance-rate harness and the fresh-init control from
+the original session. When either is next needed (rung 0's joker-ids-only
+variant is the likely trigger), promote it to `scripts/` and make it consume
+the probe's construction path rather than growing a second one — a divergence
+between them is the solver/env-divergence bug class applied to analysis
+tooling. Note the probe deliberately does NOT reimplement the ablation's
+permutation arm for this reason.
 
 ## 11. Caveats
 
