@@ -1583,7 +1583,13 @@ def _round_won(gs: dict[str, Any]) -> None:
         discards_left=cr.get("discards_left", 0),
         joker_count=len(jokers),
     )
-    eor = on_end_of_round(jokers, game_snap, rng)
+    eor = on_end_of_round(
+        jokers,
+        game_snap,
+        rng,
+        blind=blind,
+        hand_levels=gs.get("hand_levels"),
+    )
     # eor["dollars_earned"] (Golden Joker, Rocket, Cloud 9, Satellite,
     # Delayed Gratification) is deliberately NOT applied here: it flows once
     # through calculate_round_earnings(joker_dollars=...) into
@@ -1595,6 +1601,16 @@ def _round_won(gs: dict[str, Any]) -> None:
     # Remove self-destructed jokers (Popcorn, Turtle Bean, etc.)
     for removed_joker in eor.get("jokers_removed", []):
         _lose_joker(gs, removed_joker)
+
+    # Apply mutations. These were collected and returned but never consumed,
+    # so pool_flags stayed {} for the whole run: Cavendish (yes_pool_flag =
+    # gros_michel_extinct) could never be offered by ANY shop or pack, and
+    # Gros Michel (no_pool_flag) kept re-appearing after going extinct
+    # (pools.py::_filter_joker).
+    for mutation in eor.get("mutations", []):
+        pool_flag = mutation.get("pool_flag")
+        if pool_flag:
+            gs.setdefault("pool_flags", {})[pool_flag] = True
 
     # ------------------------------------------------------------------
     # 2. Process perishable/rental

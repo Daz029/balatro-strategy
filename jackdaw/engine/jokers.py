@@ -16,6 +16,7 @@ from collections.abc import Callable
 from dataclasses import InitVar, dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
+from jackdaw.engine.data.hands import HAND_ORDER
 from jackdaw.engine.data.prototypes import JOKERS
 
 if TYPE_CHECKING:
@@ -352,13 +353,23 @@ def on_end_of_round(
     jokers: list[Card],
     game: GameSnapshot,
     rng: PseudoRandom | None = None,
+    blind: Any = None,
+    hand_levels: Any = None,
 ) -> dict[str, Any]:
     """Process all joker end-of-round effects.
+
+    ``blind`` and ``hand_levels`` are part of the context, not optional
+    extras: Campfire and Rocket gate on ``ctx.blind.boss`` and To Do List
+    re-rolls over the visible hand types.  Omitting them here silently
+    disabled all three -- the caller had the blind in scope and simply
+    never passed it -- while their handler-level unit tests, which build
+    the context by hand, kept passing.  Same integration-seam class as
+    the Throwback / Idol / blueprint_compat bugs.
 
     Returns a dict with:
         dollars_earned: total dollars from calc_dollar_bonus
         jokers_removed: list of jokers that self-destructed
-        mutations: list of side-effect descriptors
+        mutations: list of side-effect descriptors (applied by the caller)
     """
     dollars = 0
     removed: list[Card] = []
@@ -374,6 +385,8 @@ def on_end_of_round(
         jokers=jokers,
         rng=rng,
         game=game,
+        blind=blind,
+        hand_levels=hand_levels,
     )
     for joker in jokers:
         if joker.debuff:
@@ -1340,12 +1353,42 @@ def _trading(card: Card, ctx: JokerContext) -> JokerResult | None:
 
 @register("j_todo_list")
 def _to_do_list(card: Card, ctx: JokerContext) -> JokerResult | None:
-    """To Do List: +$4 if hand matches to_do_poker_hand. Source: card.lua:3491."""
-    if ctx.joker_main and ctx.scoring_name:
-        target = card.ability.get("to_do_poker_hand")
+    """To Do List: +$4 if the played hand matches the target. Re-rolls each round.
+
+    Source: card.lua:3491 -- which sits inside the ``context.before`` block
+    (bracketed by Midas Mask/Vampire above and DNA/Ride the Bus/Obelisk/
+    Green Joker below), NOT the joker_main block that starts ~3632.  The
+    payout lands before the hand scores, like Green Joker's increment.
+
+    The target lives on the joker (``ability.extra.poker_hand``, seeded from
+    centers.json), not in ``current_round`` -- which is why it is absent from
+    ``reset_round_targets``'s four resets and has to re-roll itself here.
+    The handler previously read ``ability["to_do_poker_hand"]``, a key
+    nothing in the engine ever wrote, so it paid $0 on every hand of every
+    round while its hand-built-ctx unit tests passed.
+    """
+    extra = card.ability.get("extra", {})
+
+    if ctx.before and ctx.scoring_name:
+        target = extra.get("poker_hand")
         if target and ctx.scoring_name == target:
-            extra = card.ability.get("extra", {})
             return JokerResult(dollars=extra.get("dollars", 4))
+
+    if ctx.end_of_round and not ctx.blueprint and ctx.rng is not None:
+        # Re-roll the target for next round (pseudoseed('to_do')).  Restricted
+        # to VISIBLE hand types so the joker cannot ask for an undiscovered
+        # secret hand (Flush Five etc.); HandLevels flips `visible` on once a
+        # hand is leveled.  Falls back to all 12 when hand_levels is absent.
+        choices = [ht for ht in HAND_ORDER]
+        if ctx.hand_levels is not None:
+            visible = [ht for ht in HAND_ORDER if ctx.hand_levels[ht].visible]
+            if visible:
+                choices = visible
+        target, _ = ctx.rng.element([str(ht) for ht in choices], ctx.rng.seed("to_do"))
+        extra["poker_hand"] = target
+        card.ability["extra"] = extra
+        return JokerResult()
+
     return None
 
 

@@ -574,16 +574,22 @@ def score_hand(
     )
 
     # === Phase 5: "before" joker pass ===
+    # Collect dollars as well as level_up: this pass used to keep ONLY
+    # level_up and drop every other field on the floor, so any before-context
+    # joker that pays out (To Do List) silently earned nothing.
     for joker in jokers:
         if joker.debuff:
             continue
         ctx = JokerContext(before=True, **_shared)
         result = calculate_joker(joker, ctx)
-        if result and result.level_up:
-            hand_levels.level_up(hand_type)
-            base_chips, base_mult = hand_levels.get(hand_type)
-            hand_chips = float(base_chips)
-            mult = float(base_mult)
+        if result:
+            if result.dollars:
+                dollars += result.dollars
+            if result.level_up:
+                hand_levels.level_up(hand_type)
+                base_chips, base_mult = hand_levels.get(hand_type)
+                hand_chips = float(base_chips)
+                mult = float(base_mult)
 
     # === Phase 6: Blind modify_hand (The Flint) ===
     new_mult, new_chips, modified = blind.modify_hand(mult, int(hand_chips))

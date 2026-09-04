@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import pytest
 
+from jackdaw.engine.actions import CashOut, NextRound, PlayHand, SelectBlind
 from jackdaw.engine.card import Card, reset_sort_id_counter
+from jackdaw.engine.card_factory import create_joker
+from jackdaw.engine.game import step
 from jackdaw.engine.hand_levels import HandLevels
 from jackdaw.engine.jokers import (
     _REGISTRY,
@@ -20,6 +23,7 @@ from jackdaw.engine.jokers import (
     registered_jokers,
 )
 from jackdaw.engine.rng import PseudoRandom
+from jackdaw.engine.run_init import initialize_run
 
 
 @pytest.fixture(autouse=True)
@@ -1072,35 +1076,77 @@ class TestTrading:
 
 
 class TestToDoList:
-    """j_todo_list: +$4 if hand matches to_do_poker_hand."""
+    """j_todo_list: +$4 when the played hand matches ability.extra.poker_hand.
 
-    def test_matching_hand(self):
-        joker = _joker_card(
-            "j_todo_list",
-            extra={"dollars": 4, "poker_hand": "High Card"},
-            to_do_poker_hand="Pair",
-        )
-        ctx = JokerContext(joker_main=True, scoring_name="Pair")
-        result = calculate_joker(joker, ctx)
-        assert result is not None
-        assert result.dollars == 4
+    Asserted through the real run loop, not a hand-built context: the bug
+    these replace was a handler reading ``ability["to_do_poker_hand"]``, a
+    key nothing in the engine ever wrote, and the old tests passed because
+    they set that key themselves.
+    """
 
-    def test_non_matching_hand(self):
-        joker = _joker_card(
-            "j_todo_list",
-            extra={"dollars": 4, "poker_hand": "High Card"},
-            to_do_poker_hand="Pair",
-        )
-        ctx = JokerContext(joker_main=True, scoring_name="Flush")
-        assert calculate_joker(joker, ctx) is None
+    def _run_with_todo(self, seed: str = "TODO_TEST"):
+        gs = initialize_run("b_red", 1, seed)
+        gs["jokers"] = [create_joker("j_todo_list")]
+        return gs
 
-    def test_no_target_no_effect(self):
-        joker = _joker_card(
-            "j_todo_list",
-            extra={"dollars": 4, "poker_hand": "High Card"},
-        )
-        ctx = JokerContext(joker_main=True, scoring_name="Pair")
-        assert calculate_joker(joker, ctx) is None
+    def _play_round(self, gs, indices=(0, 1, 2, 3, 4)):
+        step(gs, SelectBlind())
+        gs["blind"].chips = 1
+        step(gs, PlayHand(card_indices=indices))
+        step(gs, CashOut())
+        step(gs, NextRound())
+
+    def test_pays_through_the_real_pipeline_on_a_match(self):
+        """Fresh joker targets its config default ('High Card'); a High Card pays $4."""
+        gs = self._run_with_todo()
+        assert gs["jokers"][0].ability["extra"]["poker_hand"] == "High Card"
+        step(gs, SelectBlind())
+        before = gs["dollars"]
+        step(gs, PlayHand(card_indices=(0,)))
+        assert gs["last_score_result"].hand_type == "High Card"
+        assert gs["dollars"] == before + 4
+
+    def test_pays_nothing_on_a_non_match(self):
+        gs = self._run_with_todo()
+        gs["jokers"][0].ability["extra"]["poker_hand"] = "Flush Five"
+        step(gs, SelectBlind())
+        before = gs["dollars"]
+        step(gs, PlayHand(card_indices=(0,)))
+        assert gs["dollars"] == before
+
+    def test_pays_in_the_before_pass_not_joker_main(self):
+        """card.lua:3491 sits in the context.before block, like Green Joker."""
+        joker = _joker_card("j_todo_list", extra={"dollars": 4, "poker_hand": "Pair"})
+        before = calculate_joker(joker, JokerContext(before=True, scoring_name="Pair"))
+        assert before is not None and before.dollars == 4
+        assert calculate_joker(joker, JokerContext(joker_main=True, scoring_name="Pair")) is None
+
+    def test_target_rerolls_every_round(self):
+        gs = self._run_with_todo("TODO_CYCLE")
+        seen = []
+        for _ in range(6):
+            self._play_round(gs)
+            seen.append(gs["jokers"][0].ability["extra"]["poker_hand"])
+        assert len(set(seen)) > 1, f"target never changed: {seen}"
+
+    def test_reroll_never_picks_an_undiscovered_secret_hand(self):
+        secret = {"Flush Five", "Flush House", "Five of a Kind"}
+        for i in range(12):
+            gs = self._run_with_todo(f"TODO_SECRET_{i}")
+            for _ in range(4):
+                self._play_round(gs)
+                assert gs["jokers"][0].ability["extra"]["poker_hand"] not in secret
+
+    def test_reroll_is_deterministic_per_seed(self):
+        def targets(seed):
+            gs = self._run_with_todo(seed)
+            out = []
+            for _ in range(4):
+                self._play_round(gs)
+                out.append(gs["jokers"][0].ability["extra"]["poker_hand"])
+            return out
+
+        assert targets("TODO_DET") == targets("TODO_DET")
 
 
 # ============================================================================

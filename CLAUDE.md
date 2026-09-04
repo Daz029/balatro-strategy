@@ -1,5 +1,11 @@
 # Balatro RL Project — Context Handoff
 
+# 9/4/2026: CRITICAL ERRORS 
+- engine bugs, especially involving called at end of round jokers. The scale suggests an close engine
+analysis and potential overhaul. 
+- descriptors: in progress
+- winrate-scaled reward: less importnat right now
+
 Simulator: `jackdaw-balatro` (Python, faithful seeded reimplementation of Balatro's engine).
 Overall goal: train RL agents to play Balatro, split into two sub-problems: **hand/discard
 play within a blind** ("ante-play") and **shop decisions**.
