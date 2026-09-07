@@ -71,6 +71,8 @@ Lifecycle legend for the **set by** column:
                                          Set by init.
     rental_rate        int               Cost per rental joker per round (default 3).
                                          Set by init.
+    ^ THIS IS NEVER CALLED, IN VANILLA OR HERE.
+
     bankrupt_at        int               Maximum debt floor (default 0).
                                          Set by init.  Stake 5+ allows negative.
     money_per_hand     int               Dollars per hand played (Green Deck).
