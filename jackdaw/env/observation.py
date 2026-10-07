@@ -18,6 +18,7 @@ from typing import Any
 
 import numpy as np
 
+from jackdaw.engine import read
 from jackdaw.engine.actions import GamePhase
 from jackdaw.engine.card import Card
 from jackdaw.engine.consumables import can_use_consumable
@@ -392,7 +393,7 @@ def encode_playing_card(
     v[6] = float(card.debuff)
     v[7] = 0.0  # not face down
     v[8] = float(card.base.id in (11, 12, 13))  # J, Q, K
-    v[9] = float(bool(gs.get("splash", 0)) or not card.debuff)
+    v[9] = float(read.rules(gs).splash or not card.debuff)
     v[10] = _log_scale(card.ability.get("bonus", 0) + card.ability.get("perma_bonus", 0))
     v[11] = _log_scale(card.base.times_played)
     v[12] = position / 20.0
@@ -749,11 +750,14 @@ def encode_global_context(gs: dict[str, Any]) -> np.ndarray:
     v[26] = center_key_id(blind_key) / max(NUM_CENTER_KEYS, 1)
     v[27] = _ls(len(gs.get("deck", [])))
     v[28] = _ls(len(gs.get("discard_pile", [])))
+    # Read live (Phase 2): these were flat gs keys nothing ever wrote, so
+    # the feature was constant 0 for every state before the overhaul.
+    active = read.rules(gs)
     v[29] = (
-        float(bool(gs.get("four_fingers", 0)))
-        + float(bool(gs.get("shortcut", 0))) * 2
-        + float(bool(gs.get("smeared", 0))) * 4
-        + float(bool(gs.get("splash", 0))) * 8
+        float(active.four_fingers)
+        + float(active.shortcut) * 2
+        + float(active.smeared) * 4
+        + float(active.splash) * 8
     ) / 15.0
 
     # Hand levels [30:90] — 12 hand types × 5 features
@@ -1161,7 +1165,7 @@ def encode_playing_cards_batch(
     if n == 0:
         return _EMPTY_PLAYING
     buf = _get_hand_buf(n)
-    splash = bool(gs.get("splash", 0))
+    splash = read.rules(gs).splash
 
     # Compute which cards belong to the best detected hand
     jokers: list[Card] = gs.get("jokers", [])

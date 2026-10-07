@@ -277,20 +277,13 @@ Weights for shop card type selection.  Modified by vouchers.
                                              Oops! All 6s sets to 2.
 
 
-.. rubric:: Meta joker flags
+.. rubric:: Meta joker rules (NOT stored)
 
-Flags checked by :func:`~jackdaw.engine.hand_eval.evaluate_hand` when
-the corresponding joker is active.
-
-::
-
-    four_fingers       int               Four Fingers: flushes/straights need only 4 cards.
-    shortcut           int               Shortcut: straights can gap by 1 rank.
-    smeared            int               Smeared Joker: hearts=diamonds, spades=clubs for flushes.
-    splash             int               Splash: every card counts for scoring.
-
-These are typically stored as counts (0 = inactive, ≥1 = active) and
-are set/incremented by joker ability application.
+Four Fingers, Shortcut, Smeared Joker, Splash, Pareidolia and Showman are
+derived from the joker area on demand: :func:`~jackdaw.engine.read.rules`
+(``Rules``). Earlier revisions documented flat ``four_fingers`` / ``shortcut`` /
+``smeared`` / ``splash`` keys here; nothing ever wrote them, and the observation
+encoder read them as constant 0 until Phase 2.
 
 
 .. rubric:: Voucher state
@@ -506,6 +499,220 @@ def migrate_state(gs: dict[str, Any]) -> dict[str, Any]:
             blind.__dict__.pop("hands", None)
 
     return gs
+
+
+# ---------------------------------------------------------------------------
+# Canonical key registry (engine overhaul Phase 2, S2)
+# ---------------------------------------------------------------------------
+# One name per concept. Every top-level game-state key the engine, env or
+# agents read or write must be listed here (value = what it is and who writes
+# it), and every second-level key of a dict group in GROUP_KEYS. Enforced by
+# tests/engine/test_state_registry.py, which also fails on a read with no
+# writer. A new name for an existing concept is an alias: reuse the
+# registered key instead. Values Lua derives on demand are NOT keys: add a
+# getter to jackdaw/engine/read.py.
+
+STATE_KEYS: dict[str, str] = {
+    # control / run identity
+    "phase": "GamePhase; runner (start), game (transitions)",
+    "seeded": "run is seeded; run_init",
+    "stake": "stake level; run_init",
+    "win_ante": "target ante; init",
+    "won": "run won; game (_round_won)",
+    "round": "rounds completed; game",
+    "selected_back_key": "deck back key; run_init",
+    "challenge": "challenge id; run_init (challenges raise, D-scope)",
+    "challenge_jokers": "challenge starting jokers; run_init",
+    "actions_taken": "step() counter; runner",
+    "rng": "PseudoRandom (Lua G.GAME.pseudorandom); run_init",
+    "pseudorandom": "Lua raw seed table; init only (state lives in rng)",
+    "STOP_USE": "Lua UI consumable-use guard; init only (UI)",
+    "sort": "hand sort direction; init only",
+    # money
+    "dollars": "committed money; run_init, game/economy/consumables",
+    "dollar_buffer": "Lua pending payouts; init (writer: Phase 5 money ledger)",
+    "bankrupt_at": "debt floor; init, Credit Card add/remove_from_deck",
+    "interest_cap": "interest cap; init, vouchers",
+    "interest_amount": "interest per $5; init, To the Moon",
+    "discount_percent": "shop discount; init, vouchers",
+    "inflation": "challenge inflation amount; init, shop",
+    "rental_rate": "rental cost per round; init (never mutated)",
+    "base_reroll_cost": "reroll base; run_init",
+    "previous_round": "{'dollars'} snapshot; game cash-out (UI in Lua)",
+    "round_earnings": "cash-out breakdown (Lua current_round.dollars); game",
+    # areas and limits
+    "deck": "draw pile; run_init, game",
+    "hand": "hand; game",
+    "discard_pile": "discard pile; game",
+    "played_cards_area": "cards in play while scoring (Lua G.play); game",
+    "jokers": "joker area; game, shop",
+    "consumables": "consumable area; game, shop",
+    "hand_size": "hand size limit; run_init, vouchers, add_to_deck passives",
+    "joker_slots": "joker slot limit; run_init, vouchers, Negative",
+    "consumable_slots": "consumable slot limit; run_init, vouchers",
+    "joker_buffer": "Lua pending joker creations; init (writer: Phase 4 applier)",
+    "consumeable_buffer": "Lua pending consumable creations; init (writer: Phase 4)",
+    "starting_deck_size": "deck size at run start; run_init",
+    "starting_consumables": "back-granted consumables; run_init",
+    "starting_params": "baseline params; init, stakes, back",
+    # round
+    "blind": "active Blind; game (select blind)",
+    "blind_on_deck": "'Small'|'Big'|'Boss'; game",
+    "chips": "chips scored this round; game",
+    "current_round": "per-round counters; init, run_init.start_round, game",
+    "round_resets": "per-ante values; init, run_init, game, tags",
+    "round_bonus": "next-round hand/discard bonuses; init, tags",
+    "facing_blind": "Lua facing_blind; init (writer: Phase 5, C02 Certificate)",
+    "last_score_result": "last ScoreResult; game",
+    "skips": "blinds skipped; game",
+    "bosses_used": "boss appearance counts; init, tags/blind",
+    "hand_levels": "HandLevels (Lua G.GAME.hands); run_init, game, consumables",
+    "hands_played": "run-wide hands played; game",
+    "unused_discards": "run-wide unused discards (Garbage Tag); game",
+    "last_hand_played": "last played hand type; game (play)",
+    # consumables / history
+    "consumeable_usage": "per-key {count, order, set}; consumables.record_consumable_usage",
+    "consumeable_usage_total": "per-set totals; consumables.record_consumable_usage",
+    "last_tarot_planet": "last Tarot/Planet used (The Fool); game",
+    "ecto_minus": "Ectoplasm hand-size cost; init (writer: D34 quick win)",
+    "orbital_choices": "Orbital Tag hand per ante/blind; init (writer: D54)",
+    "joker_usage": "Lua per-joker usage stats; init only (stats)",
+    "hand_usage": "Lua per-hand usage stats; init only (stats)",
+    "max_jokers": "Lua max jokers held (unlock stat); init only",
+    "current_boss_streak": "Lua boss streak (stat); init only",
+    "round_scores": "run statistics (D59 scope); init, game",
+    "cards_purchased": "purchase count (stats; Lua round_scores.cards_purchased); shop",
+    "tag_tally": "Lua tag counter; init only (engine orders tags by list)",
+    "perishable_rounds": "perishable lifetime; init only (cards carry perish_tally)",
+    "pack_size": "Lua booster size; init only (engine sizes packs from the booster)",
+    # shop / packs / tags
+    "shop": "shop config {'joker_max'}; init, vouchers",
+    "shop_cards": "shop card slots; game",
+    "shop_vouchers": "shop voucher slots; game",
+    "shop_boosters": "shop booster slots; game",
+    "shop_return_phase": "phase to return to after a pack; game",
+    "shop_free": "a Coupon Tag fired this shop; tags, cleared at cash-out",
+    "shop_d6ed": "a D6 Tag fired this shop; tags, cleared at cash-out",
+    "first_shop_buffoon": "first-shop Buffoon pack given; shop (constant key)",
+    "pack_cards": "open pack contents; game",
+    "pack_hand": "hand dealt for pack targeting; game",
+    "pack_type": "open pack category; game",
+    "pack_choices_remaining": "picks left (Lua pack_choices); game",
+    "pending_tag_packs": "tag-granted packs to open; game, tags",
+    "awarded_tags": "awarded tags in order (Lua G.GAME.tags); game, tags",
+    "boss_blind_rerolls": "boss rerolls left; vouchers",
+    "boss_blind_reroll_cost": "boss reroll cost; vouchers",
+    # pools / vouchers
+    "used_jokers": "pool exclusion set; card_factory",
+    "used_vouchers": "redeemed vouchers; run_init, game",
+    "banned_keys": "banned centers; init, challenges",
+    "pool_flags": "pool flags (gros_michel_extinct); init, game",
+    "edition_rate": "edition weight; init, vouchers",
+    "joker_rate": "joker weight; init",
+    "tarot_rate": "tarot weight; init",
+    "planet_rate": "planet weight; init",
+    "spectral_rate": "spectral weight; init, back",
+    "playing_card_rate": "playing-card weight; init, vouchers",
+    "probabilities": "{'normal'}; init, Oops add/remove_from_deck",
+    "modifiers": "stake/back/challenge rule flags; stakes, back, challenges",
+    # profile (external)
+    "discovered": "discovered centers; set externally",
+    "profile_unlocked": "unlocked profile items; set externally",
+}
+
+GROUP_KEYS: dict[str, frozenset[str]] = {
+    "current_round": frozenset(
+        {
+            "ancient_card",
+            "castle_card",
+            "cards_flipped",
+            "current_hand",
+            "discards_left",
+            "discards_used",
+            "dollars",
+            "free_rerolls",
+            "hands_left",
+            "hands_played",
+            "idol_card",
+            "jokers_purchased",
+            "mail_card",
+            "most_played_poker_hand",
+            "reroll_cost",
+            "reroll_cost_increase",
+            "round_dollars",
+            "temp_handsize_applied",
+            "used_packs",
+            "voucher",
+        }
+    ),
+    "round_resets": frozenset(
+        {
+            "ante",
+            "blind",
+            "blind_ante",
+            "blind_choices",
+            "blind_states",
+            "blind_tags",
+            "boss_rerolled",
+            "discards",
+            "hands",
+            "reroll_cost",
+            "temp_handsize",
+            "temp_reroll_cost",
+        }
+    ),
+    "round_bonus": frozenset({"discards", "next_hands"}),
+    "starting_params": frozenset(
+        {
+            "ante_scaling",
+            "consumable_slots",
+            "discards",
+            "dollars",
+            "erratic_suits_and_ranks",
+            "hand_size",
+            "hands",
+            "joker_slots",
+            "no_faces",
+            "reroll_cost",
+        }
+    ),
+    "modifiers": frozenset(
+        {
+            "enable_eternals_in_shop",
+            "enable_perishables_in_shop",
+            "enable_rentals_in_shop",
+            "money_per_discard",
+            "money_per_hand",
+            "no_blind_reward",
+            "no_interest",
+            "scaling",
+            # challenge-only (written through apply_challenge's dynamic rule keys)
+            "booster_ante_scaling",
+            "discard_cost",
+            "inflation",
+            "no_extra_hand_money",
+        }
+    ),
+    "shop": frozenset({"joker_max"}),
+    "probabilities": frozenset({"normal"}),
+    "consumeable_usage_total": frozenset({"tarot", "planet", "spectral", "tarot_planet", "all"}),
+    "round_scores": frozenset(
+        {
+            "furthest_ante",
+            "furthest_round",
+            "hand",
+            "poker_hand",
+            "new_collection",
+            "cards_played",
+            "cards_discarded",
+            "times_rerolled",
+            "cards_purchased",
+        }
+    ),
+}
+
+# Group keys whose writer is a dynamic key the scanner cannot resolve.
+DYNAMIC_WRITE_GROUPS: frozenset[str] = frozenset({"modifiers"})
 
 
 def describe_state(gs: dict[str, Any]) -> str:

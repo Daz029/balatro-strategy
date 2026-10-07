@@ -195,6 +195,66 @@ def tarot_usage(gs: dict[str, Any]) -> int:
     return gs.get("consumeable_usage_total", {}).get("tarot", 0)
 
 
+def last_tarot_planet(gs: dict[str, Any]) -> str | None:
+    """``G.GAME.last_tarot_planet`` (The Fool, card.lua:1373)."""
+    return gs.get("last_tarot_planet")
+
+
+def unused_discards(gs: dict[str, Any]) -> int:
+    """``G.GAME.unused_discards`` (Garbage Tag)."""
+    return gs.get("unused_discards", 0)
+
+
+def hands_played_total(gs: dict[str, Any]) -> int:
+    """Run-wide ``G.GAME.hands_played`` (Handy Tag)."""
+    return gs.get("hands_played", 0)
+
+
+def skips(gs: dict[str, Any]) -> int:
+    """``G.GAME.skips`` (Skip Tag, Throwback)."""
+    return gs.get("skips", 0)
+
+
+def shop_free(gs: dict[str, Any]) -> bool:
+    """``G.GAME.shop_free``: a Coupon Tag already fired this shop (tag.lua:448)."""
+    return bool(gs.get("shop_free"))
+
+
+def shop_d6ed(gs: dict[str, Any]) -> bool:
+    """``G.GAME.shop_d6ed``: a D6 Tag already fired this shop (tag.lua:383)."""
+    return bool(gs.get("shop_d6ed"))
+
+
+def all_cards(gs: dict[str, Any]) -> list[Card]:
+    """Every card instance the run holds (Lua iterates ``G.I.CARD``).
+
+    Used by the challenge-only Inflation repricing pass (card.lua:1800),
+    which calls ``set_cost`` on every card that exists.
+    """
+    return [
+        *playing_cards(gs),
+        *gs.get("jokers", []),
+        *gs.get("consumables", []),
+        *gs.get("shop_cards", []),
+        *gs.get("shop_vouchers", []),
+        *gs.get("shop_boosters", []),
+        *gs.get("pack_cards", []),
+    ]
+
+
+def played_hand_types(gs: dict[str, Any]) -> set[str]:
+    """Hand types played at least once this run (Planet pool softlock gate).
+
+    common_events.lua:2009 gates a Planet on ``G.GAME.hands[hand_type].played > 0``.
+    Leveling a secret hand (Black Hole) makes it visible but does not unlock
+    its Planet. Empty when the state has no hand levels.
+    """
+    hand_levels = gs.get("hand_levels")
+    if hand_levels is None:
+        return set()
+    return {ht.value for ht, state in hand_levels._hands.items() if state.played > 0}
+
+
 def planets_used(gs: dict[str, Any]) -> int:
     """Distinct Planet keys used this run (Satellite, ``card.lua:1667-1674``).
 

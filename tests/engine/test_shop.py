@@ -98,7 +98,6 @@ def _fresh_gs(
         "used_jokers": {},
         "used_vouchers": {},
         "pool_flags": {},
-        "played_hand_types": set(),
         "shop_vouchers": set(),
         "inflation": 0,
         "discount_percent": 0,

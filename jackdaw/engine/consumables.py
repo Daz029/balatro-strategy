@@ -277,7 +277,7 @@ def can_use_consumable(
         effective = len(consumables) - (1 if card in consumables else 0)
         if effective < consumable_limit:
             if key == "c_fool":
-                ltp = gs.get("last_tarot_planet")
+                ltp = read.last_tarot_planet(gs)
                 return bool(ltp) and ltp != "c_fool"
             return True
         return False
@@ -471,8 +471,7 @@ def _fool(_card: Card, ctx: ConsumableContext) -> ConsumableResult:
     Reads game_state['last_tarot_planet'] for the forced key.
     Source: card.lua:1373.
     """
-    gs = ctx.game_state or {}
-    forced_key = gs.get("last_tarot_planet")
+    forced_key = read.last_tarot_planet(ctx.game_state or {})
     if not forced_key:
         return ConsumableResult()
     return ConsumableResult(
@@ -532,8 +531,7 @@ def _wheel_of_fortune(card: Card, ctx: ConsumableContext) -> ConsumableResult:
     if ctx.rng is None:
         return ConsumableResult()
 
-    gs = ctx.game_state or {}
-    prob = gs.get("probabilities", {}).get("normal", 1)
+    prob = read.probability(ctx.game_state or {})
     extra = card.ability.get("extra", 4)
 
     # Step 1: probability check (card.lua:1474)
@@ -566,8 +564,7 @@ def _hermit(card: Card, ctx: ConsumableContext) -> ConsumableResult:
 
     Source: card.lua:1383 — ease_dollars(min(G.GAME.dollars, ability.extra)).
     """
-    gs = ctx.game_state or {}
-    current = gs.get("dollars", 0)
+    current = read.money_committed(ctx.game_state or {})
     cap = card.ability.get("extra", 20)
     gain = max(0, min(current, cap))
     return ConsumableResult(dollars=gain)

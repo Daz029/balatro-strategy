@@ -69,6 +69,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from jackdaw.engine import read
 from jackdaw.engine.data.hands import HandType
 from jackdaw.engine.data.prototypes import TAGS
 
@@ -206,20 +207,20 @@ class Tag:
                 return None
 
             if self.key == "tag_economy":
-                current = game_state.get("dollars", 0)
+                current = read.money_committed(game_state)
                 reward = min(self.config["max"], max(0, current))
                 return TagResult(dollars=reward)
 
             if self.key == "tag_garbage":
-                unused = game_state.get("unused_discards", 0)
+                unused = read.unused_discards(game_state)
                 return TagResult(dollars=unused * self.config["dollars_per_discard"])
 
             if self.key == "tag_handy":
-                played = game_state.get("hands_played", 0)
+                played = read.hands_played_total(game_state)
                 return TagResult(dollars=played * self.config["dollars_per_hand"])
 
             if self.key == "tag_skip":
-                skips = game_state.get("skips", 0)
+                skips = read.skips(game_state)
                 return TagResult(dollars=skips * self.config["skip_bonus"])
 
             if self.key == "tag_top_up":
@@ -332,7 +333,7 @@ class Tag:
                 return None
 
             if self.key == "tag_d_six":
-                if game_state.get("shop_d6ed"):
+                if read.shop_d6ed(game_state):
                     return None
                 game_state["shop_d6ed"] = True
                 # Vanilla: "Rerolls start at $0" — sets the temp base cost,
@@ -364,7 +365,7 @@ class Tag:
                 return None
 
             if self.key == "tag_coupon":
-                if game_state.get("shop_free"):
+                if read.shop_free(game_state):
                     return None
                 game_state["shop_free"] = True
                 return TagResult(coupon=True)

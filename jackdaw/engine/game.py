@@ -2155,7 +2155,6 @@ def _resolve_create_descriptors(gs: dict[str, Any], descriptors: list[dict[str, 
     ante = gs.get("round_resets", {}).get("ante", 1)
     # Planet pool softlock filtering needs current played-hand counts
     # (High Priestess / Blue Seal create Planets mid-round).
-    _sync_played_hand_types(gs)
     consumables: list = gs.setdefault("consumables", [])
     consumable_limit = gs.get("consumable_slots", 2)
     jokers: list = gs.setdefault("jokers", [])
@@ -2197,26 +2196,6 @@ def _resolve_create_descriptors(gs: dict[str, Any], descriptors: list[dict[str, 
 # ---------------------------------------------------------------------------
 
 
-def _sync_played_hand_types(gs: dict[str, Any]) -> None:
-    """Populate ``gs["played_hand_types"]`` from per-run play counts.
-
-    The Planet pool softlock gate is ``G.GAME.hands[hand_type].played > 0``
-    (common_events.lua:2009) — a hand type counts only once it has been
-    PLAYED this run.  Leveling a secret hand (e.g. via Black Hole)
-    makes it *visible* but does not unlock its planet in pools.
-    """
-    from jackdaw.engine.hand_levels import HandLevels
-
-    hand_levels: HandLevels | None = gs.get("hand_levels")
-    if hand_levels is None:
-        return
-    played: set[str] = set()
-    for ht, state in hand_levels._hands.items():
-        if state.played > 0:
-            played.add(ht.value)
-    gs["played_hand_types"] = played
-
-
 def _populate_shop(gs: dict[str, Any]) -> None:
     """Generate shop cards using populate_shop and store in game_state.
 
@@ -2231,7 +2210,6 @@ def _populate_shop(gs: dict[str, Any]) -> None:
 
     # Sync played hand types for Planet pool softlock filtering
     # (G.GAME.hands[ht].played > 0, common_events.lua:2009).
-    _sync_played_hand_types(gs)
 
     ante = gs.get("round_resets", {}).get("ante", 1)
     result = populate_shop(rng, ante, gs)
@@ -2294,7 +2272,6 @@ def _reroll_shop_cards(gs: dict[str, Any]) -> None:
     if rng is None:
         return
 
-    _sync_played_hand_types(gs)
 
     ante = gs.get("round_resets", {}).get("ante", 1)
     shop_joker_max: int = gs.get("shop", {}).get("joker_max", 2)

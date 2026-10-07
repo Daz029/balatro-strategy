@@ -63,7 +63,6 @@ def _build_game_state(
         "used_jokers": {},
         "used_vouchers": {},
         "pool_flags": {},
-        "played_hand_types": set(),
         "shop_vouchers": set(),
         "inflation": 0,
         "discount_percent": 0,

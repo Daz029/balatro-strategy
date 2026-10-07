@@ -368,7 +368,7 @@ def create_card(
             has_showman=_has_showman(gs),
             deck_enhancements=read.deck_enhancements(gs),
             playing_card_count=read.playing_card_count(gs),
-            played_hand_types=gs.get("played_hand_types"),
+            played_hand_types=read.played_hand_types(gs),
             shop_vouchers=gs.get("shop_vouchers"),
         )
 

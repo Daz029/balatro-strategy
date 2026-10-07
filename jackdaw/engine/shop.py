@@ -597,8 +597,8 @@ def buy_card(
     7. **Deduct cost** — ``game_state['dollars'] -= card.cost``.
     8. **Inflation** — if ``game_state['modifiers']['inflation']`` is True,
        increment ``game_state['inflation']`` and call
-       ``card.set_cost(inflation=…)`` on every card in
-       ``game_state.get('all_shop_cards', [])``.
+       ``card.set_cost(inflation=…)`` on every card that exists
+       (``read.all_cards``; Lua iterates ``G.I.CARD``).
     9. **Track** — ``game_state['cards_purchased'] += 1`` and, for Jokers,
        ``game_state['used_jokers'][card.center_key] = True``.
 
@@ -621,8 +621,6 @@ def buy_card(
         * ``used_jokers`` (dict) — tracks which joker keys have been seen.
         * ``playing_cards`` (list) — all playing cards in run.
         * ``jokers`` (list[Card]) — active jokers (for notifications).
-        * ``all_shop_cards`` (list[Card]) — cards to recalculate on
-          inflation (optional).
 
     Returns
     -------
@@ -652,8 +650,6 @@ def buy_card(
 
     # -- 6. Playing-card bookkeeping --
     if card.ability.get("set") in _PLAYING_CARD_SETS:
-        playing_cards: list[Card] = game_state.setdefault("playing_cards", [])
-        playing_cards.append(card)
         owned_jokers = game_state.get("jokers", [])
         game_view = StateView(game_state, jokers=owned_jokers)
         for joker in owned_jokers:
@@ -677,7 +673,7 @@ def buy_card(
         inflation = game_state["inflation"]
         discount = game_state.get("discount_percent", 0)
         ante = game_state.get("round_resets", {}).get("ante", 1)
-        for shop_card in game_state.get("all_shop_cards", []):
+        for shop_card in read.all_cards(game_state):
             if hasattr(shop_card, "set_cost"):
                 shop_card.set_cost(
                     inflation=inflation,
