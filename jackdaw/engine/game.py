@@ -1933,25 +1933,7 @@ def _apply_boss_blind_effects(gs: dict[str, Any], blind: Any) -> None:
                 seed_val = rng.seed("aajk")
                 rng.shuffle(jokers, seed_val)
 
-    # The Eye: reset hand tracking
-    elif name == "The Eye":
-        blind.hands = {
-            ht: False
-            for ht in [
-                "Flush Five",
-                "Flush House",
-                "Five of a Kind",
-                "Straight Flush",
-                "Four of a Kind",
-                "Full House",
-                "Flush",
-                "Straight",
-                "Three of a Kind",
-                "Two Pair",
-                "Pair",
-                "High Card",
-            ]
-        }
+    # The Eye's history lives in Blind.hands_used, reset on Blind creation.
 
     # The Mouth: reset only_hand
     elif name == "The Mouth":

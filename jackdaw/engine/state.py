@@ -71,7 +71,9 @@ Lifecycle legend for the **set by** column:
                                          Set by init.
     rental_rate        int               Cost per rental joker per round (default 3).
                                          Set by init.
-    ^ THIS IS NEVER CALLED, IN VANILLA OR HERE.
+                                         Read by Card:calculate_rental (card.lua:2273) and
+                                         economy.py, but never mutated after init in vanilla
+                                         or here.
 
     bankrupt_at        int               Maximum debt floor (default 0).
                                          Set by init.  Stake 5+ allows negative.
@@ -81,6 +83,23 @@ Lifecycle legend for the **set by** column:
                                          Set by back (if applicable).
     no_interest        bool              Disable interest (Green Deck).
                                          Set by back (if applicable).
+
+
+.. rubric:: Lua buffers & history
+
+::
+
+    dollar_buffer             int         Pending deferred payouts (default 0).
+                                          Set by init; future money-ledger owner.
+    last_hand_played          str | None  Most recently played hand type (default None).
+                                          Set by init; future game owner.
+    consumeable_usage_total   dict        Lua-spelled aggregate usage counters with tarot,
+                                          planet, spectral, tarot_planet, and all keys.
+                                          Set by init; future consumable owner.
+    orbital_choices           dict        Hand choices by ante and blind type for Orbital Tag.
+                                          Set by init; future tags owner.
+    facing_blind              bool        Whether the run is currently facing a blind.
+                                          Set by init; future game owner.
 
 
 .. rubric:: Card areas

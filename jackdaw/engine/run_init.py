@@ -101,6 +101,7 @@ def init_game_object() -> dict[str, Any]:
         "planet_rate": 4,
         "spectral_rate": 0,
         "playing_card_rate": 0,
+        "dollar_buffer": 0,
         "consumeable_buffer": 0,
         "joker_buffer": 0,
         "discount_percent": 0,
@@ -126,6 +127,16 @@ def init_game_object() -> dict[str, Any]:
         "pool_flags": {},
         "used_jokers": {},
         "used_vouchers": {},
+        "last_hand_played": None,
+        "consumeable_usage_total": {
+            "tarot": 0,
+            "planet": 0,
+            "spectral": 0,
+            "tarot_planet": 0,
+            "all": 0,
+        },
+        "orbital_choices": {},
+        "facing_blind": False,
         "current_round": {
             "current_hand": {
                 "chips": 0,

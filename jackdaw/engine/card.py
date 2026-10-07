@@ -35,6 +35,17 @@ def reset_sort_id_counter() -> None:
     _sort_id_counter = 0
 
 
+LUA_RUNTIME_ABILITY_KEYS: frozenset[str] = frozenset(
+    {
+        "perma_debuff",  # card.lua:4158, state_events.lua:1081
+        "couponed",  # card.lua:383
+        "wheel_flipped",  # cardarea.lua:42, card.lua:4119, state_events.lua:308
+        "discarded",  # state_events.lua:419, 278; cardarea.lua:71
+        "queue_negative_removal",  # card.lua:632, 689, 4733
+    }
+)
+
+
 # ---------------------------------------------------------------------------
 # Face nominal values (from Card:set_base, card.lua:131-134)
 # ---------------------------------------------------------------------------
@@ -193,6 +204,12 @@ class Card:
     # Status
     playing_card: int | None = None  # index in playing_cards list
     facing: str = "front"  # "front" or "back"
+    added_to_deck: bool = False  # add/remove idempotency guard (card.lua:568, 646)
+    getting_sliced: bool = False  # destruction-pass marker (card.lua:2512, 2568)
+    shattered: bool = False  # shattered-card marker (state_events.lua:967)
+    destroyed: bool = False  # destroyed-card marker (state_events.lua:1092)
+    removed: bool = False  # completed-removal marker (card.lua:4728)
+    lucky_trigger: bool = False  # Lucky trigger (card.lua:989, 1077; state_events.lua:700)
 
     # Economy
     base_cost: int = 0
@@ -205,6 +222,17 @@ class Card:
     perishable: bool = False
     perish_tally: int = 5  # rounds until perish
     rental: bool = False
+
+    @property
+    def unique_val(self) -> float:
+        """Return Lua's nominal-sort micro-tiebreaker.
+
+        Lua uses ``1 - self.ID / 1603301`` (card.lua:40), but its global node
+        ID also advances for UI nodes and cannot be reproduced literally.
+        ``sort_id`` preserves the observable ordering: later-created cards
+        receive smaller values.
+        """
+        return 1 - self.sort_id / 1603301
 
     def set_base(self, card_key: str, suit: str, value: str) -> None:
         """Populate base fields from P_CARDS data, matching Card:set_base."""

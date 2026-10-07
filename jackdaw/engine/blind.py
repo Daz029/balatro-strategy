@@ -48,6 +48,9 @@ class Blind:
     triggered: bool = False
     """Whether the boss effect has activated this round."""
 
+    prepped: bool = False
+    """Boss preparation flag (blind.lua:94, 491, 495; cleared at 177, 602)."""
+
     # Boss-specific state
     debuff_config: dict[str, Any] = field(default_factory=dict)
     """Debuff config from prototype (suit, is_face, hand, etc.)."""
