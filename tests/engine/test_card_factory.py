@@ -184,8 +184,10 @@ class TestCreateCardEternalPerishable:
                 1,
                 forced_rarity=1,
                 game_state=_gs(
-                    enable_eternals_in_shop=True,
-                    enable_perishables_in_shop=True,
+                    modifiers={
+                        "enable_eternals_in_shop": True,
+                        "enable_perishables_in_shop": True,
+                    }
                 ),
             )
             assert not (card.eternal and card.perishable), (
@@ -203,7 +205,7 @@ class TestCreateCardRental:
             PseudoRandom("S15"),
             1,
             forced_rarity=1,
-            game_state=_gs(enable_rentals_in_shop=True),
+            game_state=_gs(modifiers={"enable_rentals_in_shop": True}),
         )
         assert card.rental is True
 

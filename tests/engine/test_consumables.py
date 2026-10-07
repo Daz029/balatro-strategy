@@ -451,7 +451,7 @@ class TestWheelOfFortune:
                 card=c,
                 jokers=[j],
                 rng=rng,
-                game_state={"probabilities_normal": 1},
+                game_state={"probabilities": {"normal": 1}},
             ),
         )
         assert result is not None
@@ -615,7 +615,7 @@ class TestWheelOfFortuneIntegration:
                 card=wof,
                 jokers=[j],
                 rng=rng,
-                game_state={"probabilities_normal": 1},
+                game_state={"probabilities": {"normal": 1}},
             ),
         )
         j.set_edition(result.add_edition["edition"])

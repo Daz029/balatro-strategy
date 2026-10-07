@@ -146,7 +146,9 @@ class ShopRunAdapter:
         The restored state is always at a decision point (or terminal),
         because snapshots can only be taken when control is with the agent.
         """
-        self._gs = pickle.loads(blob)
+        from jackdaw.engine.state import migrate_state
+
+        self._gs = migrate_state(pickle.loads(blob))
         return snapshot(self._gs)
 
     # -- internal ---------------------------------------------------------------

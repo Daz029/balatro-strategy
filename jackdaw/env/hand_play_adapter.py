@@ -477,9 +477,15 @@ class HandPlayAdapter:
             antes_elapsed = max(ante - 1, 0)
             gs["skips"] = sampler.randint(0, min(2 * antes_elapsed, 4))  # Throwback
             tarots_used = sampler.randint(0, int(1.5 * antes_elapsed * 0.7))  # Fortune Teller
-            gs["consumable_usage_total"] = {"tarot": tarots_used}
+            gs["consumeable_usage_total"] = {
+                "tarot": tarots_used,
+                "planet": 0,
+                "spectral": 0,
+                "tarot_planet": tarots_used,
+                "all": tarots_used,
+            }
             # score_hand reads the flattened key; the engine's play-hand
-            # step re-derives it from consumable_usage_total, but the
+            # step re-derives it from consumeable_usage_total, but the
             # solver labels states *before* any step has run.
             gs["consumable_usage_tarot"] = tarots_used
 
@@ -537,7 +543,9 @@ class HandPlayAdapter:
         repair belongs to the training-side sampler, which supplies repaired
         blobs to this adapter.
         """
-        self._gs = pickle.loads(blob)
+        from jackdaw.engine.state import migrate_state
+
+        self._gs = migrate_state(pickle.loads(blob))
         return snapshot(self._gs)
 
     def get_legal_actions(self) -> list[Action]:

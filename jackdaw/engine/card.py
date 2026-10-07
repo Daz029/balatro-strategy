@@ -662,7 +662,7 @@ class Card:
                 if isinstance(rng, PseudoRandom):
                     roll = rng.random("lucky_mult")
                     if roll < probabilities_normal / 5:
-                        self.ability["lucky_trigger"] = True
+                        self.lucky_trigger = True
                         return self.ability.get("mult", 0)
                 return 0
             return 0  # Without RNG, Lucky Card returns 0 (needs actual roll)
@@ -750,7 +750,7 @@ class Card:
                     if isinstance(rng, PseudoRandom):
                         roll = rng.random("lucky_money")
                         if roll < probabilities_normal / 15:
-                            self.ability["lucky_trigger"] = True
+                            self.lucky_trigger = True
                             ret += p_dollars
                 # Without RNG, Lucky Card $ returns 0
             else:
@@ -775,8 +775,8 @@ class Card:
         """Apply joker's passive effects when added to deck (card.lua:Card:add_to_deck).
 
         Mutates *game_state* in-place.  Matches card.lua:564 exactly.
-        game_state keys: hand_size, discards, joker_slots, probabilities_normal,
-        bankrupt_at, free_rerolls, hands_per_round, interest_amount.
+        game_state keys: hand_size, discards, joker_slots, probabilities,
+        bankrupt_at, current_round, hands_per_round, interest_amount.
         """
         name = self.ability.get("name", "")
         extra = self.ability.get("extra")
@@ -792,12 +792,18 @@ class Card:
         if name == "Credit Card":
             amount = extra if isinstance(extra, int) else 0
             game_state["bankrupt_at"] = game_state.get("bankrupt_at", 0) - amount
-        if name == "Chaos the Clown":
-            game_state["free_rerolls"] = game_state.get("free_rerolls", 0) + 1
+        if name == "Chaos the Clown" and "current_round" in game_state:
+            current_round = game_state["current_round"]
+            current_round["free_rerolls"] = current_round.get("free_rerolls", 0) + 1
+            from jackdaw.engine.run_init import _calculate_reroll_cost
+
+            _calculate_reroll_cost(game_state, skip_increment=True)
         if name == "Turtle Bean" and isinstance(extra, dict):
             game_state["hand_size"] = game_state.get("hand_size", 0) + extra.get("h_size", 0)
         if name == "Oops! All 6s":
-            game_state["probabilities_normal"] = game_state.get("probabilities_normal", 1) * 2
+            probabilities = game_state.setdefault("probabilities", {"normal": 1})
+            for key in probabilities:
+                probabilities[key] = probabilities[key] * 2
         if name == "To the Moon":
             amount = extra if isinstance(extra, int) else 0
             game_state["interest_amount"] = game_state.get("interest_amount", 0) + amount
@@ -830,14 +836,18 @@ class Card:
         if name == "Credit Card":
             amount = extra if isinstance(extra, int) else 0
             game_state["bankrupt_at"] = game_state.get("bankrupt_at", 0) + amount
-        if name == "Chaos the Clown":
-            game_state["free_rerolls"] = max(0, game_state.get("free_rerolls", 0) - 1)
+        if name == "Chaos the Clown" and "current_round" in game_state:
+            current_round = game_state["current_round"]
+            current_round["free_rerolls"] = current_round.get("free_rerolls", 0) - 1
+            from jackdaw.engine.run_init import _calculate_reroll_cost
+
+            _calculate_reroll_cost(game_state, skip_increment=True)
         if name == "Turtle Bean" and isinstance(extra, dict):
             game_state["hand_size"] = game_state.get("hand_size", 0) - extra.get("h_size", 0)
         if name == "Oops! All 6s":
-            game_state["probabilities_normal"] = max(
-                1, game_state.get("probabilities_normal", 1) // 2
-            )
+            probabilities = game_state.setdefault("probabilities", {"normal": 1})
+            for key in probabilities:
+                probabilities[key] = probabilities[key] / 2
         if name == "To the Moon":
             amount = extra if isinstance(extra, int) else 0
             game_state["interest_amount"] = game_state.get("interest_amount", 0) - amount

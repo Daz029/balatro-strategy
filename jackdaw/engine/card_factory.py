@@ -327,16 +327,17 @@ def create_card(
         ``has_showman``, ``deck_enhancements``, ``playing_card_count``,
         ``played_hand_types``, ``shop_vouchers``.
 
-        Modifier-enable keys:
+        Modifier-enable keys under ``modifiers``:
         ``enable_eternals_in_shop`` (bool), ``enable_perishables_in_shop``
-        (bool), ``enable_rentals_in_shop`` (bool).
+        (bool), ``enable_rentals_in_shop`` (bool), and
+        ``booster_ante_scaling`` (bool).
 
         Edition key:
         ``edition_rate`` (float, default 1.0).
 
         Cost keys forwarded to :meth:`Card.set_cost`:
         ``inflation`` (int), ``discount_percent`` (int),
-        ``booster_ante_scaling`` (bool), ``has_astronomer`` (bool).
+        ``has_astronomer`` (bool).
 
     Returns
     -------
@@ -398,9 +399,10 @@ def create_card(
     # 3. Joker modifiers (shop / pack context only)
     # ------------------------------------------------------------------
     if card.ability.get("set") == "Joker" and area in ("shop", "pack"):
-        enable_eternals = gs.get("enable_eternals_in_shop", False)
-        enable_perishables = gs.get("enable_perishables_in_shop", False)
-        enable_rentals = gs.get("enable_rentals_in_shop", False)
+        modifiers = gs.get("modifiers", {})
+        enable_eternals = modifiers.get("enable_eternals_in_shop", False)
+        enable_perishables = modifiers.get("enable_perishables_in_shop", False)
+        enable_rentals = modifiers.get("enable_rentals_in_shop", False)
 
         # -- Eternal / Perishable (shared roll) --
         ep_roll = rng.random(_EP_KEY[area] + str(ante))
@@ -429,7 +431,7 @@ def create_card(
         inflation=gs.get("inflation", 0),
         discount_percent=gs.get("discount_percent", 0),
         ante=ante,
-        booster_ante_scaling=gs.get("booster_ante_scaling", False),
+        booster_ante_scaling=gs.get("modifiers", {}).get("booster_ante_scaling", False),
         has_astronomer=gs.get("has_astronomer", False),
     )
 

@@ -217,12 +217,11 @@ def apply_voucher(key: str, game_state: dict[str, Any]) -> dict[str, Any]:
         mutations["consumable_slots"] = game_state["consumable_slots"]
 
     # -----------------------------------------------------------------------
-    # Omen Globe — spectral cards appear in standard packs (passive flag)
-    # No explicit apply_to_run body; handled as a run-flag.
+    # Omen Globe — its canonical passive flag is used_vouchers[v_omen_globe],
+    # written by the voucher redemption path before this function is called.
     # -----------------------------------------------------------------------
     elif name == "Omen Globe":
-        game_state["omen_globe"] = True
-        mutations["omen_globe"] = True
+        pass
 
     # -----------------------------------------------------------------------
     # Discount — G.GAME.discount_percent = extra

@@ -660,6 +660,10 @@ def score_hand(
                         eff["card"] = joker
                         effects.append(eff)
 
+            # Lua clears this once per repetition after every Joker has seen
+            # the scored card's individual context (state_events.lua:700).
+            card.lucky_trigger = False
+
             hand_chips, mult, dollars = _apply_individual_joker_effects(
                 effects,
                 hand_chips,

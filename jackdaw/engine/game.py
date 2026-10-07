@@ -628,8 +628,14 @@ def _handle_play_hand(gs: dict[str, Any], indices: tuple[int, ...]) -> dict[str,
     gs["ancient_suit"] = cr.get("ancient_card", {}).get("suit")
 
     # Consumable usage tally
-    usage = gs.get("consumable_usage_total", {})
+    usage = gs.get("consumeable_usage_total", {})
     gs["consumable_usage_tarot"] = usage.get("tarot", 0)
+
+    # Lua writes this at the start of evaluate_play, once the played hand
+    # type is known and before any scoring effects run (state_events.lua:576).
+    from jackdaw.engine.hand_eval import evaluate_hand
+
+    gs["last_hand_played"] = evaluate_hand(played, jokers=jokers).detected_hand
 
     result = score_hand(
         played_cards=played,
@@ -1038,6 +1044,11 @@ def _handle_cash_out(gs: dict[str, Any]) -> dict[str, Any]:
         _apply_tag_result(gs, tag_res)
 
     gs["previous_round"] = {"dollars": gs.get("dollars", 0)}
+
+    # D6/Coupon are limited to one trigger per shop. Lua clears these just
+    # before the new shop's tag contexts fire (button_callbacks.lua:2932).
+    gs["shop_d6ed"] = False
+    gs["shop_free"] = False
 
     # D6 Tag (shop_start context): rerolls start at $0 this shop. The temp
     # base is cleared by the NEXT round's start_round, so it covers exactly
@@ -1710,6 +1721,24 @@ def _round_won(gs: dict[str, Any]) -> None:
     blind_on_deck = gs.get("blind_on_deck", "Small")
     rr["blind_states"][blind_on_deck] = "Defeated"
     gs["round"] = gs.get("round", 0) + 1
+
+    # On boss defeat Lua snapshots the run-wide most-played hand. Ties go
+    # to the stronger hand (the lower display-order value).
+    if getattr(blind, "boss", False) and hand_levels is not None:
+        from jackdaw.engine.data.hands import HAND_BASE, HandType
+
+        hand_name = HandType.HIGH_CARD
+        played_count = -1
+        order = 100
+        for candidate, base in HAND_BASE.items():
+            candidate_played = hand_levels.get_state(candidate).played
+            if candidate_played > played_count or (
+                candidate_played == played_count and order > base.order
+            ):
+                hand_name = candidate
+                played_count = candidate_played
+                order = base.order
+        cr["most_played_poker_hand"] = hand_name.value
 
     # ------------------------------------------------------------------
     # 8-9. Advance blind progression

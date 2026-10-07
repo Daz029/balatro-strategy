@@ -50,7 +50,7 @@ needs no changes here.
 SHAPE GUARD: everything else about a restored state was checked against a fresh
 one and matches (``current_round``/``round_resets`` key sets, Card fields;
 ``mail_card`` already carried its id; ancient/castle are suit-only by design;
-an absent ``consumable_usage_total`` genuinely means no consumable was used).
+an absent ``consumeable_usage_total`` genuinely means no consumable was used).
 But note that a key-set diff STRUCTURALLY CANNOT catch this bug class — the
 missing field lived inside a cached dict value, not at a key boundary. So the
 guard below hard-fails on any unexpected ``idol_card`` shape rather than
@@ -150,4 +150,6 @@ def restore_state(blob: bytes) -> dict[str, Any]:
     if not isinstance(gs, dict):
         raise CaptureSkewError(f"harvested blob did not restore to a game state (got {type(gs)!r})")
     repair_capture_skew(gs)
-    return gs
+    from jackdaw.engine.state import migrate_state
+
+    return migrate_state(gs)

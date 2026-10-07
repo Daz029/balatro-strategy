@@ -493,7 +493,7 @@ def populate_shop(
             inflation=gs.get("inflation", 0),
             discount_percent=gs.get("discount_percent", 0),
             ante=ante,
-            booster_ante_scaling=gs.get("booster_ante_scaling", False),
+            booster_ante_scaling=gs.get("modifiers", {}).get("booster_ante_scaling", False),
             has_astronomer=gs.get("has_astronomer", False),
         )
         boosters.append(pack_card)
@@ -593,7 +593,7 @@ def buy_card(
        all jokers in ``game_state['jokers']`` with
        ``calculate_joker({playing_card_added=True, cards=[card]})``.
     7. **Deduct cost** — ``game_state['dollars'] -= card.cost``.
-    8. **Inflation** — if ``game_state.get('inflation_modifier')`` is True,
+    8. **Inflation** — if ``game_state['modifiers']['inflation']`` is True,
        increment ``game_state['inflation']`` and call
        ``card.set_cost(inflation=…)`` on every card in
        ``game_state.get('all_shop_cards', [])``.
@@ -613,7 +613,7 @@ def buy_card(
 
         * ``dollars`` (int) — current money.
         * ``inflation`` (int) — cumulative inflation count.
-        * ``inflation_modifier`` (bool) — whether inflation is active.
+        * ``modifiers.inflation`` (bool) — whether inflation is active.
         * ``discount_percent`` (int) — 0 / 25 / 50.
         * ``cards_purchased`` (int) — running tally this round.
         * ``used_jokers`` (dict) — tracks which joker keys have been seen.
@@ -665,7 +665,8 @@ def buy_card(
     game_state["dollars"] = game_state.get("dollars", 0) - card.cost
 
     # -- 8. Inflation --
-    if game_state.get("inflation_modifier"):
+    modifiers = game_state.get("modifiers", {})
+    if modifiers.get("inflation"):
         game_state["inflation"] = game_state.get("inflation", 0) + 1
         inflation = game_state["inflation"]
         discount = game_state.get("discount_percent", 0)
@@ -676,7 +677,7 @@ def buy_card(
                     inflation=inflation,
                     discount_percent=discount,
                     ante=ante,
-                    booster_ante_scaling=game_state.get("booster_ante_scaling", False),
+                    booster_ante_scaling=modifiers.get("booster_ante_scaling", False),
                     has_astronomer=game_state.get("has_astronomer", False),
                 )
 

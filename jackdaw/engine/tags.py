@@ -332,6 +332,9 @@ class Tag:
                 return None
 
             if self.key == "tag_d_six":
+                if game_state.get("shop_d6ed"):
+                    return None
+                game_state["shop_d6ed"] = True
                 # Vanilla: "Rerolls start at $0" — sets the temp base cost,
                 # which then climbs $1 per reroll (NOT one free reroll).
                 # The receiving end already exists: round_resets.temp_reroll_cost
@@ -361,6 +364,9 @@ class Tag:
                 return None
 
             if self.key == "tag_coupon":
+                if game_state.get("shop_free"):
+                    return None
+                game_state["shop_free"] = True
                 return TagResult(coupon=True)
 
             return None  # pragma: no cover

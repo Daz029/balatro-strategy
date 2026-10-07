@@ -6,8 +6,8 @@ The game state is a plain ``dict[str, Any]`` threaded through
 every key, its type, and which module is responsible for it.
 
 This is documentation only — no runtime enforcement.  The dict approach
-was chosen for speed (no dataclass overhead on hot paths) and flexibility
-(easy to extend without migration).
+was chosen for speed (no dataclass overhead on hot paths) and flexibility;
+persisted snapshots are normalized by :func:`migrate_state` on restore.
 
 Lifecycle legend for the **set by** column:
 
@@ -77,14 +77,6 @@ Lifecycle legend for the **set by** column:
 
     bankrupt_at        int               Maximum debt floor (default 0).
                                          Set by init.  Stake 5+ allows negative.
-    money_per_hand     int               Dollars per hand played (Green Deck).
-                                         Set by back (if applicable).
-    money_per_discard  int               Dollars per discard used (Green Deck).
-                                         Set by back (if applicable).
-    no_interest        bool              Disable interest (Green Deck).
-                                         Set by back (if applicable).
-
-
 .. rubric:: Lua buffers & history
 
 ::
@@ -229,6 +221,8 @@ One-shot bonuses consumed at the start of the next round.
                                              Increased by Overstock vouchers.
     shop_cards         list[Card]        Joker/consumable cards for sale.
                                          Set by game (_populate_shop, _reroll_shop_cards).
+    shop_free          bool              Coupon Tag has fired in this shop. Set by init/tags.
+    shop_d6ed          bool              D6 Tag has fired in this shop. Set by init/tags.
     shop_vouchers      list[Card]        Voucher(s) for sale.  Set by game.
     shop_boosters      list[Card]        Booster packs for sale.  Set by game.
     shop_return_phase  GamePhase         Phase to return to after pack_opening.
@@ -305,8 +299,6 @@ are set/incremented by joker ability application.
 
     used_vouchers           dict[str, bool]   Redeemed vouchers {key: True}.
                                               Set by run_init (starting vouchers), game (redeem).
-    omen_globe              bool              Omen Globe active (spectral in standard packs).
-                                              Set by voucher.
     boss_blind_rerolls      int               Boss blind rerolls remaining (-1 = unlimited).
                                               Set by voucher (Director's Cut, Retcon).
     boss_blind_reroll_cost  int               Cost per boss reroll.
@@ -385,6 +377,8 @@ Run-wide rule flags, set by stakes and challenges.
     enable_eternals_in_shop    bool          Eternal jokers appear (stake ≥ 4).
     enable_perishables_in_shop bool          Perishable jokers appear (stake ≥ 7).
     enable_rentals_in_shop     bool          Rental jokers appear (stake ≥ 8).
+    booster_ante_scaling       bool          Booster cost increases with ante (challenge).
+    inflation                  bool          Purchases increase shop inflation (challenge).
     no_extra_hand_money    bool              Unused hands give no bonus (challenge).
     money_per_hand         int               Override $/hand for unused-hand bonus.
     money_per_discard      int               Override $/discard for unused-discard bonus.
@@ -435,6 +429,80 @@ Run-wide rule flags, set by stakes and challenges.
 from __future__ import annotations
 
 from typing import Any
+
+_USAGE_TOTAL_DEFAULTS = {
+    "tarot": 0,
+    "planet": 0,
+    "spectral": 0,
+    "tarot_planet": 0,
+    "all": 0,
+}
+
+_CARD_AREAS = (
+    "hand",
+    "deck",
+    "discard_pile",
+    "jokers",
+    "consumables",
+    "played_cards_area",
+    "shop_cards",
+    "pack_cards",
+    "pack_hand",
+)
+
+
+def migrate_state(gs: dict[str, Any]) -> dict[str, Any]:
+    """Migrate old pickled game-state aliases to the canonical Lua keys.
+
+    The migration is intentionally in-place and idempotent so every restore
+    boundary can apply it unconditionally.
+    """
+    probabilities = gs.setdefault("probabilities", {"normal": 1})
+    if "probabilities_normal" in gs:
+        probabilities["normal"] = gs.pop("probabilities_normal")
+
+    modifiers = gs.setdefault("modifiers", {})
+    for key in ("money_per_hand", "money_per_discard", "no_interest"):
+        if key in gs:
+            modifiers.setdefault(key, gs.pop(key))
+
+    gs.pop("free_rerolls", None)
+
+    old_usage = gs.pop("consumable_usage_total", None)
+    if "consumeable_usage_total" not in gs:
+        gs["consumeable_usage_total"] = old_usage if isinstance(old_usage, dict) else {}
+    usage = gs["consumeable_usage_total"]
+    for key, default in _USAGE_TOTAL_DEFAULTS.items():
+        usage.setdefault(key, default)
+
+    if "omen_globe" in gs:
+        gs.pop("omen_globe")
+        gs.setdefault("used_vouchers", {})["v_omen_globe"] = True
+
+    gs.setdefault("dollar_buffer", 0)
+    gs.setdefault("last_hand_played", None)
+    gs.setdefault("orbital_choices", {})
+    gs.setdefault("facing_blind", False)
+    gs.setdefault("shop_free", False)
+    gs.setdefault("shop_d6ed", False)
+
+    for area in _CARD_AREAS:
+        for card in gs.get(area, []) or []:
+            ability = getattr(card, "ability", None)
+            if isinstance(ability, dict):
+                ability.pop("lucky_trigger", None)
+
+    from jackdaw.engine.blind import Blind
+
+    round_resets = gs.get("round_resets")
+    blinds = [gs.get("blind")]
+    if isinstance(round_resets, dict):
+        blinds.append(round_resets.get("blind"))
+    for blind in blinds:
+        if isinstance(blind, Blind):
+            blind.__dict__.pop("hands", None)
+
+    return gs
 
 
 def describe_state(gs: dict[str, Any]) -> str:

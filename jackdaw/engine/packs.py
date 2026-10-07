@@ -143,6 +143,7 @@ def _gen_arcana(rng: PseudoRandom, ante: int, gs: dict) -> Card:
     ``'omen_globe'`` is advanced **only** when the voucher is active
     (Lua short-circuit evaluation).
     """
+    # TODO(phase2): derive this from the canonical used_vouchers source.
     if gs.get("has_omen_globe") and rng.random("omen_globe") > 0.8:
         return create_card(
             "Spectral", rng, ante, area="pack", append="ar2", soulable=True, game_state=gs
@@ -157,6 +158,7 @@ def _gen_celestial(rng: PseudoRandom, ante: int, gs: dict, slot_idx: int) -> Car
     card (slot 0) to be the planet matching the most-played hand type.
     """
     forced_key: str | None = None
+    # TODO(phase2): derive this from the canonical used_vouchers source.
     if gs.get("has_telescope") and slot_idx == 0:
         most_played = gs.get("most_played_hand")
         if most_played:

@@ -331,7 +331,7 @@ def test_run_stat_priors_seeded_for_formula_jokers() -> None:
         gs = adapter.raw_state
         seen_skips.add(gs["skips"])
         seen_tarots.add(gs["consumable_usage_tarot"])
-        assert gs["consumable_usage_total"]["tarot"] == gs["consumable_usage_tarot"]
+        assert gs["consumeable_usage_total"]["tarot"] == gs["consumable_usage_tarot"]
         assert 0 <= gs["skips"] <= 4
     assert len(seen_skips) > 1
     assert len(seen_tarots) > 1

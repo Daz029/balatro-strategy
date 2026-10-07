@@ -532,7 +532,7 @@ def _wheel_of_fortune(card: Card, ctx: ConsumableContext) -> ConsumableResult:
         return ConsumableResult()
 
     gs = ctx.game_state or {}
-    prob = gs.get("probabilities_normal", 1)
+    prob = gs.get("probabilities", {}).get("normal", 1)
     extra = card.ability.get("extra", 4)
 
     # Step 1: probability check (card.lua:1474)
@@ -589,8 +589,8 @@ def _temperance(card: Card, ctx: ConsumableContext) -> ConsumableResult:
 # Source: card.lua:1157-1170 (hand_type path), common_events.lua:464 (level_up_hand)
 #
 # Usage tracking (set_consumeable_usage equivalent):
-#   game_state['consumable_usage_total']['planet'] += 1
-#   game_state['consumable_usage_total']['all']    += 1
+#   game_state['consumeable_usage_total']['planet'] += 1
+#   game_state['consumeable_usage_total']['all']    += 1
 #   game_state['last_tarot_planet'] = card.center_key
 # ---------------------------------------------------------------------------
 
@@ -616,13 +616,13 @@ _ALL_HAND_TYPES: list[str] = list(_PLANET_HAND.values())
 def _track_planet_usage(card: Card, ctx: ConsumableContext) -> None:
     """Mutate ctx.game_state to track planet usage (mirrors set_consumeable_usage).
 
-    Updates consumable_usage_total.planet, .all and last_tarot_planet.
+    Updates consumeable_usage_total.planet, .all and last_tarot_planet.
     """
     gs = ctx.game_state
     if gs is None:
         return
     totals = gs.setdefault(
-        "consumable_usage_total",
+        "consumeable_usage_total",
         {
             "tarot": 0,
             "planet": 0,
@@ -663,7 +663,7 @@ def _black_hole(card: Card, ctx: ConsumableContext) -> ConsumableResult:
     gs = ctx.game_state
     if gs is not None:
         totals = gs.setdefault(
-            "consumable_usage_total",
+            "consumeable_usage_total",
             {
                 "tarot": 0,
                 "planet": 0,
