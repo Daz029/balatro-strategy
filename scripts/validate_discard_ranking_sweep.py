@@ -242,7 +242,6 @@ def main() -> None:
             continue
         state.hands_left = 1
         cr["hands_left"] = 1
-        state.gs["hands_left"] = 1
         cr["discards_left"] = 1
 
         row = _score_state_sweep(state, top_ks=top_ks, n_samples=args.n_samples)

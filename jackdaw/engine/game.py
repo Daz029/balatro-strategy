@@ -479,14 +479,11 @@ def _handle_skip_blind(gs: dict[str, Any]) -> dict[str, Any]:
     # ------------------------------------------------------------------
     # 4. Fire joker skip_blind context
     # ------------------------------------------------------------------
-    from jackdaw.engine.jokers import GameSnapshot, JokerContext, calculate_joker
+    from jackdaw.engine.jokers import JokerContext, calculate_joker
+    from jackdaw.engine.read import StateView
 
     jokers: list = gs.get("jokers", [])
-    game_snap = GameSnapshot(
-        joker_count=len(jokers),
-        money=gs.get("dollars", 0),
-        skips=gs.get("skips", 0),
-    )
+    game_snap = StateView(gs, jokers=jokers)
     for joker in jokers:
         if not getattr(joker, "debuff", False):
             ctx = JokerContext(
@@ -569,6 +566,7 @@ def _handle_play_hand(gs: dict[str, Any], indices: tuple[int, ...]) -> dict[str,
     played = [hand[i] for i in indices]
     held = [c for i, c in enumerate(hand) if i not in idx_set]
     gs["hand"] = held
+    gs["played_cards_area"] = played
 
     # ------------------------------------------------------------------
     # 3. Decrement hands_left, increment hands_played
@@ -602,34 +600,6 @@ def _handle_play_hand(gs: dict[str, Any], indices: tuple[int, ...]) -> dict[str,
 
     jokers = gs.get("jokers", [])
     hand_levels = gs.get("hand_levels")
-
-    # Populate snapshot values that score_hand reads from game_state.
-    # These are stored in nested structures but score_hand expects them
-    # at the top level.
-    gs["hands_left"] = cr.get("hands_left", 0)
-    gs["current_round_hands_played"] = cr.get("hands_played", 0)
-    gs["discards_left"] = cr.get("discards_left", 0)
-    gs["discards_used"] = cr.get("discards_used", 0)
-    gs["money"] = gs.get("dollars", 0)
-    gs["deck_cards_remaining"] = len(gs.get("deck", []))
-
-    # Card tallies for jokers that reference full-deck counts
-    all_cards = gs.get("deck", []) + gs.get("hand", []) + gs.get("discard_pile", []) + played
-    gs["playing_cards_count"] = len(all_cards)
-    gs["stone_tally"] = sum(1 for c in all_cards if getattr(c, "center_key", None) == "m_stone")
-    gs["steel_tally"] = sum(1 for c in all_cards if getattr(c, "center_key", None) == "m_steel")
-    gs["enhanced_card_count"] = sum(
-        1 for c in all_cards if getattr(c, "center_key", "") not in ("", "c_base")
-    )
-
-    # Targeting card values (from current_round)
-    gs["mail_card_id"] = cr.get("mail_card", {}).get("id")
-    gs["idol_card"] = cr.get("idol_card")
-    gs["ancient_suit"] = cr.get("ancient_card", {}).get("suit")
-
-    # Consumable usage tally
-    usage = gs.get("consumeable_usage_total", {})
-    gs["consumable_usage_tarot"] = usage.get("tarot", 0)
 
     # Lua writes this at the start of evaluate_play, once the played hand
     # type is known and before any scoring effects run (state_events.lua:576).
@@ -701,6 +671,7 @@ def _handle_play_hand(gs: dict[str, Any], indices: tuple[int, ...]) -> dict[str,
     # ------------------------------------------------------------------
     discard_pile: list = gs.setdefault("discard_pile", [])
     discard_pile.extend(played)
+    gs["played_cards_area"] = []
 
     # ------------------------------------------------------------------
     # 9. Record hand type
@@ -984,21 +955,10 @@ def _handle_discard(gs: dict[str, Any], indices: tuple[int, ...]) -> dict[str, A
 
 
 def _build_discard_snapshot(gs: dict[str, Any], jokers: list) -> Any:
-    """Build a GameSnapshot for discard context."""
-    from jackdaw.engine.jokers import GameSnapshot
+    """Build a live state view for discard context."""
+    from jackdaw.engine.read import StateView
 
-    cr = gs.get("current_round", {})
-    return GameSnapshot(
-        joker_count=len(jokers),
-        joker_slots=gs.get("joker_slots", 5),
-        money=gs.get("dollars", 0),
-        hands_left=cr.get("hands_left", 0),
-        discards_left=cr.get("discards_left", 0),
-        discards_used=cr.get("discards_used", 0),
-        mail_card_id=cr.get("mail_card", {}).get("id"),
-        castle_card_suit=cr.get("castle_card", {}).get("suit"),
-        skips=gs.get("skips", 0),
-    )
+    return StateView(gs, jokers=jokers)
 
 
 def _handle_cash_out(gs: dict[str, Any]) -> dict[str, Any]:
@@ -1586,14 +1546,10 @@ def _round_won(gs: dict[str, Any]) -> None:
     # ------------------------------------------------------------------
     # 1. Fire joker end_of_round context
     # ------------------------------------------------------------------
-    from jackdaw.engine.jokers import GameSnapshot, on_end_of_round
+    from jackdaw.engine.jokers import on_end_of_round
+    from jackdaw.engine.read import StateView
 
-    game_snap = GameSnapshot(
-        money=gs.get("dollars", 0),
-        hands_left=cr.get("hands_left", 0),
-        discards_left=cr.get("discards_left", 0),
-        joker_count=len(jokers),
-    )
+    game_snap = StateView(gs, jokers=jokers)
     eor = on_end_of_round(
         jokers,
         game_snap,
@@ -1818,13 +1774,10 @@ def _fire_setting_blind(
 
     Returns a list of side-effect dicts from JokerResult.extra.
     """
-    from jackdaw.engine.jokers import GameSnapshot, JokerContext, calculate_joker
+    from jackdaw.engine.jokers import JokerContext, calculate_joker
+    from jackdaw.engine.read import StateView
 
-    game_snap = GameSnapshot(
-        joker_count=len(jokers),
-        joker_slots=gs.get("joker_slots", 5),
-        money=gs.get("dollars", 0),
-    )
+    game_snap = StateView(gs, jokers=jokers)
 
     mutations: list[dict[str, Any]] = []
     for joker in jokers:
@@ -2020,13 +1973,11 @@ def _use_consumable_card(
 
     # Fire using_consumeable joker context (Constellation, etc.)
     if getattr(result, "notify_jokers_consumeable", False):
-        from jackdaw.engine.jokers import GameSnapshot, JokerContext, calculate_joker
+        from jackdaw.engine.jokers import JokerContext, calculate_joker
+        from jackdaw.engine.read import StateView
 
         jokers: list = gs.get("jokers", [])
-        game_snap = GameSnapshot(
-            joker_count=len(jokers),
-            money=gs.get("dollars", 0),
-        )
+        game_snap = StateView(gs, jokers=jokers)
         for joker in list(jokers):
             if getattr(joker, "debuff", False):
                 continue
@@ -2368,17 +2319,14 @@ def _fire_shop_joker_context(gs: dict[str, Any], **context_flags: Any) -> list[d
     Accepts keyword arguments matching :class:`JokerContext` flags
     (e.g. ``buying_card=True``, ``reroll_shop=True``).
     """
-    from jackdaw.engine.jokers import GameSnapshot, JokerContext, calculate_joker
+    from jackdaw.engine.jokers import JokerContext, calculate_joker
+    from jackdaw.engine.read import StateView
 
     jokers: list = gs.get("jokers", [])
     if not jokers:
         return []
 
-    game_snap = GameSnapshot(
-        joker_count=len(jokers),
-        joker_slots=gs.get("joker_slots", 5),
-        money=gs.get("dollars", 0),
-    )
+    game_snap = StateView(gs, jokers=jokers)
 
     # Extract 'cards' from flags if present (for playing_card_added)
     cards_arg = context_flags.pop("cards", None)

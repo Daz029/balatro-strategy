@@ -90,16 +90,13 @@ class TestShowmanFlag:
         it was permanently False and Showman did nothing at all."""
         assert _has_showman({"jokers": [_joker("j_ring_master")]}) is True
 
-    def test_debuffed_showman_still_counts(self):
-        """Vanilla's find_joker does not filter debuffed jokers."""
+    def test_debuffed_showman_is_inactive_in_rules_view(self):
         j = _joker("j_ring_master")
         j.debuff = True
-        assert _has_showman({"jokers": [j]}) is True
+        assert _has_showman({"jokers": [j]}) is False
 
-    def test_explicit_flag_wins(self):
-        """Callers and tests can still force the flag either way."""
-        assert _has_showman({"has_showman": True, "jokers": []}) is True
-        assert _has_showman({"has_showman": False, "jokers": [_joker("j_ring_master")]}) is False
+    def test_owned_showman_is_the_only_source(self):
+        assert _has_showman({"jokers": [_joker("j_ring_master")]}) is True
 
     def test_empty_state_is_false(self):
         assert _has_showman({}) is False

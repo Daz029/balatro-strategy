@@ -19,6 +19,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from jackdaw.engine import read
 from jackdaw.engine.card_utils import poll_edition
 
 if TYPE_CHECKING:
@@ -541,7 +542,7 @@ def _wheel_of_fortune(card: Card, ctx: ConsumableContext) -> ConsumableResult:
         return ConsumableResult()  # failure — "Nope!"
 
     # Step 2: pick a random editionless joker (card.lua:1477)
-    editionless = [j for j in (ctx.jokers or []) if not j.edition and not j.debuff]
+    editionless = read.editionless_jokers(ctx.jokers or [])
     if not editionless:
         return ConsumableResult()
     seed_val = ctx.rng.seed("wheel_of_fortune")
@@ -579,8 +580,7 @@ def _temperance(card: Card, ctx: ConsumableContext) -> ConsumableResult:
     Source: card.lua:1393 — sums sell_cost of all jokers, capped by ability.extra.
     """
     cap = card.ability.get("extra", 50)
-    total = sum(j.sell_cost for j in (ctx.jokers or []))
-    gain = min(total, cap)
+    gain = read.temperance_money(ctx.jokers or [], cap)
     return ConsumableResult(dollars=gain)
 
 
@@ -953,7 +953,7 @@ def _ectoplasm(_card: Card, ctx: ConsumableContext) -> ConsumableResult:
     """
     if ctx.rng is None:
         return ConsumableResult()
-    editionless = [j for j in (ctx.jokers or []) if not j.edition and not j.debuff]
+    editionless = read.editionless_jokers(ctx.jokers or [])
     if not editionless:
         return ConsumableResult()
     target, _ = ctx.rng.element(editionless, ctx.rng.seed("ectoplasm"))
@@ -971,7 +971,7 @@ def _hex(_card: Card, ctx: ConsumableContext) -> ConsumableResult:
     """
     if ctx.rng is None:
         return ConsumableResult()
-    editionless = [j for j in (ctx.jokers or []) if not j.edition and not j.debuff]
+    editionless = read.editionless_jokers(ctx.jokers or [])
     if not editionless:
         return ConsumableResult()
     target, _ = ctx.rng.element(editionless, ctx.rng.seed("hex"))

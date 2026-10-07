@@ -685,6 +685,7 @@ class TestFullRoundEarnings:
             money=23,
             jokers=jokers,
             game_state={},
+            joker_dollars=7,
         )
         assert result.blind_reward == 4
         assert result.unused_hands_bonus == 2

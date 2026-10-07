@@ -349,6 +349,7 @@ def _state_view_fixture() -> tuple[dict, list[Card], GameSnapshot]:
         playing_cards_count=3,
         stone_tally=1,
         steel_tally=1,
+        nine_tally=1,
         enhanced_card_count=2,
         hands_left=3,
         hands_played=1,
@@ -393,3 +394,13 @@ class TestStateView:
         gs["hand"].append(_playing_card("King", enhancement="m_stone"))
         assert view.stone_tally == 1
         assert StateView(gs, jokers=scored_jokers).stone_tally == 2
+
+    def test_overrides_replace_existing_properties(self):
+        gs, scored_jokers, _ = _state_view_fixture()
+        view = StateView(gs, jokers=scored_jokers, overrides={"probabilities_normal": 7.0})
+        assert view.probabilities_normal == 7.0
+
+    def test_overrides_reject_unknown_attributes(self):
+        gs, _, _ = _state_view_fixture()
+        with pytest.raises(KeyError, match="not_a_state_field"):
+            StateView(gs, overrides={"not_a_state_field": 1})

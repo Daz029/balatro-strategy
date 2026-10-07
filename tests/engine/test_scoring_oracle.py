@@ -345,7 +345,12 @@ def _run_steel_joker_2_steel():
         HandLevels(),
         Blind.create("bl_small", ante=1),
         PseudoRandom("ORACLE"),
-        game_state={"steel_tally": 2},
+        game_state={
+            "deck": [
+                _card("Diamonds", "2", enhancement="m_steel"),
+                _card("Clubs", "3", enhancement="m_steel"),
+            ]
+        },
     )
 
 
@@ -380,7 +385,7 @@ def _run_red_seal_dusk_last_hand():
         HandLevels(),
         Blind.create("bl_small", ante=1),
         PseudoRandom("ORACLE"),
-        game_state={"hands_left": 0},
+        game_state={"current_round": {"hands_left": 0}},
     )
 
 
@@ -412,7 +417,7 @@ def _run_baseball_2_uncommon():
         HandLevels(),
         Blind.create("bl_small", ante=1),
         PseudoRandom("ORACLE"),
-        game_state={"steel_tally": 1},
+        game_state={"deck": [_card("Diamonds", "2", enhancement="m_steel")]},
     )
 
 

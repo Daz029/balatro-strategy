@@ -461,9 +461,7 @@ class TestThrowbackIntegration:
     def test_throwback_fires_through_score_hand(self):
         played = [_card("Hearts", "Ace"), _card("Spades", "Ace")]
         throwback = _joker("j_throwback", extra=0.25)
-        base = score_hand(
-            played, [], [], HandLevels(), _small_blind(), PseudoRandom("T")
-        )
+        base = score_hand(played, [], [], HandLevels(), _small_blind(), PseudoRandom("T"))
         r = score_hand(
             played,
             [],
@@ -479,9 +477,7 @@ class TestThrowbackIntegration:
     def test_throwback_inert_with_zero_skips(self):
         played = [_card("Hearts", "Ace"), _card("Spades", "Ace")]
         throwback = _joker("j_throwback", extra=0.25)
-        base = score_hand(
-            played, [], [], HandLevels(), _small_blind(), PseudoRandom("T")
-        )
+        base = score_hand(played, [], [], HandLevels(), _small_blind(), PseudoRandom("T"))
         r = score_hand(
             played,
             [],
@@ -527,7 +523,7 @@ class TestIdolIntegration:
             HandLevels(),
             _small_blind(),
             PseudoRandom("T"),
-            game_state={"idol_card": idol_card},
+            game_state={"current_round": {"idol_card": idol_card}},
         )
         assert r.total == base.total * 2
 
@@ -545,7 +541,7 @@ class TestIdolIntegration:
             HandLevels(),
             _small_blind(),
             PseudoRandom("T"),
-            game_state={"idol_card": idol_card},
+            game_state={"current_round": {"idol_card": idol_card}},
         )
         assert r.total == base.total
 
@@ -651,10 +647,7 @@ class TestHandEvalFlagsIntegration:
             _card("Diamonds", "8"),
             _card("Clubs", "7"),
         ]
-        assert (
-            self._score(played, [_joker("j_four_fingers")]).total
-            > self._score(played, []).total
-        )
+        assert self._score(played, [_joker("j_four_fingers")]).total > self._score(played, []).total
 
     def test_splash_still_scores_all_played_cards(self):
         """Splash is applied TWICE once jokers are passed (evaluate_hand's

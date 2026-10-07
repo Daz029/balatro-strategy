@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from jackdaw.engine import read
 from jackdaw.engine.card_factory import create_card, create_playing_card
 from jackdaw.engine.card_utils import poll_edition
 from jackdaw.engine.data.enums import Rank, Suit
@@ -47,17 +48,9 @@ def generate_pack_cards(
         Dict of game-state values.  Relevant keys beyond those forwarded to
         :func:`~jackdaw.engine.card_factory.create_card`:
 
-        ``has_omen_globe`` (bool):
-            Omen Globe voucher is active — enables 20% Spectral substitution
-            in Arcana packs.
-
-        ``has_telescope`` (bool):
-            Telescope voucher is active — forces the first Celestial pack card
-            to the planet matching ``most_played_hand``.
-
-        ``most_played_hand`` (str | None):
-            The hand type name (e.g. ``"Flush"``) with the most plays this
-            run.  Required for the Telescope effect.
+        ``used_vouchers`` and ``hand_levels``:
+            Live sources for Omen Globe's Spectral substitution and
+            Telescope's most-played-visible-hand Planet.
 
         ``edition_rate`` (float, default ``1.0``):
             Edition rate multiplier forwarded to :func:`poll_edition` for
@@ -143,8 +136,7 @@ def _gen_arcana(rng: PseudoRandom, ante: int, gs: dict) -> Card:
     ``'omen_globe'`` is advanced **only** when the voucher is active
     (Lua short-circuit evaluation).
     """
-    # TODO(phase2): derive this from the canonical used_vouchers source.
-    if gs.get("has_omen_globe") and rng.random("omen_globe") > 0.8:
+    if read.has_voucher(gs, "v_omen_globe") and rng.random("omen_globe") > 0.8:
         return create_card(
             "Spectral", rng, ante, area="pack", append="ar2", soulable=True, game_state=gs
         )
@@ -158,9 +150,8 @@ def _gen_celestial(rng: PseudoRandom, ante: int, gs: dict, slot_idx: int) -> Car
     card (slot 0) to be the planet matching the most-played hand type.
     """
     forced_key: str | None = None
-    # TODO(phase2): derive this from the canonical used_vouchers source.
-    if gs.get("has_telescope") and slot_idx == 0:
-        most_played = gs.get("most_played_hand")
+    if read.has_voucher(gs, "v_telescope") and slot_idx == 0:
+        most_played = read.telescope_hand(gs)
         if most_played:
             for planet_key, planet_proto in PLANETS.items():
                 if planet_proto.config.get("hand_type") == most_played:

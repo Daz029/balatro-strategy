@@ -170,6 +170,7 @@ class TestD04LuckyTrigger:
             blind=Blind.create("bl_small", ante=1),
             rng=PseudoRandom("LUCKY_ALIAS"),
             probabilities_normal=100,
+            game_state={"probabilities": {"normal": 0}},
         )
 
         assert lucky_cat.ability["x_mult"] == pytest.approx(1.25)

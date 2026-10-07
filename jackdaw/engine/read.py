@@ -95,6 +95,15 @@ def playing_cards(gs: dict[str, Any]) -> list[Card]:
     card areas.  A pack hand can alias the ordinary hand, so equality is not
     sufficient and the first occurrence of each object is retained.
     """
+    if not gs.get("pack_hand"):
+        # Fast path (the solver's inner loop): without an open pack the areas
+        # are disjoint, so a plain concatenation is already duplicate-free.
+        return [
+            *gs.get("deck", []),
+            *gs.get("hand", []),
+            *gs.get("discard_pile", []),
+            *gs.get("played_cards_area", []),
+        ]
     result: list[Card] = []
     seen: set[int] = set()
     for area in _PLAYING_CARD_AREAS:
@@ -242,9 +251,24 @@ def rules(gs: dict[str, Any]) -> Rules:
 class StateView:
     """Lazy, scoring-call-local read-only view over live game state."""
 
-    def __init__(self, gs: dict[str, Any], jokers: list[Card] | None = None) -> None:
+    def __init__(
+        self,
+        gs: dict[str, Any],
+        jokers: list[Card] | None = None,
+        overrides: dict[str, Any] | None = None,
+    ) -> None:
+        """Build a view, optionally pinning named properties for this view.
+
+        Overrides are scoring-call-local values supplied explicitly by a
+        caller.  Every key must name an existing ``StateView`` attribute;
+        misspellings raise instead of silently creating a dead field.
+        """
         self._gs = gs
         self._jokers = gs.get("jokers", []) if jokers is None else jokers
+        for name, value in (overrides or {}).items():
+            if not isinstance(vars(type(self)).get(name), cached_property):
+                raise KeyError(name)
+            self.__dict__[name] = value
 
     @cached_property
     def gs(self) -> dict[str, Any]:
@@ -275,20 +299,30 @@ class StateView:
         return self._gs.get("starting_deck_size", 52)
 
     @cached_property
+    def playing_cards(self) -> list[Card]:
+        # Collected once per view: every tally below counts over this list,
+        # so a board of tally jokers pays for one area walk, not one each.
+        return playing_cards(self._gs)
+
+    @cached_property
     def playing_cards_count(self) -> int:
-        return playing_card_count(self._gs)
+        return len(self.playing_cards)
 
     @cached_property
     def stone_tally(self) -> int:
-        return count_enhancement(self._gs, "m_stone")
+        return sum(card.center_key == "m_stone" for card in self.playing_cards)
 
     @cached_property
     def steel_tally(self) -> int:
-        return count_enhancement(self._gs, "m_steel")
+        return sum(card.center_key == "m_steel" for card in self.playing_cards)
+
+    @cached_property
+    def nine_tally(self) -> int:
+        return sum(card.get_id() == 9 for card in self.playing_cards)
 
     @cached_property
     def enhanced_card_count(self) -> int:
-        return enhanced_count(self._gs)
+        return sum(card.center_key != "c_base" for card in self.playing_cards)
 
     @cached_property
     def hands_left(self) -> int:

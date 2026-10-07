@@ -27,7 +27,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from jackdaw.engine import read
 from jackdaw.engine.data.prototypes import BOOSTERS, CENTER_POOLS
+from jackdaw.engine.read import StateView
 
 if TYPE_CHECKING:
     from jackdaw.engine.card import Card
@@ -494,7 +496,7 @@ def populate_shop(
             discount_percent=gs.get("discount_percent", 0),
             ante=ante,
             booster_ante_scaling=gs.get("modifiers", {}).get("booster_ante_scaling", False),
-            has_astronomer=gs.get("has_astronomer", False),
+            has_astronomer=bool(read.find_joker(gs, "Astronomer")),
         )
         boosters.append(pack_card)
 
@@ -652,13 +654,17 @@ def buy_card(
     if card.ability.get("set") in _PLAYING_CARD_SETS:
         playing_cards: list[Card] = game_state.setdefault("playing_cards", [])
         playing_cards.append(card)
-        for joker in game_state.get("jokers", []):
-            ctx = JokerContext(playing_card_added=True, cards=[card])
+        owned_jokers = game_state.get("jokers", [])
+        game_view = StateView(game_state, jokers=owned_jokers)
+        for joker in owned_jokers:
+            ctx = JokerContext(playing_card_added=True, cards=[card], game=game_view)
             calculate_joker(joker, ctx)
     else:
         # buying_card notification for all active jokers
-        for joker in game_state.get("jokers", []):
-            ctx = JokerContext(buying_card=True, card=card)
+        owned_jokers = game_state.get("jokers", [])
+        game_view = StateView(game_state, jokers=owned_jokers)
+        for joker in owned_jokers:
+            ctx = JokerContext(buying_card=True, card=card, game=game_view)
             calculate_joker(joker, ctx)
 
     # -- 7. Deduct cost --
@@ -678,7 +684,7 @@ def buy_card(
                     discount_percent=discount,
                     ante=ante,
                     booster_ante_scaling=modifiers.get("booster_ante_scaling", False),
-                    has_astronomer=game_state.get("has_astronomer", False),
+                    has_astronomer=bool(read.find_joker(game_state, "Astronomer")),
                 )
 
     # -- 9. Track --
@@ -745,12 +751,17 @@ def sell_card(
         return {"ok": False, "reason": "not_sellable"}
 
     # -- 2. Selling-self notification --
-    calculate_joker(card, JokerContext(selling_self=True))
+    owned_jokers = game_state.get("jokers", [])
+    game_view = StateView(game_state, jokers=owned_jokers)
+    calculate_joker(card, JokerContext(selling_self=True, game=game_view))
 
     # -- 3. Selling-card notification to other jokers --
-    for joker in game_state.get("jokers", []):
+    for joker in owned_jokers:
         if joker is not card:
-            calculate_joker(joker, JokerContext(selling_card=True, card=card))
+            calculate_joker(
+                joker,
+                JokerContext(selling_card=True, card=card, game=game_view),
+            )
 
     # -- 4. Reverse passive effects --
     card.remove_from_deck(game_state)
@@ -883,7 +894,9 @@ def reroll_shop(
         new_cards.append(new_card)
 
     # -- 7. Notify active jokers --
-    for joker in game_state.get("jokers", []):
-        calculate_joker(joker, JokerContext(reroll_shop=True))
+    owned_jokers = game_state.get("jokers", [])
+    game_view = StateView(game_state, jokers=owned_jokers)
+    for joker in owned_jokers:
+        calculate_joker(joker, JokerContext(reroll_shop=True, game=game_view))
 
     return {"ok": True, "cost": cost, "was_free": was_free, "new_cards": new_cards}

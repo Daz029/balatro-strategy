@@ -13,6 +13,9 @@ import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from jackdaw.engine import read
+from jackdaw.engine.read import StateView
+
 if TYPE_CHECKING:
     from jackdaw.engine.blind import Blind
     from jackdaw.engine.card import Card
@@ -403,7 +406,7 @@ def score_hand(
     blind: Blind,
     rng: PseudoRandom,
     *,
-    probabilities_normal: float = 1.0,
+    probabilities_normal: float | None = None,
     game_state: dict[str, Any] | None = None,
     back_key: str | None = None,
     blind_chips: int = 0,
@@ -417,49 +420,28 @@ def score_hand(
         hand_levels: HandLevels instance for base chips/mult.
         blind: Current Blind.
         rng: PseudoRandom instance.
-        probabilities_normal: G.GAME.probabilities.normal (default 1).
+        probabilities_normal: Explicit probability numerator override. When
+            omitted, read it from ``game_state``.
         game_state: Pre-computed game state dict.
         back_key: Deck back key (e.g. ``'b_plasma'`` for Plasma Deck).
         blind_chips: Blind chip target (for Mr. Bones save check).
     """
     from jackdaw.engine.hand_eval import evaluate_hand
-    from jackdaw.engine.jokers import GameSnapshot, JokerContext, calculate_joker
+    from jackdaw.engine.jokers import JokerContext, calculate_joker
 
     gs = game_state or {}
     dollars = 0
     breakdown: list[str] = []
 
-    # Pre-compute derived values
-    joker_count = sum(1 for j in jokers if j.ability.get("set") == "Joker")
-    if joker_count == 0:
-        joker_count = len(jokers)  # fallback: count all
-
-    # Check for meta-jokers
-    smeared = any(j.ability.get("name") == "Smeared Joker" and not j.debuff for j in jokers)
-    pareidolia = any(j.ability.get("name") == "Pareidolia" and not j.debuff for j in jokers)
-
-    # Build GameSnapshot once — shared across all JokerContext instances
-    snapshot = GameSnapshot(
-        joker_count=joker_count,
-        joker_slots=gs.get("joker_slots", 5),
-        money=gs.get("money", 0),
-        deck_cards_remaining=gs.get("deck_cards_remaining", 0),
-        starting_deck_size=gs.get("starting_deck_size", 52),
-        playing_cards_count=gs.get("playing_cards_count", 52),
-        stone_tally=gs.get("stone_tally", 0),
-        steel_tally=gs.get("steel_tally", 0),
-        enhanced_card_count=gs.get("enhanced_card_count", 0),
-        hands_left=gs.get("hands_left", 0),
-        hands_played=gs.get("current_round_hands_played", 0),
-        discards_left=gs.get("discards_left", 0),
-        discards_used=gs.get("discards_used", 0),
-        probabilities_normal=probabilities_normal,
-        consumable_usage_tarot=gs.get("consumable_usage_tarot", 0),
-        mail_card_id=gs.get("mail_card_id"),
-        idol_card=gs.get("idol_card"),
-        ancient_suit=gs.get("ancient_suit"),
-        skips=gs.get("skips", 0),
+    overrides = (
+        None if probabilities_normal is None else {"probabilities_normal": probabilities_normal}
     )
+    snapshot = StateView(gs, jokers=jokers, overrides=overrides)
+    probabilities_normal = snapshot.probabilities_normal
+
+    # Check for meta-jokers through the same live rules view used elsewhere.
+    smeared = snapshot.rules.smeared
+    pareidolia = snapshot.rules.pareidolia
 
     # === Phase 1-2: Hand detection ===
     # `jokers`, NOT None: evaluate_hand derives every hand-DETECTION flag
@@ -858,7 +840,7 @@ def score_hand(
 
     # Mr. Bones save check: if score < blind target and last hand
     saved = False
-    if blind_chips > 0 and total < blind_chips and gs.get("hands_left", 0) == 0:
+    if blind_chips > 0 and total < blind_chips and read.hands_left(gs) == 0:
         for joker in jokers:
             if joker.debuff:
                 continue

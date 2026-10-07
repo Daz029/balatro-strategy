@@ -322,6 +322,8 @@ def test_randomize_joker_state_false_gives_base_jokers() -> None:
 
 
 def test_run_stat_priors_seeded_for_formula_jokers() -> None:
+    from jackdaw.engine.read import StateView
+
     cfg = HandPlayConfig(ante_range=(8, 8))
     seen_skips = set()
     seen_tarots = set()
@@ -330,8 +332,9 @@ def test_run_stat_priors_seeded_for_formula_jokers() -> None:
         adapter.reset(BACK, STAKE, f"RUNSTAT_{i}")
         gs = adapter.raw_state
         seen_skips.add(gs["skips"])
-        seen_tarots.add(gs["consumable_usage_tarot"])
-        assert gs["consumeable_usage_total"]["tarot"] == gs["consumable_usage_tarot"]
+        tarot_usage = StateView(gs).consumable_usage_tarot
+        seen_tarots.add(tarot_usage)
+        assert gs["consumeable_usage_total"]["tarot"] == tarot_usage
         assert 0 <= gs["skips"] <= 4
     assert len(seen_skips) > 1
     assert len(seen_tarots) > 1
@@ -367,9 +370,7 @@ def _force_boss(monkeypatch, boss_key: str) -> None:
     """Pin blind selection to a specific boss key regardless of ante/RNG --
     ``get_new_boss`` is imported lazily inside ``reset()``, so patching the
     module attribute before calling reset() is picked up correctly."""
-    monkeypatch.setattr(
-        "jackdaw.engine.blind.get_new_boss", lambda *a, **k: boss_key, raising=True
-    )
+    monkeypatch.setattr("jackdaw.engine.blind.get_new_boss", lambda *a, **k: boss_key, raising=True)
 
 
 def _reset_boss(monkeypatch, boss_key: str, cfg: HandPlayConfig, seed: str = SEED):

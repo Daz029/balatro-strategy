@@ -309,7 +309,6 @@ def noise_floor(config, *, n_states: int, n_seeds: int, n_samples: int) -> dict[
             continue
         state.hands_left = 1
         cr["hands_left"] = 1
-        state.gs["hands_left"] = 1
         jokers = best_joker_order(state.jokers)
         deck = DeckComposition.from_deck(state.gs.get("deck", []))
         pool = _deck_pool(deck)
@@ -410,7 +409,6 @@ def main() -> None:
         # discards_left=1 (the leaf ranking decision, valued faithfully).
         state.hands_left = 1
         cr["hands_left"] = 1
-        state.gs["hands_left"] = 1
         cr["discards_left"] = 1
 
         row = _score_state(state, top_k=args.top_k, n_samples=args.n_samples)

@@ -484,11 +484,6 @@ class HandPlayAdapter:
                 "tarot_planet": tarots_used,
                 "all": tarots_used,
             }
-            # score_hand reads the flattened key; the engine's play-hand
-            # step re-derives it from consumeable_usage_total, but the
-            # solver labels states *before* any step has run.
-            gs["consumable_usage_tarot"] = tarots_used
-
             for joker in injected_jokers:
                 spec = _SCALING_SPECS.get(joker.center_key)
                 if spec is not None:

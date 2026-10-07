@@ -16,6 +16,7 @@ from collections.abc import Callable
 from dataclasses import InitVar, dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
+from jackdaw.engine import read
 from jackdaw.engine.data.hands import HAND_ORDER
 from jackdaw.engine.data.prototypes import JOKERS
 
@@ -48,6 +49,7 @@ class GameSnapshot:
     playing_cards_count: int = 52
     stone_tally: int = 0
     steel_tally: int = 0
+    nine_tally: int = 0
     enhanced_card_count: int = 0
     hands_left: int = 0
     hands_played: int = 0
@@ -135,7 +137,7 @@ class JokerContext:
     pareidolia: bool = False
 
     # Shared game snapshot (built once per score_hand call)
-    game: GameSnapshot = field(default_factory=lambda: _DEFAULT_GAME)
+    game: GameSnapshot | read.StateView = field(default_factory=lambda: _DEFAULT_GAME)
 
     # --- Init-only fields for backward compatibility -------------------------
     # Accepted in __init__, used to build GameSnapshot when game is not
@@ -325,7 +327,7 @@ def registered_jokers() -> list[str]:
 # Source: card.lua:1658-1677 — per-round dollar payout
 # ---------------------------------------------------------------------------
 
-DollarHandler = Callable[["Card", "GameSnapshot"], int]
+DollarHandler = Callable[["Card", "GameSnapshot | read.StateView"], int]
 _DOLLAR_REGISTRY: dict[str, DollarHandler] = {}
 
 
@@ -339,7 +341,7 @@ def register_dollars(key: str) -> Callable[[DollarHandler], DollarHandler]:
     return wrapper
 
 
-def calc_dollar_bonus(card: Card, game: GameSnapshot) -> int:
+def calc_dollar_bonus(card: Card, game: GameSnapshot | read.StateView) -> int:
     """Per-round dollar bonus. Mirrors card.lua:1658 (calc_dollar_bonus)."""
     if card.debuff:
         return 0
@@ -351,7 +353,7 @@ def calc_dollar_bonus(card: Card, game: GameSnapshot) -> int:
 
 def on_end_of_round(
     jokers: list[Card],
-    game: GameSnapshot,
+    game: GameSnapshot | read.StateView,
     rng: PseudoRandom | None = None,
     blind: Any = None,
     hand_levels: Any = None,
@@ -1092,18 +1094,15 @@ def _blackboard(card: Card, ctx: JokerContext) -> JokerResult | None:
 def _stencil(card: Card, ctx: JokerContext) -> JokerResult | None:
     """Joker Stencil: xMult = empty joker slots. Source: card.lua:3966.
 
-    Formula: ``joker_slots - joker_count + stencil_count`` where stencil_count
-    includes this stencil (so stencils don't count against empty slots).
+    Formula (Card:update, card.lua:4203): ``joker_slots - #jokers + stencils``,
+    debuffed jokers included. It fires only while an empty slot exists
+    (``card_limit - #G.jokers.cards > 0``, card.lua:3967) — with a full row it
+    gives nothing even though its x_mult counts the Stencils themselves.
     """
     if ctx.joker_main:
-        stencil_count = sum(
-            1
-            for j in (ctx.jokers or [])
-            if getattr(j, "center_key", None) == "j_stencil" and not getattr(j, "debuff", False)
-        )
-        x = ctx.game.joker_slots - ctx.game.joker_count + stencil_count
-        if x > 1:
-            return JokerResult(Xmult_mod=x)
+        jokers = ctx.jokers or []
+        if ctx.game.joker_slots - len(jokers) > 0:
+            return JokerResult(Xmult_mod=read.stencil_xmult(jokers, ctx.game.joker_slots))
     return None
 
 
@@ -1963,7 +1962,7 @@ def _swashbuckler(card: Card, ctx: JokerContext) -> JokerResult | None:
     We compute it in joker_main since we don't have a game tick loop.
     """
     if ctx.joker_main and ctx.jokers:
-        sell_total = sum(j.sell_cost for j in ctx.jokers if j is not card and not j.debuff)
+        sell_total = read.swashbuckler_mult(ctx.jokers, card)
         if sell_total > 0:
             return JokerResult(mult_mod=sell_total)
     return None
@@ -2314,9 +2313,9 @@ def _golden_dollars(card: Card, game: GameSnapshot) -> int:
 
 
 @register_dollars("j_cloud_9")
-def _cloud_9_dollars(card: Card, game: GameSnapshot) -> int:
+def _cloud_9_dollars(card: Card, game: GameSnapshot | read.StateView) -> int:
     """Cloud 9: +$1 per 9-rank card in full deck. Source: card.lua:1661."""
-    tally = card.ability.get("nine_tally", 0)
+    tally = game.nine_tally
     if tally > 0:
         return card.ability.get("extra", 1) * tally
     return 0

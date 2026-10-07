@@ -11,6 +11,7 @@ from jackdaw.engine.card import Card, reset_sort_id_counter
 from jackdaw.engine.card_area import CardArea
 from jackdaw.engine.card_factory import create_joker
 from jackdaw.engine.data.prototypes import BOOSTERS, CENTER_POOLS, PLANETS
+from jackdaw.engine.hand_levels import HandLevels
 from jackdaw.engine.packs import generate_pack_cards
 from jackdaw.engine.pools import (
     UNAVAILABLE,
@@ -97,20 +98,18 @@ def _fresh_gs(
         "used_jokers": {},
         "used_vouchers": {},
         "pool_flags": {},
-        "has_showman": has_showman,
-        "deck_enhancements": set(),
-        "playing_card_count": 52,
         "played_hand_types": set(),
         "shop_vouchers": set(),
         "inflation": 0,
         "discount_percent": 0,
-        "has_astronomer": False,
         "shop": {"joker_max": 2},
         "current_round": {"voucher": voucher_key},
         "first_shop_buffoon": not first_shop,
         "dollars": dollars,
         "jokers": [],
     }
+    if has_showman:
+        gs["jokers"].append(create_joker("j_ring_master"))
     return rng, gs
 
 
@@ -460,11 +459,13 @@ class TestTelescope:
                 break
         assert planet_key is not None
 
+        hand_levels = HandLevels()
+        hand_levels.record_play(hand_type)
         cards, _ = generate_pack_cards(
             "p_celestial_normal_1",
             _pack_rng(),
             1,
-            {"has_telescope": True, "most_played_hand": hand_type},
+            {"used_vouchers": {"v_telescope": True}, "hand_levels": hand_levels},
         )
         assert cards[0].center_key == planet_key
 
@@ -477,7 +478,7 @@ class TestOmenGlobe:
                 "p_arcana_normal_1",
                 PseudoRandom(f"OG{i}"),
                 1,
-                {"has_omen_globe": True},
+                {"used_vouchers": {"v_omen_globe": True}},
             )
             if any(c.ability.get("set") == "Spectral" for c in cards):
                 found_spectral = True

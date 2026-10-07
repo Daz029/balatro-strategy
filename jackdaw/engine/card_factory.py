@@ -20,6 +20,7 @@ from __future__ import annotations
 import copy
 from typing import TYPE_CHECKING, Any
 
+from jackdaw.engine import read
 from jackdaw.engine.card import Card
 from jackdaw.engine.data.enums import Rank, Suit
 
@@ -232,29 +233,17 @@ _RENTAL_THRESHOLD = 0.7
 # Area-specific RNG stream key prefixes
 _EP_KEY: dict[str, str] = {"shop": "etperpoll", "pack": "packetper"}
 
-_SHOWMAN_KEY = "j_ring_master"
-
 
 def _has_showman(gs: dict[str, Any]) -> bool:
     """Whether run-wide duplicate exclusion should be bypassed.
 
     ``G.GAME.used_jokers`` is only consulted when the player does NOT own
     Showman (common_events.lua:1987 — ``not next(find_joker('Showman'))``).
-    Vanilla's ``find_joker`` does not filter debuffed jokers, so a debuffed
-    Showman still disables the check.
-
-    Derived from the owned-joker list rather than a stored flag: nothing in
-    the engine ever wrote ``gs['has_showman']``, so it was permanently False
-    and Showman was a complete no-op.  Deriving it at the point of use is the
-    only form that cannot drift out of sync with the joker list.
-
-    An explicit ``gs['has_showman']`` still wins when present, so callers and
-    tests can force the flag either way.
+    The shared rules view applies the engine's active-joker (non-debuffed)
+    semantics and cannot drift out of sync with the owned-joker list.
     """
-    explicit = gs.get("has_showman")
-    if explicit is not None:
-        return bool(explicit)
-    return any(getattr(j, "center_key", None) == _SHOWMAN_KEY for j in gs.get("jokers", []))
+    return read.rules(gs).showman
+
 
 _SHOWMAN_PLACEHOLDER = None
 _RENTAL_KEY: dict[str, str] = {"shop": "ssjr", "pack": "packssjr"}
@@ -324,7 +313,8 @@ def create_card(
 
         Pool-filtering keys (forwarded to :func:`~jackdaw.engine.pools.get_current_pool`):
         ``used_jokers``, ``used_vouchers``, ``banned_keys``, ``pool_flags``,
-        ``has_showman``, ``deck_enhancements``, ``playing_card_count``,
+        live ``jokers`` and playing-card areas (for Showman, enhancement
+        gates, and playing-card count),
         ``played_hand_types``, ``shop_vouchers``.
 
         Modifier-enable keys under ``modifiers``:
@@ -337,7 +327,7 @@ def create_card(
 
         Cost keys forwarded to :meth:`Card.set_cost`:
         ``inflation`` (int), ``discount_percent`` (int),
-        ``has_astronomer`` (bool).
+        live ``jokers`` (for Astronomer).
 
     Returns
     -------
@@ -376,8 +366,8 @@ def create_card(
             banned_keys=gs.get("banned_keys"),
             pool_flags=gs.get("pool_flags"),
             has_showman=_has_showman(gs),
-            deck_enhancements=gs.get("deck_enhancements"),
-            playing_card_count=gs.get("playing_card_count", 52),
+            deck_enhancements=read.deck_enhancements(gs),
+            playing_card_count=read.playing_card_count(gs),
             played_hand_types=gs.get("played_hand_types"),
             shop_vouchers=gs.get("shop_vouchers"),
         )
@@ -432,7 +422,7 @@ def create_card(
         discount_percent=gs.get("discount_percent", 0),
         ante=ante,
         booster_ante_scaling=gs.get("modifiers", {}).get("booster_ante_scaling", False),
-        has_astronomer=gs.get("has_astronomer", False),
+        has_astronomer=bool(read.find_joker(gs, "Astronomer")),
     )
 
     return card

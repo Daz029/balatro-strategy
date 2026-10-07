@@ -215,6 +215,8 @@ def calculate_round_earnings(
     # on_end_of_round to avoid duplicate RNG consumption.
     # ------------------------------------------------------------------
     if joker_dollars is None:
+        # This compatibility fallback has no full gs.  The real _round_won
+        # path passes joker_dollars precomputed through its live StateView.
         game_snap = GameSnapshot(
             money=money,
             hands_left=hands_left,

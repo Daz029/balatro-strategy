@@ -433,8 +433,8 @@ class TestSpaceJoker:
 class TestOnEndOfRound:
     def test_multiple_dollar_jokers(self):
         golden = _joker("j_golden", extra=4)
-        cloud = _joker("j_cloud_9", extra=1, nine_tally=5)
-        game = GameSnapshot()
+        cloud = _joker("j_cloud_9", extra=1)
+        game = GameSnapshot(nine_tally=5)
         result = on_end_of_round([golden, cloud], game)
         assert result["dollars_earned"] == 9  # 4 + 5
 
@@ -578,14 +578,14 @@ class TestSwashbuckler:
         ctx = JokerContext(joker_main=True, jokers=jokers)
         assert calculate_joker(swash, ctx) is None
 
-    def test_excludes_debuffed(self):
+    def test_includes_debuffed(self):
         swash = _joker("j_swashbuckler")
         j1 = _joker("j_joker", mult=4)
         j1.sell_cost = 5
         j1.debuff = True
         jokers = [swash, j1]
         ctx = JokerContext(joker_main=True, jokers=jokers)
-        assert calculate_joker(swash, ctx) is None
+        assert calculate_joker(swash, ctx).mult_mod == 5
 
     def test_pipeline_with_other_jokers(self):
         """Swashbuckler in pipeline adds sell value sum as mult."""
