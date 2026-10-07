@@ -50,6 +50,7 @@ class GameSnapshot:
     stone_tally: int = 0
     steel_tally: int = 0
     nine_tally: int = 0
+    planets_used: int = 0
     enhanced_card_count: int = 0
     hands_left: int = 0
     hands_played: int = 0
@@ -2347,10 +2348,9 @@ def _rocket_dollars(card: Card, game: GameSnapshot) -> int:
 
 @register_dollars("j_satellite")
 def _satellite_dollars(card: Card, game: GameSnapshot) -> int:
-    """Satellite: +$1 per unique Planet type used. Source: card.lua:1669."""
-    planet_types = card.ability.get("planet_types_used", 0)
-    if planet_types > 0:
-        return card.ability.get("extra", 1) * planet_types
+    """Satellite: +$extra per distinct Planet used this run. Source: card.lua:1667."""
+    if game.planets_used > 0:
+        return card.ability.get("extra", 1) * game.planets_used
     return 0
 
 

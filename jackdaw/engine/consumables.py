@@ -588,11 +588,48 @@ def _temperance(card: Card, ctx: ConsumableContext) -> ConsumableResult:
 # Planet cards — level up a specific hand type
 # Source: card.lua:1157-1170 (hand_type path), common_events.lua:464 (level_up_hand)
 #
-# Usage tracking (set_consumeable_usage equivalent):
-#   game_state['consumeable_usage_total']['planet'] += 1
-#   game_state['consumeable_usage_total']['all']    += 1
-#   game_state['last_tarot_planet'] = card.center_key
+# Usage tracking lives in record_consumable_usage (one call per real use),
+# not in the handlers.
 # ---------------------------------------------------------------------------
+
+_USAGE_TOTAL_KEYS = ("tarot", "planet", "spectral", "tarot_planet", "all")
+
+
+def record_consumable_usage(gs: dict[str, Any], card: Card) -> None:
+    """Port of ``set_consumeable_usage`` (misc_functions.lua:1184-1228), game half.
+
+    ``Card:use_consumeable`` calls it first, before the debuff check
+    (card.lua:1093); vanilla never passes ``copier``, so every real use
+    records. Per-key entries are ``{count, order, set}``; totals count by the
+    CENTER's set, so Black Hole (a Spectral) is spectral, not planet.
+    ``last_tarot_planet`` is not set here: Lua sets it in a queued event after
+    the effect, which ``game._apply_consumable_result`` reproduces.
+    """
+    from jackdaw.engine.card import _resolve_center
+
+    center = _resolve_center(card.center_key)
+    center_set = center.get("set")
+    usage = gs.setdefault("consumeable_usage", {})
+    entry = usage.get(card.center_key)
+    if entry is not None:
+        entry["count"] += 1
+    else:
+        usage[card.center_key] = {
+            "count": 1,
+            "order": center.get("order"),
+            "set": card.ability.get("set"),
+        }
+    totals = gs.setdefault("consumeable_usage_total", dict.fromkeys(_USAGE_TOTAL_KEYS, 0))
+    if center_set == "Tarot":
+        totals["tarot"] += 1
+        totals["tarot_planet"] += 1
+    elif center_set == "Planet":
+        totals["planet"] += 1
+        totals["tarot_planet"] += 1
+    elif center_set == "Spectral":
+        totals["spectral"] += 1
+    totals["all"] += 1
+
 
 # Planet key → hand type string (from centers.json config.hand_type)
 _PLANET_HAND: dict[str, str] = {
@@ -613,35 +650,10 @@ _PLANET_HAND: dict[str, str] = {
 _ALL_HAND_TYPES: list[str] = list(_PLANET_HAND.values())
 
 
-def _track_planet_usage(card: Card, ctx: ConsumableContext) -> None:
-    """Mutate ctx.game_state to track planet usage (mirrors set_consumeable_usage).
-
-    Updates consumeable_usage_total.planet, .all and last_tarot_planet.
-    """
-    gs = ctx.game_state
-    if gs is None:
-        return
-    totals = gs.setdefault(
-        "consumeable_usage_total",
-        {
-            "tarot": 0,
-            "planet": 0,
-            "spectral": 0,
-            "tarot_planet": 0,
-            "all": 0,
-        },
-    )
-    totals["planet"] = totals.get("planet", 0) + 1
-    totals["tarot_planet"] = totals.get("tarot_planet", 0) + 1
-    totals["all"] = totals.get("all", 0) + 1
-    gs["last_tarot_planet"] = card.center_key
-
-
 def _make_planet_handler(hand_type: str) -> ConsumableHandler:
     """Factory for single-hand-type planet handlers."""
 
     def handler(card: Card, ctx: ConsumableContext) -> ConsumableResult:
-        _track_planet_usage(card, ctx)
         return ConsumableResult(
             level_up=[(hand_type, 1)],
             notify_jokers_consumeable=True,
@@ -660,22 +672,6 @@ def _black_hole(card: Card, ctx: ConsumableContext) -> ConsumableResult:
 
     Source: card.lua:1175 — iterates G.GAME.hands and calls level_up_hand.
     """
-    gs = ctx.game_state
-    if gs is not None:
-        totals = gs.setdefault(
-            "consumeable_usage_total",
-            {
-                "tarot": 0,
-                "planet": 0,
-                "spectral": 0,
-                "tarot_planet": 0,
-                "all": 0,
-            },
-        )
-        totals["planet"] = totals.get("planet", 0) + 1
-        totals["tarot_planet"] = totals.get("tarot_planet", 0) + 1
-        totals["all"] = totals.get("all", 0) + 1
-        gs["last_tarot_planet"] = card.center_key
     return ConsumableResult(
         level_up=[(ht, 1) for ht in _ALL_HAND_TYPES],
         notify_jokers_consumeable=True,

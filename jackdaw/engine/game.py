@@ -1938,7 +1938,15 @@ def _use_consumable_card(
     4. Fire ``using_consumeable`` joker context if result requests it
     5. Track usage (last_tarot_planet)
     """
-    from jackdaw.engine.consumables import ConsumableContext, use_consumable
+    from jackdaw.engine.consumables import (
+        ConsumableContext,
+        record_consumable_usage,
+        use_consumable,
+    )
+
+    # Lua Card:use_consumeable records usage before anything else, the
+    # debuff check included (card.lua:1093).
+    record_consumable_usage(gs, card)
 
     hand: list = gs.get("hand", [])
     highlighted: list = []

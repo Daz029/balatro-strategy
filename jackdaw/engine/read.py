@@ -195,6 +195,15 @@ def tarot_usage(gs: dict[str, Any]) -> int:
     return gs.get("consumeable_usage_total", {}).get("tarot", 0)
 
 
+def planets_used(gs: dict[str, Any]) -> int:
+    """Distinct Planet keys used this run (Satellite, ``card.lua:1667-1674``).
+
+    Counts ``consumeable_usage`` entries whose ``set`` is ``"Planet"``, so Black
+    Hole (a Spectral) never counts.
+    """
+    return sum(entry.get("set") == "Planet" for entry in gs.get("consumeable_usage", {}).values())
+
+
 def idol_card(gs: dict[str, Any]) -> dict[str, Any] | None:
     """Return The Idol target (``card.lua:3127-3129``)."""
     return gs.get("current_round", {}).get("idol_card")
@@ -363,6 +372,10 @@ class StateView:
     @cached_property
     def consumable_usage_tarot(self) -> int:
         return tarot_usage(self._gs)
+
+    @cached_property
+    def planets_used(self) -> int:
+        return planets_used(self._gs)
 
     @cached_property
     def mail_card_id(self) -> int | None:
