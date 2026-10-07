@@ -75,3 +75,13 @@ def test_lua_runtime_ability_keys_are_complete() -> None:
             "queue_negative_removal",
         }
     )
+
+
+def test_dead_tags_key_removed_and_migrated() -> None:
+    from jackdaw.engine.run_init import init_game_object
+    from jackdaw.engine.state import migrate_state
+
+    assert "tags" not in init_game_object()
+    old = init_game_object()
+    old["tags"] = {}
+    assert "tags" not in migrate_state(old)

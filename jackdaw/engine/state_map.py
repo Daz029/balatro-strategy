@@ -233,7 +233,7 @@ GAME_PATHS: dict[str, Entry] = {
     "tags": Stored(
         "awarded_tags",
         lazy=True,
-        note="engine name; the init key 'tags' is dead and should be deleted",
+        note="engine name for Lua G.GAME.tags (the dead init key 'tags' was removed)",
     ),
     "tarot_rate": Stored("tarot_rate"),
     "unused_discards": Stored("unused_discards"),

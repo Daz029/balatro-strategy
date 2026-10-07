@@ -93,7 +93,6 @@ class TestInitGameObject:
             "blind_on_deck",
             "sort",
             "previous_round",
-            "tags",
             "tag_tally",
             "pool_flags",
             "used_jokers",

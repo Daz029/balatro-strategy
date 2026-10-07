@@ -360,10 +360,9 @@ are set/incremented by joker ability application.
                                              Set by init, tags (assign_ante_blinds).
     current_boss_streak    int               Consecutive boss defeats without loss.
                                              Set by init (0).
-    tags                   dict              Tag tracking (per-ante awarded tags).
-                                             Set by init ({}), game (skip blind awards).
+    awarded_tags           list[dict]        Lua G.GAME.tags: awarded tags in acquisition order,
+                                             each {'key', 'consumed', ...}.  Set by game.
     tag_tally              int               Number of tags awarded.  Set by init (0).
-    awarded_tags           list[dict]        Tags awarded this run (appended by skip_blind).
 
 
 .. rubric:: Modifiers — ``gs["modifiers"]``
@@ -467,6 +466,10 @@ def migrate_state(gs: dict[str, Any]) -> dict[str, Any]:
             modifiers.setdefault(key, gs.pop(key))
 
     gs.pop("free_rerolls", None)
+
+    # The init key "tags" was never read; live tags are "awarded_tags".
+    if isinstance(gs.get("tags"), dict):
+        gs.pop("tags")
 
     old_usage = gs.pop("consumable_usage_total", None)
     if "consumeable_usage_total" not in gs:

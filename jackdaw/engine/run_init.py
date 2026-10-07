@@ -122,7 +122,6 @@ def init_game_object() -> dict[str, Any]:
         "blind_on_deck": None,
         "sort": "desc",
         "previous_round": {"dollars": 4},
-        "tags": {},
         "tag_tally": 0,
         "pool_flags": {},
         "used_jokers": {},
