@@ -3,6 +3,21 @@
 # 9/4/2026: CRITICAL ERRORS 
 - engine bugs, especially involving called at end of round jokers. The scale suggests an close engine
 analysis and potential overhaul. 
+  PLAN (2026-10-06): `docs/engine_fixing_plan_2026-10-06.md` (from `docs/engine_audit.md`).
+  Six systemic causes (S1 effects dropped by per-site appliers, S2 untyped/aliased state, S3 no
+  card lifecycle path, S4 step order + Lua event timing, S5 split legality, S6 handler-only tests)
+  plus ~30 local bugs. DECIDED: keep the gs dict, every read goes through "grabbers" (read
+  functions over live state, Lua's per-frame `Card:update` values included); BEFORE grabbers,
+  Phase 1 makes the state complete (Part 1b inventory vs the real Lua source,
+  `scripts/engine_state_inventory.py`): add missing fields, collapse aliases, add missing `Card`
+  fields, keep Lua's `dollar_buffer`/`joker_buffer`/`consumeable_buffer` as real state. Lua
+  source lives at `~/Code/Code/balatro-strategy/balatro_source/Balatro` (gitignored).
+  ALL plan decisions DECIDED 2026-10-06: `Effect` base class + one subclass per effect, one
+  applier; shop pool exclusion matches Lua ("currently exists"); engine = full vanilla legality,
+  env masks restrict; challenges/profiles/endless/CardArea out of scope and RAISE; freeze label
+  generation + harvesting until the step-order phase lands, then re-harvest. Target: setters,
+  getters, a clean scoring pipeline, correct buffers, tests on the OOP. Class design:
+  `docs/engine_class_design_2026-10-06.md`.
 - descriptors: in progress
 - winrate-scaled reward: less importnat right now
 
