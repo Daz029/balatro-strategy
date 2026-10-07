@@ -78,6 +78,40 @@ def scan_lua(src: Path, depth: int) -> dict[str, dict[str, list[str]]]:
     return res
 
 
+_SELF_WRITE = re.compile(r"self\.([A-Za-z_]\w*)\s*=(?!=)")
+_ABILITY_KEY = re.compile(r"ability\.([A-Za-z_]\w*)")
+
+
+def scan_lua_self_fields(lua_file: Path, statement_start: bool = False) -> set[str]:
+    """Fields assigned as ``self.<x> = ...`` in one Lua class file.
+
+    ``statement_start`` keeps only assignments that begin a line, which drops
+    the ``self.x = ...`` writes nested in UI-table constructors (card.lua).
+    """
+    out: set[str] = set()
+    for line in lua_file.read_text(errors="replace").splitlines():
+        code = line.split("--", 1)[0]
+        if statement_start:
+            m = re.match(r"\s*self\.([A-Za-z_]\w*)\s*=(?!=)", code)
+            if m:
+                out.add(m.group(1))
+        else:
+            out.update(_SELF_WRITE.findall(code))
+    return out
+
+
+def scan_lua_ability_keys(src: Path) -> set[str]:
+    """Every ``ability.<key>`` referenced in the game Lua (UI files included)."""
+    out: set[str] = set()
+    for f in sorted(src.rglob("*.lua")):
+        rel = f.relative_to(src)
+        if rel.parts and rel.parts[0] in LUA_SKIP_DIRS:
+            continue
+        for line in f.read_text(errors="replace").splitlines():
+            out.update(_ABILITY_KEY.findall(line.split("--", 1)[0]))
+    return out
+
+
 def _key(node: ast.AST) -> str:
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return node.value
