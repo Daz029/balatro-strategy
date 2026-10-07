@@ -707,6 +707,57 @@ the later phases. Unwired new fields are expected and allowed until Phase 2.
 
 *Exit: the inventory test passes, with zero unmapped Lua paths.*
 
+**STATUS 2026-10-06: EXIT MET** (branch `engine-phase1-state`). Implementation
+tickets ran through `codex exec` and were reviewed here.
+
+- **Mapping:** `jackdaw/engine/state_map.py` assigns every scanned Lua
+  `G.GAME` path (176), `Card` field, `Blind` field and `ability` key (49) to
+  `Stored` / `Grabber` / `OutOfScope`. `tests/engine/test_state_map.py`
+  checks that every non-lazy stored path resolves on a fresh run. When the
+  source is present (`BALATRO_LUA_SRC`), it also checks that nothing is
+  unmapped. Zero unmapped at time of writing.
+- **Added storage** (1b-1, 1b-4, 1b-6): `dollar_buffer`, `last_hand_played`,
+  `consumeable_usage_total`, `orbital_choices`, `facing_blind`, `shop_free`,
+  `shop_d6ed`; `Card.added_to_deck/getting_sliced/shattered/destroyed/removed/lucky_trigger`
+  (plain defaults, so old pickled cards load); `Card.unique_val` as an
+  order-preserving property over `sort_id` (Lua's node ID cannot be
+  reproduced, and only its order is observable); `Blind.prepped`. The dead
+  The Eye `blind.hands` write and the dead `tags` init key are deleted.
+- **Aliases collapsed** (1b-2). Each fix has a regression test that was seen
+  failing first (`tests/engine/test_state_aliases.py`). This pulls these fixes
+  forward from Phase 2: C04 (Oops/probabilities; Oops now scales every entry,
+  as in Lua), C07 (stake sticker flags), C14 Green half, D26 (Chaos also
+  recalculates reroll cost, as in Lua), D04 (Lucky trigger, cleared per
+  repetition), D40 spelling only, challenge `booster_ante_scaling` /
+  `inflation`, and Omen Globe's flat flag write.
+- **Writers added:** `last_hand_played` (start of play) and
+  `current_round.most_played_poker_hand`. The second ports Lua's boss-defeat
+  loop. It does NOT reuse `HandLevels.most_played`, whose default differs. The
+  Ox still reads live (D29, Phase 5).
+- **`migrate_state(gs)`** in `state.py` maps every removed alias on restore.
+  It is called by both adapters' `restore_state` and by
+  `harvest_restore.restore_state`. D-data still says re-harvest; migration is
+  only the safety net.
+- **Verify rows resolved:**
+  - `last_blind` is **equivalent** and becomes a grabber. Lua's eval tags
+    (Investment, Anaglyph) run synchronously in `evaluate_round`, before the
+    queued `Blind:defeat` event resets `last_blind`, so it always equals the
+    just-defeated blind (`gs["blind"]`).
+  - `shop_free` / `shop_d6ed` were **NOT equivalent** (new finding).
+    `fire_tag_context` consumed every matching tag, so a second D6 or Coupon
+    tag was wasted in the same shop. Lua applies one per shop visit and keeps
+    the second for the next shop. The flags are now stored, gate the two
+    handlers, and are cleared at cash-out.
+- **Deliberately deferred to Phase 2 (grabbers, not storage):**
+  - the `packs.py` `has_omen_globe` / `has_telescope` readers (TODO comments
+    in place; Omen Globe and Telescope stay inert until then);
+  - `has_astronomer`, `deck_enhancements`, `most_played_hand` (Telescope's
+    live pick);
+  - `playing_card_count` vs `playing_cards_count`, and the 1b-3 mirrors.
+- **Naming exceptions recorded in the map, not renamed:**
+  `pack_choices`→`pack_choices_remaining` (env obs reads it),
+  `G.GAME.tags`→`awarded_tags`, `Blind.hands`→`hands_used`.
+
 ### Phase 2. Grabbers (S2)
 
 Every read goes through a grabber. Canonical key registry in `state.py`;

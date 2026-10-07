@@ -18,6 +18,11 @@ analysis and potential overhaul.
   generation + harvesting until the step-order phase lands, then re-harvest. Target: setters,
   getters, a clean scoring pipeline, correct buffers, tests on the OOP. Class design:
   `docs/engine_class_design_2026-10-06.md`.
+  PHASE 1 (state completeness) EXIT MET 2026-10-06, branch `engine-phase1-state`: Lua state
+  map `jackdaw/engine/state_map.py` + `tests/engine/test_state_map.py` (zero unmapped), aliases
+  collapsed (C04/C07/C14-Green/D26/D04 fixed early), `migrate_state` on restore, new finding:
+  D6/Coupon tags were all consumed in one shop. Status block in the plan doc under Phase 1.
+  NEXT: Phase 2 grabbers (+ Phase 0 instrument / Q quick wins in parallel).
 - descriptors: in progress
 - winrate-scaled reward: less importnat right now
 
