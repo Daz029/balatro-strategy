@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from jackdaw.engine import read
 from jackdaw.engine.actions import (
     Action,
     BuyCard,
@@ -236,12 +237,9 @@ def _handle_select_blind(gs: dict[str, Any]) -> dict[str, Any]:
 
     # Debuff playing cards based on boss blind
     deck: list = gs.get("deck", [])
-    pareidolia = any(
-        getattr(j, "center_key", None) == "j_pareidolia" and not getattr(j, "debuff", False)
-        for j in jokers
-    )
+    active_rules = read.rules(gs)
     for card in deck:
-        blind.debuff_card(card, pareidolia=pareidolia)
+        blind.debuff_card(card, active_rules)
 
     # ------------------------------------------------------------------
     # 6. Per-round deck shuffle (state_events.lua:344)
@@ -260,7 +258,7 @@ def _handle_select_blind(gs: dict[str, Any]) -> dict[str, Any]:
     _draw_hand(gs)
     # Debuff hand cards too (they were drawn from the deck)
     for card in gs.get("hand", []):
-        blind.debuff_card(card, pareidolia=pareidolia)
+        blind.debuff_card(card, active_rules)
 
     # ------------------------------------------------------------------
     # 7b. Boss drawn_to_hand effects (Cerulean Bell, Crimson Heart)
@@ -710,12 +708,9 @@ def _handle_play_hand(gs: dict[str, Any], indices: tuple[int, ...]) -> dict[str,
 
         # Re-debuff hand cards for boss blind (new cards from deck)
         if blind.boss and not blind.disabled:
-            pareidolia = any(
-                getattr(j, "center_key", None) == "j_pareidolia" and not getattr(j, "debuff", False)
-                for j in jokers
-            )
+            active_rules = read.rules(gs)
             for card in gs.get("hand", []):
-                blind.debuff_card(card, pareidolia=pareidolia)
+                blind.debuff_card(card, active_rules)
 
         # The Fish: flip newly drawn cards face-down
         if getattr(blind, "name", "") == "The Fish" and getattr(blind, "prepped", False):
@@ -929,12 +924,9 @@ def _handle_discard(gs: dict[str, Any], indices: tuple[int, ...]) -> dict[str, A
     # 11. Re-debuff drawn cards for boss blind
     # ------------------------------------------------------------------
     if blind and getattr(blind, "boss", False) and not getattr(blind, "disabled", False):
-        pareidolia = any(
-            getattr(j, "center_key", None) == "j_pareidolia" and not getattr(j, "debuff", False)
-            for j in jokers
-        )
+        active_rules = read.rules(gs)
         for card in gs.get("hand", []):
-            blind.debuff_card(card, pareidolia=pareidolia)
+            blind.debuff_card(card, active_rules)
 
         # Boss drawn_to_hand effects on discard redraw
         rng = gs.get("rng")

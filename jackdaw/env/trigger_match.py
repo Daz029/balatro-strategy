@@ -57,28 +57,29 @@ rule as every other per-card encoder).
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 
 from jackdaw.engine.card import Card
-from jackdaw.engine.hand_eval import get_hand_eval_flags
 from jackdaw.engine.jokers import (
     JokerContext,
     _find_leftmost,
     _find_right_neighbor,
     blueprint_compatible,
 )
+from jackdaw.engine.read import Rules, rules_for
 from jackdaw.env.observation import center_key_id, center_key_vocabulary
 
 _COPY_JOKERS = frozenset({"j_blueprint", "j_brainstorm"})
 
-# Predicate: (card, joker_card, gs, flags) -> (scored, held).
+# Predicate: (card, joker_card, gs, rules) -> (scored, held).
 # `joker_card` is the live joker (Castle stores its suit on the joker's
-# ability); `gs` is the raw engine game_state; `flags` is
-# get_hand_eval_flags(jokers) computed once per matrix build.
-Predicate = Callable[[Card, Card, dict[str, Any], dict[str, bool]], tuple[bool, bool]]
+# ability); `gs` is the raw engine game_state; `rules` is built once per
+# matrix from the active joker list.
+Predicate = Callable[[Card, Card, dict[str, Any], Rules], tuple[bool, bool]]
 
 # ---------------------------------------------------------------------------
 # Class-1 predicate builders (static per-card conditions)
@@ -89,8 +90,8 @@ def _scored_suit(suit: str) -> Predicate:
     """Suit condition via the engine's own Card.is_suit — smeared-aware,
     Wild Cards match every suit, exactly like the handlers' _is_suit."""
 
-    def pred(card: Card, joker: Card, gs: dict, flags: dict) -> tuple[bool, bool]:
-        return card.is_suit(suit, smeared=flags["smeared"]), False
+    def pred(card: Card, joker: Card, gs: dict, rules: Rules) -> tuple[bool, bool]:
+        return card.is_suit(suit, rules), False
 
     return pred
 
@@ -98,7 +99,7 @@ def _scored_suit(suit: str) -> Predicate:
 def _scored_ranks(*ids: int) -> Predicate:
     rank_set = frozenset(ids)
 
-    def pred(card: Card, joker: Card, gs: dict, flags: dict) -> tuple[bool, bool]:
+    def pred(card: Card, joker: Card, gs: dict, rules: Rules) -> tuple[bool, bool]:
         return card.get_id() in rank_set, False
 
     return pred
@@ -107,36 +108,33 @@ def _scored_ranks(*ids: int) -> Predicate:
 def _held_ranks(*ids: int) -> Predicate:
     rank_set = frozenset(ids)
 
-    def pred(card: Card, joker: Card, gs: dict, flags: dict) -> tuple[bool, bool]:
+    def pred(card: Card, joker: Card, gs: dict, rules: Rules) -> tuple[bool, bool]:
         return False, card.get_id() in rank_set
 
     return pred
 
 
-def _scored_face(pareidolia_aware: bool = True) -> Predicate:
-    """Face condition. Almost every face handler passes ctx.pareidolia to
-    is_face; Ride the Bus calls is_face() bare (engine-verified), hence
-    the flag."""
+def _scored_face() -> Predicate:
+    """Face condition through the engine's global rules view."""
 
-    def pred(card: Card, joker: Card, gs: dict, flags: dict) -> tuple[bool, bool]:
-        p = flags["pareidolia"] if pareidolia_aware else False
-        return card.is_face(pareidolia=p), False
+    def pred(card: Card, joker: Card, gs: dict, rules: Rules) -> tuple[bool, bool]:
+        return card.is_face(rules), False
 
     return pred
 
 
 def _held_face() -> Predicate:
-    def pred(card: Card, joker: Card, gs: dict, flags: dict) -> tuple[bool, bool]:
-        return False, card.is_face(pareidolia=flags["pareidolia"])
+    def pred(card: Card, joker: Card, gs: dict, rules: Rules) -> tuple[bool, bool]:
+        return False, card.is_face(rules)
 
     return pred
 
 
-def _scored_always(card: Card, joker: Card, gs: dict, flags: dict) -> tuple[bool, bool]:
+def _scored_always(card: Card, joker: Card, gs: dict, rules: Rules) -> tuple[bool, bool]:
     return True, False
 
 
-def _held_always(card: Card, joker: Card, gs: dict, flags: dict) -> tuple[bool, bool]:
+def _held_always(card: Card, joker: Card, gs: dict, rules: Rules) -> tuple[bool, bool]:
     return False, True
 
 
@@ -145,7 +143,7 @@ def _scored_parity(even: bool) -> Predicate:
     even = id in 2..10 and id % 2 == 0; odd = (id <= 10 and id % 2 == 1)
     or Ace (14)."""
 
-    def pred(card: Card, joker: Card, gs: dict, flags: dict) -> tuple[bool, bool]:
+    def pred(card: Card, joker: Card, gs: dict, rules: Rules) -> tuple[bool, bool]:
         oid = card.get_id()
         if even:
             return 0 <= oid <= 10 and oid % 2 == 0, False
@@ -158,13 +156,13 @@ def _scored_ability_name(name: str) -> Predicate:
     """Enhancement identity by ability name (Golden Ticket checks
     'Gold Card', Lucky Cat accumulates on Lucky Card triggers)."""
 
-    def pred(card: Card, joker: Card, gs: dict, flags: dict) -> tuple[bool, bool]:
+    def pred(card: Card, joker: Card, gs: dict, rules: Rules) -> tuple[bool, bool]:
         return card.ability.get("name") == name, False
 
     return pred
 
 
-def _scored_any_enhancement(card: Card, joker: Card, gs: dict, flags: dict) -> tuple[bool, bool]:
+def _scored_any_enhancement(card: Card, joker: Card, gs: dict, rules: Rules) -> tuple[bool, bool]:
     """Vampire's own eligibility test: any non-default enhancement."""
     scored = (
         card.ability.get("effect", "") not in ("", "Default Base")
@@ -178,41 +176,41 @@ def _scored_any_enhancement(card: Card, joker: Card, gs: dict, flags: dict) -> t
 # ---------------------------------------------------------------------------
 
 
-def _pred_ancient(card: Card, joker: Card, gs: dict, flags: dict) -> tuple[bool, bool]:
+def _pred_ancient(card: Card, joker: Card, gs: dict, rules: Rules) -> tuple[bool, bool]:
     suit = gs.get("current_round", {}).get("ancient_card", {}).get("suit")
-    return bool(suit) and card.is_suit(suit, smeared=flags["smeared"]), False
+    return bool(suit) and card.is_suit(suit, rules), False
 
 
-def _pred_idol(card: Card, joker: Card, gs: dict, flags: dict) -> tuple[bool, bool]:
+def _pred_idol(card: Card, joker: Card, gs: dict, rules: Rules) -> tuple[bool, bool]:
     idol = gs.get("current_round", {}).get("idol_card") or {}
     matched = (
         idol.get("id") is not None
         and card.get_id() == idol.get("id")
-        and card.is_suit(idol.get("suit", ""), smeared=flags["smeared"])
+        and card.is_suit(idol.get("suit", ""), rules)
     )
     return matched, False
 
 
-def _pred_mail(card: Card, joker: Card, gs: dict, flags: dict) -> tuple[bool, bool]:
+def _pred_mail(card: Card, joker: Card, gs: dict, rules: Rules) -> tuple[bool, bool]:
     mail_id = gs.get("current_round", {}).get("mail_card", {}).get("id")
     return False, mail_id is not None and card.get_id() == mail_id
 
 
-def _pred_castle(card: Card, joker: Card, gs: dict, flags: dict) -> tuple[bool, bool]:
+def _pred_castle(card: Card, joker: Card, gs: dict, rules: Rules) -> tuple[bool, bool]:
     # Castle's target suit lives on the JOKER's ability, not current_round
     # (the handler reads card.ability["castle_card_suit"]).
     castle_suit = joker.ability.get("castle_card_suit")
-    return False, bool(castle_suit) and card.is_suit(castle_suit, smeared=flags["smeared"])
+    return False, bool(castle_suit) and card.is_suit(castle_suit, rules)
 
 
-def _pred_dusk(card: Card, joker: Card, gs: dict, flags: dict) -> tuple[bool, bool]:
+def _pred_dusk(card: Card, joker: Card, gs: dict, rules: Rules) -> tuple[bool, bool]:
     # Dusk retriggers all scored cards on the round's LAST hand. The engine
     # decrements hands_left before scoring, so a hand decided at
     # hands_left == 1 is the one Dusk fires on.
     return gs.get("current_round", {}).get("hands_left", 0) == 1, False
 
 
-def _pred_raised_fist(card: Card, joker: Card, gs: dict, flags: dict) -> tuple[bool, bool]:
+def _pred_raised_fist(card: Card, joker: Card, gs: dict, rules: Rules) -> tuple[bool, bool]:
     # Handler: lowest get_id() among non-Stone held cards (first occurrence
     # wins). Candidate semantics: mark every card tied at the minimum —
     # which specific one is "first" changes as cards leave the hand.
@@ -260,7 +258,7 @@ _CLASS1_PREDICATES: dict[str, Predicate] = {
     "j_business": _scored_face(),  # probabilistic $
     "j_sock_and_buskin": _scored_face(),  # retrigger
     "j_midas_mask": _scored_face(),  # scored faces turn Gold (before-context mutator)
-    "j_ride_the_bus": _scored_face(pareidolia_aware=False),  # handler calls is_face() bare
+    "j_ride_the_bus": _scored_face(),
     # -- enhancement-conditional, scored --
     "j_ticket": _scored_ability_name("Gold Card"),
     "j_lucky_cat": _scored_ability_name("Lucky Card"),
@@ -298,16 +296,44 @@ _CLASS2_PREDICATES: dict[str, Predicate] = {
 _CLASS3_SET_LEVEL: frozenset[str] = frozenset(
     {
         # hand-type conditionals
-        "j_jolly", "j_zany", "j_mad", "j_crazy", "j_droll",
-        "j_sly", "j_wily", "j_clever", "j_devious", "j_crafty",
-        "j_duo", "j_trio", "j_family", "j_order", "j_tribe",
-        "j_supernova", "j_card_sharp", "j_todo_list", "j_obelisk",
-        "j_seance", "j_superposition", "j_runner", "j_trousers",
+        "j_jolly",
+        "j_zany",
+        "j_mad",
+        "j_crazy",
+        "j_droll",
+        "j_sly",
+        "j_wily",
+        "j_clever",
+        "j_devious",
+        "j_crafty",
+        "j_duo",
+        "j_trio",
+        "j_family",
+        "j_order",
+        "j_tribe",
+        "j_supernova",
+        "j_card_sharp",
+        "j_todo_list",
+        "j_obelisk",
+        "j_seance",
+        "j_superposition",
+        "j_runner",
+        "j_trousers",
         # played/held-set structure
-        "j_blackboard", "j_flower_pot", "j_seeing_double",
-        "j_half", "j_square", "j_dna", "j_trading", "j_burnt",
+        "j_blackboard",
+        "j_flower_pot",
+        "j_seeing_double",
+        "j_half",
+        "j_square",
+        "j_dna",
+        "j_trading",
+        "j_burnt",
         # detection modifiers (set-evaluation passives)
-        "j_four_fingers", "j_shortcut", "j_smeared", "j_splash", "j_pareidolia",
+        "j_four_fingers",
+        "j_shortcut",
+        "j_smeared",
+        "j_splash",
+        "j_pareidolia",
     }
 )
 
@@ -315,25 +341,76 @@ _CLASS3_SET_LEVEL: frozenset[str] = frozenset(
 # The hand's cards are irrelevant to whether these fire.
 _CLASS4_NON_CARD: frozenset[str] = frozenset(
     {
-        "j_joker", "j_misprint", "j_stuntman", "j_abstract", "j_acrobat",
-        "j_mystic_summit", "j_banner", "j_blue_joker", "j_erosion",
-        "j_stone", "j_steel_joker", "j_bull", "j_drivers_license",
-        "j_stencil", "j_bootstraps", "j_fortune_teller", "j_loyalty_card",
-        "j_matador", "j_blueprint", "j_brainstorm", "j_green_joker",
-        "j_ice_cream", "j_popcorn", "j_flash", "j_red_card", "j_campfire",
-        "j_hologram", "j_constellation", "j_caino", "j_madness",
-        "j_throwback", "j_yorick", "j_ceremonial", "j_baseball",
-        "j_swashbuckler", "j_certificate", "j_marble", "j_riff_raff",
-        "j_cartomancer", "j_vagabond", "j_hallucination", "j_gros_michel",
-        "j_cavendish", "j_chicot", "j_luchador", "j_burglar", "j_rocket",
-        "j_egg", "j_gift", "j_invisible", "j_diet_cola", "j_space",
-        "j_to_the_moon", "j_golden", "j_delayed_grat", "j_satellite",
-        "j_ramen", "j_mr_bones", "j_turtle_bean", "j_perkeo",
+        "j_joker",
+        "j_misprint",
+        "j_stuntman",
+        "j_abstract",
+        "j_acrobat",
+        "j_mystic_summit",
+        "j_banner",
+        "j_blue_joker",
+        "j_erosion",
+        "j_stone",
+        "j_steel_joker",
+        "j_bull",
+        "j_drivers_license",
+        "j_stencil",
+        "j_bootstraps",
+        "j_fortune_teller",
+        "j_loyalty_card",
+        "j_matador",
+        "j_blueprint",
+        "j_brainstorm",
+        "j_green_joker",
+        "j_ice_cream",
+        "j_popcorn",
+        "j_flash",
+        "j_red_card",
+        "j_campfire",
+        "j_hologram",
+        "j_constellation",
+        "j_caino",
+        "j_madness",
+        "j_throwback",
+        "j_yorick",
+        "j_ceremonial",
+        "j_baseball",
+        "j_swashbuckler",
+        "j_certificate",
+        "j_marble",
+        "j_riff_raff",
+        "j_cartomancer",
+        "j_vagabond",
+        "j_hallucination",
+        "j_gros_michel",
+        "j_cavendish",
+        "j_chicot",
+        "j_luchador",
+        "j_burglar",
+        "j_rocket",
+        "j_egg",
+        "j_gift",
+        "j_invisible",
+        "j_diet_cola",
+        "j_space",
+        "j_to_the_moon",
+        "j_golden",
+        "j_delayed_grat",
+        "j_satellite",
+        "j_ramen",
+        "j_mr_bones",
+        "j_turtle_bean",
+        "j_perkeo",
         "j_cloud_9",  # $ per 9 in the full deck at end of round — deck census, not hand
-
         # passive/config-only (no handler)
-        "j_astronomer", "j_chaos", "j_credit_card", "j_drunkard",
-        "j_juggler", "j_merry_andy", "j_oops", "j_ring_master",
+        "j_astronomer",
+        "j_chaos",
+        "j_credit_card",
+        "j_drunkard",
+        "j_juggler",
+        "j_merry_andy",
+        "j_oops",
+        "j_ring_master",
         "j_troubadour",
     }
 )
@@ -499,7 +576,7 @@ def trigger_match_matrix(gs: dict[str, Any]) -> np.ndarray:
     if not hand or not jokers:
         return np.zeros((len(hand), len(jokers), 2), dtype=bool)
 
-    flags = get_hand_eval_flags(jokers)
+    rules = rules_for(jokers)
     out = np.zeros((len(hand), len(jokers), 2), dtype=bool)
 
     resolutions: list[CopyResolution] | None = None
@@ -527,7 +604,7 @@ def trigger_match_matrix(gs: dict[str, Any]) -> np.ndarray:
         if card.base is None or card.facing == "back" or card.debuff:
             continue
         for j, joker, pred in active:
-            scored, held = pred(card, joker, gs, flags)
+            scored, held = pred(card, joker, gs, rules)
             out[i, j, 0] = scored
             out[i, j, 1] = held
     return out

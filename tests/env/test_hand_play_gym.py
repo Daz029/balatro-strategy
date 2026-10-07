@@ -26,6 +26,7 @@ from jackdaw.agents.hand_action_space import (
 )
 from jackdaw.engine.actions import PlayHand
 from jackdaw.engine.card_factory import create_consumable, create_joker
+from jackdaw.engine.read import rules_for
 from jackdaw.env.action_space import ActionType
 from jackdaw.env.hand_play_adapter import HandPlayConfig
 from jackdaw.env.hand_play_gym import (
@@ -91,17 +92,13 @@ class TestActionMask:
         assert mask[NUM_COMBOS:].any() == (cr["discards_left"] > 0)
 
     def test_no_discards_left_blocks_discards(self):
-        env = HandPlayGymEnv(
-            config=HandPlayConfig(discards_range=(0, 0)), seed_prefix="TESTENV"
-        )
+        env = HandPlayGymEnv(config=HandPlayConfig(discards_range=(0, 0)), seed_prefix="TESTENV")
         env.reset(seed=0)
         mask = env.action_masks()
         assert not mask[NUM_COMBOS:].any()
 
     def test_illegal_action_raises(self):
-        env = HandPlayGymEnv(
-            config=HandPlayConfig(discards_range=(0, 0)), seed_prefix="TESTENV"
-        )
+        env = HandPlayGymEnv(config=HandPlayConfig(discards_range=(0, 0)), seed_prefix="TESTENV")
         env.reset(seed=0)
         discard_action = combo_to_action(ActionType.Discard, (0,))
         with pytest.raises(ValueError, match="illegal action"):
@@ -187,9 +184,7 @@ class TestHandOverflow:
         discard of fewer than 3 cards grows the hand past 8 mid-round;
         build_observation used to raise 'entity count 9 exceeds max 8'."""
         env = HandPlayGymEnv(
-            config=HandPlayConfig(
-                blind_stages=("Boss",), ante_range=(5, 8), discards_range=(2, 3)
-            ),
+            config=HandPlayConfig(blind_stages=("Boss",), ante_range=(5, 8), discards_range=(2, 3)),
             seed_prefix="TESTENV",
         )
         for seed in range(300):
@@ -419,7 +414,7 @@ class TestObservationV2:
         gs = env._adapter.raw_state
         assert obs["joker_ids"][0] == center_key_id("j_greedy_joker")
         for i, card in enumerate(gs["hand"][:MAX_HAND_CARDS_OBS]):
-            expected = card.is_suit("Diamonds")
+            expected = card.is_suit("Diamonds", rules_for(gs["jokers"]))
             assert obs["trigger_match"][i, 0, 0] == float(expected), i
 
     def test_v2_copy_fields_wired(self):

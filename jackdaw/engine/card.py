@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from jackdaw.engine.data.enums import Rank, Suit
+from jackdaw.engine.read import Rules
 
 # ---------------------------------------------------------------------------
 # Module-level sort_id counter (matches G.sort_id in globals.lua)
@@ -514,43 +515,46 @@ class Card:
 
     def is_face(
         self,
+        rules: Rules,
         *,
         from_boss: bool = False,
-        pareidolia: bool = False,
     ) -> bool:
         """Check if this is a face card (J/Q/K), matching Card:is_face (card.lua:964).
 
         Args:
+            rules: Active global Joker rules. Required so callers cannot
+                silently forget Pareidolia.
             from_boss: If True, ignore debuff (boss blinds check face status
                 even on debuffed cards, e.g. The Plant).
-            pareidolia: If True, ALL cards count as face cards (Pareidolia
-                joker active).
+
+        Non-playing cards have no ``base`` and return False. Lua does not
+        call ``is_face`` on Jokers or other base-less cards.
         """
         if self.debuff and not from_boss:
             return False
         if self.base is None:
             return False
-        if pareidolia:
-            return True
-        return self.base.id in (11, 12, 13)
+        card_id = self.get_id()
+        return card_id in (11, 12, 13) or rules.pareidolia
 
     def is_suit(
         self,
         suit: str,
+        rules: Rules,
         *,
         bypass_debuff: bool = False,
         flush_calc: bool = False,
-        smeared: bool = False,
     ) -> bool:
         """Check if this card matches *suit*, matching Card:is_suit (card.lua:4064).
 
         Args:
             suit: Target suit string (``"Spades"``, ``"Hearts"``, etc.)
                 or a Suit enum value.
+            rules: Active global Joker rules. Required so callers cannot
+                silently forget Smeared Joker.
             bypass_debuff: If True, ignore debuff status.
             flush_calc: If True, use flush-specific rules (Stone excluded,
                 Wild matches all regardless of debuff).
-            smeared: If True, red suits interchangeable, black interchangeable.
         """
         if self.base is None:
             return False
@@ -564,7 +568,7 @@ class Card:
                 return False
             if self.ability.get("name") == "Wild Card" and not self.debuff:
                 return True
-            if smeared:
+            if rules.smeared:
                 target_red = suit_str in ("Hearts", "Diamonds")
                 card_red = card_suit in ("Hearts", "Diamonds")
                 if target_red == card_red:
@@ -577,7 +581,7 @@ class Card:
                 return False
             if self.ability.get("name") == "Wild Card":
                 return True
-            if smeared:
+            if rules.smeared:
                 target_red = suit_str in ("Hearts", "Diamonds")
                 card_red = card_suit in ("Hearts", "Diamonds")
                 if target_red == card_red:

@@ -219,12 +219,12 @@ def castle_suit(gs: dict[str, Any]) -> str | None:
 class Rules:
     """Active non-debuffed joker rules derived through Lua ``find_joker``."""
 
-    pareidolia: bool
-    smeared: bool
-    four_fingers: bool
-    shortcut: bool
-    splash: bool
-    showman: bool
+    pareidolia: bool = False
+    smeared: bool = False
+    four_fingers: bool = False
+    shortcut: bool = False
+    splash: bool = False
+    showman: bool = False
 
 
 _RULE_NAMES = {
@@ -236,11 +236,27 @@ _RULE_NAMES = {
     "showman": "Showman",
 }
 
+_RULE_KEYS = {
+    "pareidolia": "j_pareidolia",
+    "smeared": "j_smeared",
+    "four_fingers": "j_four_fingers",
+    "shortcut": "j_shortcut",
+    "splash": "j_splash",
+    "showman": "j_ring_master",
+}
+
 
 def rules_for(jokers: list[Card]) -> Rules:
     """Build active rules from *jokers*, excluding debuffed cards."""
-    active_names = {joker.ability.get("name") for joker in jokers if not joker.debuff}
-    return Rules(**{flag: name in active_names for flag, name in _RULE_NAMES.items()})
+    active = [joker for joker in jokers if not joker.debuff]
+    active_names = {joker.ability.get("name") for joker in active}
+    active_keys = {joker.center_key for joker in active}
+    return Rules(
+        **{
+            flag: name in active_names or _RULE_KEYS[flag] in active_keys
+            for flag, name in _RULE_NAMES.items()
+        }
+    )
 
 
 def rules(gs: dict[str, Any]) -> Rules:

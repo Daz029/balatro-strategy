@@ -12,6 +12,7 @@ from jackdaw.engine.blind import Blind, get_ante_blinds, get_new_boss
 from jackdaw.engine.card import Card, reset_sort_id_counter
 from jackdaw.engine.data.blind_scaling import get_blind_amount, get_blind_target
 from jackdaw.engine.data.prototypes import BLINDS as ALL_BLINDS
+from jackdaw.engine.read import Rules
 from jackdaw.engine.rng import PseudoRandom
 
 # ============================================================================
@@ -162,7 +163,7 @@ class TestDebuffCardSuitBlinds:
         reset_sort_id_counter()
         b = Blind.create("bl_goad", ante=1)
         c = _card("Spades", "5")
-        b.debuff_card(c)
+        b.debuff_card(c, Rules())
         assert c.debuff is True
 
 
@@ -173,7 +174,7 @@ class TestDebuffCardPlant:
         reset_sort_id_counter()
         b = Blind.create("bl_plant", ante=1)
         c = _card("Hearts", "King")
-        b.debuff_card(c)
+        b.debuff_card(c, Rules())
         assert c.debuff is True
 
     def test_with_pareidolia(self):
@@ -181,7 +182,7 @@ class TestDebuffCardPlant:
         reset_sort_id_counter()
         b = Blind.create("bl_plant", ante=1)
         c = _card("Hearts", "5")
-        b.debuff_card(c, pareidolia=True)
+        b.debuff_card(c, Rules(pareidolia=True))
         assert c.debuff is True
 
 
@@ -193,7 +194,7 @@ class TestDebuffCardPillar:
         b = Blind.create("bl_pillar", ante=1)
         c = _card("Hearts", "5")
         c.ability["played_this_ante"] = True
-        b.debuff_card(c)
+        b.debuff_card(c, Rules())
         assert c.debuff is True
 
 
@@ -204,7 +205,7 @@ class TestDebuffCardVerdantLeaf:
         reset_sort_id_counter()
         b = Blind.create("bl_final_leaf", ante=1)
         c = _card("Hearts", "5")
-        b.debuff_card(c)
+        b.debuff_card(c, Rules())
         assert c.debuff is True
 
 
@@ -216,7 +217,7 @@ class TestDebuffCardDisabled:
         b = Blind.create("bl_goad", ante=1)
         b.disabled = True
         c = _card("Spades", "5")
-        b.debuff_card(c)
+        b.debuff_card(c, Rules())
         assert c.debuff is False
 
 
@@ -228,7 +229,7 @@ class TestDebuffCardClearsDebuff:
         b = Blind.create("bl_goad", ante=1)
         c = _card("Hearts", "5")
         c.debuff = True  # previously debuffed
-        b.debuff_card(c)
+        b.debuff_card(c, Rules())
         assert c.debuff is False  # Hearts not debuffed by The Goad
 
 
@@ -370,7 +371,7 @@ class TestStayFlipped:
         reset_sort_id_counter()
         b = Blind.create("bl_house", ante=1)
         c = _card("Hearts", "5")
-        assert b.stay_flipped(c, hands_played=0, discards_used=0) is True
+        assert b.stay_flipped(c, Rules(), hands_played=0, discards_used=0) is True
 
 
 # ============================================================================
@@ -388,7 +389,7 @@ class TestDisable:
         reset_sort_id_counter()
         b = Blind.create("bl_goad", ante=1)
         c = _card("Spades", "5")
-        b.debuff_card(c)
+        b.debuff_card(c, Rules())
         assert c.debuff is True
         b.disable(playing_cards=[c])
         assert c.debuff is False

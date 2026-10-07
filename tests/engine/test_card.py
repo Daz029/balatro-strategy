@@ -13,6 +13,7 @@ from jackdaw.engine.card import Card, CardBase, reset_sort_id_counter
 from jackdaw.engine.card_area import CardArea, draw_card
 from jackdaw.engine.data.enums import Rank, Suit
 from jackdaw.engine.data.prototypes import JOKERS
+from jackdaw.engine.read import Rules
 from jackdaw.engine.rng import PseudoRandom
 
 
@@ -225,24 +226,24 @@ class TestIsFace:
     def test_jack_is_face(self):
         c = Card()
         c.set_base("H_J", "Hearts", "Jack")
-        assert c.is_face() is True
+        assert c.is_face(Rules()) is True
 
     def test_ace_is_not_face(self):
         c = Card()
         c.set_base("D_A", "Diamonds", "Ace")
-        assert c.is_face() is False
+        assert c.is_face(Rules()) is False
 
     def test_debuffed_is_not_face(self):
         c = Card()
         c.set_base("H_K", "Hearts", "King")
         c.debuff = True
-        assert c.is_face() is False
+        assert c.is_face(Rules()) is False
 
     def test_pareidolia_makes_all_face(self):
         """Pareidolia joker: ALL cards are face cards."""
         c = Card()
         c.set_base("H_5", "Hearts", "5")
-        assert c.is_face(pareidolia=True) is True
+        assert c.is_face(Rules(pareidolia=True)) is True
 
 
 class TestIsSuit:
@@ -251,18 +252,18 @@ class TestIsSuit:
     def test_basic_match(self):
         c = Card()
         c.set_base("S_A", "Spades", "Ace")
-        assert c.is_suit("Spades") is True
-        assert c.is_suit("Hearts") is False
+        assert c.is_suit("Spades", Rules()) is True
+        assert c.is_suit("Hearts", Rules()) is False
 
     def test_wild_card_matches_all(self):
         """Wild Card matches every suit."""
         c = Card()
         c.set_base("H_5", "Hearts", "5")
         c.set_ability("m_wild")
-        assert c.is_suit("Spades") is True
-        assert c.is_suit("Hearts") is True
-        assert c.is_suit("Diamonds") is True
-        assert c.is_suit("Clubs") is True
+        assert c.is_suit("Spades", Rules()) is True
+        assert c.is_suit("Hearts", Rules()) is True
+        assert c.is_suit("Diamonds", Rules()) is True
+        assert c.is_suit("Clubs", Rules()) is True
 
     def test_wild_card_debuffed(self):
         """Debuffed Wild Card: debuff check returns False before Wild check."""
@@ -270,21 +271,21 @@ class TestIsSuit:
         c.set_base("H_5", "Hearts", "5")
         c.set_ability("m_wild")
         c.debuff = True
-        assert c.is_suit("Spades") is False
+        assert c.is_suit("Spades", Rules()) is False
 
     def test_stone_card_never_matches(self):
         c = Card()
         c.set_base("H_5", "Hearts", "5")
         c.set_ability("m_stone")
-        assert c.is_suit("Hearts") is False
+        assert c.is_suit("Hearts", Rules()) is False
 
     def test_smeared_red_suits(self):
         """Smeared: Heart matches Diamond (both red)."""
         c = Card()
         c.set_base("H_5", "Hearts", "5")
         c.set_ability("c_base")
-        assert c.is_suit("Diamonds", smeared=True) is True
-        assert c.is_suit("Hearts", smeared=True) is True
+        assert c.is_suit("Diamonds", Rules(smeared=True)) is True
+        assert c.is_suit("Hearts", Rules(smeared=True)) is True
 
 
 class TestScoringMethods:

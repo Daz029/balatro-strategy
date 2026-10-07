@@ -362,6 +362,7 @@ def _state_view_fixture() -> tuple[dict, list[Card], GameSnapshot]:
         ancient_suit="Clubs",
         castle_card_suit="Hearts",
         skips=2,
+        rules=rules_for(scored_jokers),
     )
     return gs, scored_jokers, snapshot
 

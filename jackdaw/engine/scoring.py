@@ -439,10 +439,6 @@ def score_hand(
     snapshot = StateView(gs, jokers=jokers, overrides=overrides)
     probabilities_normal = snapshot.probabilities_normal
 
-    # Check for meta-jokers through the same live rules view used elsewhere.
-    smeared = snapshot.rules.smeared
-    pareidolia = snapshot.rules.pareidolia
-
     # === Phase 1-2: Hand detection ===
     # `jokers`, NOT None: evaluate_hand derives every hand-DETECTION flag
     # (four_fingers / shortcut / smeared / splash) from this list. Passing
@@ -487,6 +483,7 @@ def score_hand(
                 scoring_hand=scoring_cards,
                 scoring_name=hand_type,
                 poker_hands=poker_hands,
+                game=snapshot,
             )
             result = calculate_joker(joker, ctx)
             if result and result.dollars:
@@ -547,8 +544,6 @@ def score_hand(
         poker_hands=poker_hands,
         jokers=jokers,
         rng=rng,
-        smeared=smeared,
-        pareidolia=pareidolia,
         hand_levels=hand_levels,
         blind=blind,
         held_cards=held_cards,

@@ -103,9 +103,7 @@ class TestClass1Scored:
         lusty = create_joker("j_lusty_joker")
         m_plain = trigger_match_matrix(_gs([diamond], [lusty]))
         assert not m_plain[0, 0, SCORED]
-        m_smeared = trigger_match_matrix(
-            _gs([diamond], [lusty, create_joker("j_smeared")])
-        )
+        m_smeared = trigger_match_matrix(_gs([diamond], [lusty, create_joker("j_smeared")]))
         assert m_smeared[0, 0, SCORED]
 
     def test_rank_joker(self):
@@ -140,16 +138,15 @@ class TestClass1Scored:
         m = trigger_match_matrix(_gs(hand, [create_joker("j_photograph")]))
         assert m[:, 0, SCORED].tolist() == [True, True, False, True]
 
-    def test_pareidolia_widens_faces_but_not_ride_the_bus(self):
+    def test_pareidolia_widens_faces_including_ride_the_bus(self):
         hand = _cards((Suit.HEARTS, Rank.FOUR))
         photograph = create_joker("j_photograph")
         bus = create_joker("j_ride_the_bus")
         pareidolia = create_joker("j_pareidolia")
         m = trigger_match_matrix(_gs(hand, [photograph, bus, pareidolia]))
-        # Photograph's handler passes ctx.pareidolia to is_face; Ride the
-        # Bus calls is_face() bare (engine-verified) — mirror exactly.
+        # Lua's is_face reads global Pareidolia for both handlers.
         assert m[0, 0, SCORED]
-        assert not m[0, 1, SCORED]
+        assert m[0, 1, SCORED]
 
     def test_enhancement_jokers(self):
         gold = create_playing_card(Suit.HEARTS, Rank.TEN, "m_gold")
@@ -338,9 +335,7 @@ class TestCopyResolution:
     def test_incompatible_target_inactive(self):
         # Egg is blueprint_compat=False in centers.json — the engine's own
         # compat guard must flow through resolution.
-        res = resolve_copy_targets(
-            _gs([], [create_joker("j_blueprint"), create_joker("j_egg")])
-        )
+        res = resolve_copy_targets(_gs([], [create_joker("j_blueprint"), create_joker("j_egg")]))
         assert not res[0].active
 
     def test_debuffed_copy_joker_inactive(self):
@@ -407,9 +402,7 @@ class TestEngineExactExclusions:
         heart = create_playing_card(Suit.HEARTS, Rank.FIVE)
         debuffed_heart = create_playing_card(Suit.HEARTS, Rank.NINE)
         debuffed_heart.debuff = True
-        m = trigger_match_matrix(
-            _gs([heart, debuffed_heart], [create_joker("j_lusty_joker")])
-        )
+        m = trigger_match_matrix(_gs([heart, debuffed_heart], [create_joker("j_lusty_joker")]))
         # scoring.py phases 7/8 skip debuffed cards before any joker runs
         assert m[0, 0, SCORED]
         assert not m[1].any()
@@ -432,7 +425,5 @@ class TestEngineExactExclusions:
         diamond = create_playing_card(Suit.DIAMONDS, Rank.FIVE)
         smeared = create_joker("j_smeared")
         smeared.debuff = True
-        m = trigger_match_matrix(
-            _gs([diamond], [create_joker("j_lusty_joker"), smeared])
-        )
+        m = trigger_match_matrix(_gs([diamond], [create_joker("j_lusty_joker"), smeared]))
         assert not m[0, 0, SCORED]

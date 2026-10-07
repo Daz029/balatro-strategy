@@ -19,6 +19,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from jackdaw.engine.read import Rules, rules_for
+
 if TYPE_CHECKING:
     from jackdaw.engine.card import Card
 
@@ -26,16 +28,16 @@ if TYPE_CHECKING:
 def is_suit(
     card: Card,
     suit: str,
+    rules: Rules,
     *,
     flush_calc: bool = False,
-    smeared: bool = False,
 ) -> bool:
     """Check if *card* matches *suit*.
 
     Delegates to ``Card.is_suit`` (card.lua:4064).  Kept as a module-level
     function for backward compatibility with existing tests.
     """
-    return card.is_suit(suit, flush_calc=flush_calc, smeared=smeared)
+    return card.is_suit(suit, rules, flush_calc=flush_calc)
 
 
 def get_flush(
@@ -55,6 +57,7 @@ def get_flush(
         smeared: If True, Hearts/Diamonds and Spades/Clubs are interchangeable.
     """
     threshold = 4 if four_fingers else 5
+    rules = Rules(smeared=smeared)
 
     if len(hand) > 5 or len(hand) < threshold:
         return []
@@ -64,7 +67,7 @@ def get_flush(
     for suit in suits:
         t: list[Card] = []
         for card in hand:
-            if is_suit(card, suit, flush_calc=True, smeared=smeared):
+            if is_suit(card, suit, rules, flush_calc=True):
                 t.append(card)
         if len(t) >= threshold:
             return [t]
@@ -197,15 +200,6 @@ def get_highest(hand: list[Card]) -> list[list[Card]]:
 # Joker modifier flag extraction
 # ---------------------------------------------------------------------------
 
-# Mapping from P_CENTERS key → flag name for meta jokers that affect detection
-_META_JOKER_FLAGS: dict[str, str] = {
-    "j_four_fingers": "four_fingers",
-    "j_shortcut": "shortcut",
-    "j_smeared": "smeared",
-    "j_splash": "splash",
-    "j_pareidolia": "pareidolia",
-}
-
 
 def find_joker(name: str, jokers: list[Card], *, non_debuff: bool = False) -> list[Card]:
     """Find jokers by ability name, matching ``find_joker`` (misc_functions.lua:903).
@@ -249,20 +243,14 @@ def get_hand_eval_flags(jokers: list[Card]) -> dict[str, bool]:
     Returns:
         Dict of flag name → bool.
     """
-    flags = {
-        "four_fingers": False,
-        "shortcut": False,
-        "smeared": False,
-        "splash": False,
-        "pareidolia": False,
+    active = rules_for(jokers)
+    return {
+        "four_fingers": active.four_fingers,
+        "shortcut": active.shortcut,
+        "smeared": active.smeared,
+        "splash": active.splash,
+        "pareidolia": active.pareidolia,
     }
-    for j in jokers:
-        if j.debuff:
-            continue
-        flag = _META_JOKER_FLAGS.get(j.center_key)
-        if flag:
-            flags[flag] = True
-    return flags
 
 
 # ---------------------------------------------------------------------------

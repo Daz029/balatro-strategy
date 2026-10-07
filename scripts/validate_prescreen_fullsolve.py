@@ -100,9 +100,7 @@ class PrescreenNodeProbe:
                       "rel_regret", "box_size"}}}
     """
 
-    def __init__(
-        self, ks: list[int], node_sample_prob: float = 1.0, seed: int = 0
-    ) -> None:
+    def __init__(self, ks: list[int], node_sample_prob: float = 1.0, seed: int = 0) -> None:
         self.ks = ks
         self.node_sample_prob = node_sample_prob
         self.records: list[dict[str, Any]] = []
@@ -161,15 +159,32 @@ class PrescreenNodeProbe:
         *,
         search_orderings: bool = True,
         prescreen_top_k: int | None = None,
+        rules: Any = None,
     ) -> Any:
         subset, result = self._orig_bip(
-            hand, jokers, hand_levels, blind, rng, game_state, blind_chips,
-            search_orderings=search_orderings, prescreen_top_k=prescreen_top_k,
+            hand,
+            jokers,
+            hand_levels,
+            blind,
+            rng,
+            game_state,
+            blind_chips,
+            search_orderings=search_orderings,
+            prescreen_top_k=prescreen_top_k,
+            rules=rules,
         )
         if self._rand.random() < self.node_sample_prob:
             self._measure(
-                hand, jokers, hand_levels, blind, rng, game_state, blind_chips,
-                search_orderings, subset, result,
+                hand,
+                jokers,
+                hand_levels,
+                blind,
+                rng,
+                game_state,
+                blind_chips,
+                search_orderings,
+                subset,
+                result,
             )
         return subset, result
 
@@ -191,8 +206,15 @@ class PrescreenNodeProbe:
         held = [c for c in hand if id(c) not in ids]
         return float(
             evaluate_value(
-                list(cards), held, jokers, hand_levels, blind, rng,
-                game_state, blind_chips, search_orderings=search_orderings,
+                list(cards),
+                held,
+                jokers,
+                hand_levels,
+                blind,
+                rng,
+                game_state,
+                blind_chips,
+                search_orderings=search_orderings,
             ).total
         )
 
@@ -221,8 +243,15 @@ class PrescreenNodeProbe:
         for size in range(1, min(5, n) + 1):
             for combo in itertools.combinations(hand, size):
                 total = self._value(
-                    list(combo), hand, jokers, hand_levels, blind, rng,
-                    game_state, blind_chips, search_orderings,
+                    list(combo),
+                    hand,
+                    jokers,
+                    hand_levels,
+                    blind,
+                    rng,
+                    game_state,
+                    blind_chips,
+                    search_orderings,
                 )
                 if truth_total is None or total > truth_total:
                     truth_total = total
@@ -234,7 +263,11 @@ class PrescreenNodeProbe:
         by_k: dict[int, dict[str, Any]] = {}
         for k in self.ks:
             box = prescreen_play_candidates(
-                hand, jokers, hand_levels, blind, rng,
+                hand,
+                jokers,
+                hand_levels,
+                blind,
+                rng,
                 four_fingers=flags["four_fingers"],
                 shortcut=flags["shortcut"],
                 smeared=flags["smeared"],
@@ -246,8 +279,15 @@ class PrescreenNodeProbe:
             best_in_box = max(
                 (
                     self._value(
-                        cards, hand, jokers, hand_levels, blind, rng,
-                        game_state, blind_chips, search_orderings,
+                        cards,
+                        hand,
+                        jokers,
+                        hand_levels,
+                        blind,
+                        rng,
+                        game_state,
+                        blind_chips,
+                        search_orderings,
                     )
                     for cards in box
                 ),

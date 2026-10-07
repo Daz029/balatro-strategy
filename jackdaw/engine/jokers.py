@@ -62,6 +62,7 @@ class GameSnapshot:
     ancient_suit: str | None = None
     castle_card_suit: str | None = None
     skips: int = 0
+    rules: read.Rules = read.Rules()
 
 
 _DEFAULT_GAME = GameSnapshot()
@@ -133,6 +134,7 @@ class JokerContext:
     blueprint_card: Card | None = None
 
     # Meta joker flags
+    # Deprecated test conveniences. Production contexts use ``game.rules``.
     smeared: bool = False
     pareidolia: bool = False
 
@@ -161,6 +163,18 @@ class JokerContext:
     idol_card: InitVar[dict[str, Any] | None] = None
     ancient_suit: InitVar[str | None] = None
     skips: InitVar[int] = 0
+
+    @property
+    def rules(self) -> read.Rules:
+        """Active rules from the shared game view, plus legacy test overrides."""
+        active = self.game.rules
+        if self.smeared or self.pareidolia:
+            return replace(
+                active,
+                smeared=active.smeared or self.smeared,
+                pareidolia=active.pareidolia or self.pareidolia,
+            )
+        return active
 
     def __post_init__(
         self,
@@ -656,7 +670,7 @@ def _is_suit(ctx: JokerContext, suit: str) -> bool:
     """
     if ctx.other_card is None:
         return False
-    return ctx.other_card.is_suit(suit, smeared=ctx.smeared)
+    return ctx.other_card.is_suit(suit, ctx.rules)
 
 
 # ---------------------------------------------------------------------------
@@ -833,7 +847,7 @@ def _odd_todd(card: Card, ctx: JokerContext) -> JokerResult | None:
 def _scary_face(card: Card, ctx: JokerContext) -> JokerResult | None:
     """Scary Face: +chips for face cards. Source: card.lua:3136."""
     if ctx.individual and ctx.cardarea == "play" and ctx.other_card is not None:
-        if ctx.other_card.is_face(pareidolia=ctx.pareidolia):
+        if ctx.other_card.is_face(ctx.rules):
             return JokerResult(chips=card.ability.get("extra", 30))
     return None
 
@@ -842,7 +856,7 @@ def _scary_face(card: Card, ctx: JokerContext) -> JokerResult | None:
 def _smiley(card: Card, ctx: JokerContext) -> JokerResult | None:
     """Smiley Face: +mult for face cards. Source: card.lua:3143."""
     if ctx.individual and ctx.cardarea == "play" and ctx.other_card is not None:
-        if ctx.other_card.is_face(pareidolia=ctx.pareidolia):
+        if ctx.other_card.is_face(ctx.rules):
             return JokerResult(mult=card.ability.get("extra", 5))
     return None
 
@@ -858,7 +872,7 @@ def _photograph(card: Card, ctx: JokerContext) -> JokerResult | None:
         if ctx.scoring_hand:
             first_face = None
             for sc in ctx.scoring_hand:
-                if sc.is_face(pareidolia=ctx.pareidolia):
+                if sc.is_face(ctx.rules):
                     first_face = sc
                     break
             if ctx.other_card is first_face:
@@ -912,7 +926,7 @@ def _hack(card: Card, ctx: JokerContext) -> JokerResult | None:
 def _sock_and_buskin(card: Card, ctx: JokerContext) -> JokerResult | None:
     """Sock and Buskin: +1 retrigger for face cards scored. Source: card.lua:3344."""
     if ctx.repetition and ctx.cardarea == "play" and ctx.other_card is not None:
-        if ctx.other_card.is_face(pareidolia=ctx.pareidolia):
+        if ctx.other_card.is_face(ctx.rules):
             return JokerResult(repetitions=card.ability.get("extra", 1))
     return None
 
@@ -1084,7 +1098,10 @@ def _blackboard(card: Card, ctx: JokerContext) -> JokerResult | None:
         if not ctx.held_cards:
             return None
         for c in ctx.held_cards:
-            if not (c.is_suit("Clubs", flush_calc=True) or c.is_suit("Spades", flush_calc=True)):
+            if not (
+                c.is_suit("Clubs", ctx.rules, flush_calc=True)
+                or c.is_suit("Spades", ctx.rules, flush_calc=True)
+            ):
                 return None
         return JokerResult(Xmult_mod=card.ability.get("extra", 3))
     return None
@@ -1117,13 +1134,13 @@ def _flower_pot(card: Card, ctx: JokerContext) -> JokerResult | None:
         for c in ctx.scoring_hand:
             if c.ability.get("name") != "Wild Card":
                 for s in suits:
-                    if suits[s] == 0 and c.is_suit(s, bypass_debuff=True):
+                    if suits[s] == 0 and c.is_suit(s, ctx.rules, bypass_debuff=True):
                         suits[s] += 1
                         break
         for c in ctx.scoring_hand:
             if c.ability.get("name") == "Wild Card":
                 for s in suits:
-                    if suits[s] == 0 and c.is_suit(s):
+                    if suits[s] == 0 and c.is_suit(s, ctx.rules):
                         suits[s] += 1
                         break
         if all(v > 0 for v in suits.values()):
@@ -1142,17 +1159,17 @@ def _seeing_double(card: Card, ctx: JokerContext) -> JokerResult | None:
         for c in ctx.scoring_hand:
             if c.ability.get("name") != "Wild Card":
                 for s in suits:
-                    if c.is_suit(s):
+                    if c.is_suit(s, ctx.rules):
                         suits[s] += 1
         for c in ctx.scoring_hand:
             if c.ability.get("name") == "Wild Card":
-                if suits["Clubs"] == 0 and c.is_suit("Clubs"):
+                if suits["Clubs"] == 0 and c.is_suit("Clubs", ctx.rules):
                     suits["Clubs"] += 1
-                elif suits["Diamonds"] == 0 and c.is_suit("Diamonds"):
+                elif suits["Diamonds"] == 0 and c.is_suit("Diamonds", ctx.rules):
                     suits["Diamonds"] += 1
-                elif suits["Spades"] == 0 and c.is_suit("Spades"):
+                elif suits["Spades"] == 0 and c.is_suit("Spades", ctx.rules):
                     suits["Spades"] += 1
-                elif suits["Hearts"] == 0 and c.is_suit("Hearts"):
+                elif suits["Hearts"] == 0 and c.is_suit("Hearts", ctx.rules):
                     suits["Hearts"] += 1
         has_club = suits["Clubs"] > 0
         has_other = suits["Hearts"] > 0 or suits["Diamonds"] > 0 or suits["Spades"] > 0
@@ -1270,7 +1287,7 @@ def _business(card: Card, ctx: JokerContext) -> JokerResult | None:
     Returns hardcoded $2 (not from config).
     """
     if ctx.individual and ctx.cardarea == "play" and ctx.other_card is not None:
-        if ctx.other_card.is_face(pareidolia=ctx.pareidolia):
+        if ctx.other_card.is_face(ctx.rules):
             if ctx.rng is not None:
                 odds = card.ability.get("extra", 2)
                 if ctx.rng.random("business") < ctx.game.probabilities_normal / odds:
@@ -1285,7 +1302,7 @@ def _reserved_parking(card: Card, ctx: JokerContext) -> JokerResult | None:
     Fires in individual/hand context (held cards). Checks debuff.
     """
     if ctx.individual and ctx.cardarea == "hand" and ctx.other_card is not None:
-        if ctx.other_card.is_face(pareidolia=ctx.pareidolia):
+        if ctx.other_card.is_face(ctx.rules):
             extra = card.ability.get("extra", {})
             odds = extra.get("odds", 2)
             if ctx.rng is not None:
@@ -1310,7 +1327,7 @@ def _faceless(card: Card, ctx: JokerContext) -> JokerResult | None:
     if ctx.discard and ctx.other_card is not None and ctx.full_hand:
         if ctx.other_card is ctx.full_hand[-1]:
             extra = card.ability.get("extra", {})
-            face_count = sum(1 for c in ctx.full_hand if c.is_face(pareidolia=ctx.pareidolia))
+            face_count = sum(1 for c in ctx.full_hand if c.is_face(ctx.rules))
             if face_count >= extra.get("faces", 3):
                 return JokerResult(dollars=extra.get("dollars", 5))
     return None
@@ -1521,7 +1538,7 @@ def _ride_the_bus(card: Card, ctx: JokerContext) -> JokerResult | None:
     Source: card.lua:3525. Resets to 0 when a face card IS scored.
     """
     if ctx.before and not ctx.blueprint and ctx.scoring_hand is not None:
-        has_face = any(c.is_face() for c in ctx.scoring_hand)
+        has_face = any(c.is_face(ctx.rules) for c in ctx.scoring_hand)
         if has_face:
             card.ability["mult"] = 0
         else:
@@ -1750,7 +1767,7 @@ def _caino(card: Card, ctx: JokerContext) -> JokerResult | None:
     Uses ``ability.caino_xmult`` (separate from x_mult).
     """
     if ctx.cards_destroyed and not ctx.blueprint:
-        face_count = sum(1 for c in ctx.cards_destroyed if c.is_face())
+        face_count = sum(1 for c in ctx.cards_destroyed if c.is_face(ctx.rules))
         if face_count > 0:
             card.ability["caino_xmult"] = (
                 card.ability.get("caino_xmult", 1) + card.ability.get("extra", 1) * face_count
@@ -2276,7 +2293,7 @@ def _midas_mask(card: Card, ctx: JokerContext) -> JokerResult | None:
     if ctx.before and not ctx.blueprint and ctx.scoring_hand:
         faces = []
         for c in ctx.scoring_hand:
-            if c.is_face(pareidolia=ctx.pareidolia) and not c.debuff:
+            if c.is_face(ctx.rules) and not c.debuff:
                 faces.append(c)
         if faces:
             for c in faces:
@@ -2484,7 +2501,7 @@ def _castle(card: Card, ctx: JokerContext) -> JokerResult | None:
         castle_suit = (ctx.game.castle_card_suit if ctx.game else None) or card.ability.get(
             "castle_card_suit"
         )
-        if castle_suit and ctx.other_card.is_suit(castle_suit, smeared=ctx.smeared):
+        if castle_suit and ctx.other_card.is_suit(castle_suit, ctx.rules):
             extra = card.ability.get("extra", {})
             extra["chips"] = extra.get("chips", 0) + extra.get("chip_mod", 3)
             card.ability["extra"] = extra

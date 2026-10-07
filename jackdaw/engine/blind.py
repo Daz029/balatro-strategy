@@ -14,6 +14,7 @@ from typing import Any
 
 from jackdaw.engine.data.blind_scaling import get_blind_amount
 from jackdaw.engine.data.prototypes import BLINDS
+from jackdaw.engine.read import Rules, rules_for
 
 
 @dataclass
@@ -121,9 +122,9 @@ class Blind:
     def debuff_card(
         self,
         card: Any,
+        rules: Rules,
         *,
         is_joker_area: bool = False,
-        pareidolia: bool = False,
     ) -> None:
         """Set card.debuff based on boss blind effect.
 
@@ -134,9 +135,9 @@ class Blind:
 
         Args:
             card: The Card to check and debuff.
+            rules: Active global Joker rules.
             is_joker_area: If True, the card is in the joker area (not a
                 playing card).  Most debuffs only apply to playing cards.
-            pareidolia: If True, all cards count as face cards (for The Plant).
         """
         # Check prototype-driven debuffs (suit, face, pillar, value, nominal)
         # Note: in Lua, empty table {} is truthy.  All boss blinds have a
@@ -148,13 +149,13 @@ class Blind:
             # Suit debuff: The Club (Clubs), The Goad (Spades),
             # The Head (Hearts), The Window (Diamonds)
             if "suit" in cfg:
-                if card.is_suit(cfg["suit"], bypass_debuff=True):
+                if card.is_suit(cfg["suit"], rules, bypass_debuff=True):
                     card.set_debuff(True)
                     return
 
             # Face card debuff: The Plant
             if cfg.get("is_face") == "face":
-                if card.is_face(from_boss=True, pareidolia=pareidolia):
+                if card.is_face(rules, from_boss=True):
                     card.set_debuff(True)
                     return
 
@@ -400,12 +401,12 @@ class Blind:
     def stay_flipped(
         self,
         card: Any,
+        rules: Rules,
         *,
         rng: Any | None = None,
         probabilities_normal: float = 1.0,
         hands_played: int = 0,
         discards_used: int = 0,
-        pareidolia: bool = False,
     ) -> bool:
         """Should a card stay face-down when dealt to hand?
 
@@ -424,7 +425,7 @@ class Blind:
                 return True
 
         if self.name == "The Mark":
-            if card.is_face(from_boss=True, pareidolia=pareidolia):
+            if card.is_face(rules, from_boss=True):
                 return True
 
         if self.name == "The Fish":
@@ -475,9 +476,10 @@ class Blind:
             result["restore_hand_size"] = 1
 
         # Re-debuff all cards (clears debuffs since disabled=True)
+        rules = rules_for(joker_cards or [])
         for cards in [playing_cards or [], joker_cards or []]:
             for card in cards:
-                self.debuff_card(card)
+                self.debuff_card(card, rules)
 
         return result
 
