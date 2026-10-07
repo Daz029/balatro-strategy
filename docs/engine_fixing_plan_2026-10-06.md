@@ -771,6 +771,66 @@ stale); lint that rejects direct `gs[...]` reads in handlers.
 *Fixes C04, C07, C13 (flags), C14 (Green), D03, D04, D10 (tallies), D19, D26,
 D39, D40 (tally), D42 (`deck_enhancements`). Reader/writer lint goes green.*
 
+**STATUS 2026-10-06: EXIT MET** (branch `engine-phase1-state`, commits
+`ff8091e`..`1e4662e`). P2-1 to P2-3 ran through `codex exec` and were reviewed
+here. Codex then hit its usage cap mid-P2-3, so P2-3 was verified and finished
+here, and P2-4 and P2-5 were implemented here.
+
+- **`jackdaw/engine/read.py`**: the getters and `Rules`, plus `StateView`.
+  `StateView` is a lazy view over live state, cached for one scoring call,
+  and it exposes every old `GameSnapshot` attribute name.
+  - Every production snapshot site now passes a `StateView`, so no call site
+    assembles its own values any more. That fixes the starved snapshots: D19
+    Delayed Gratification, and Cloud 9's never-written `nine_tally`.
+  - The 1b-3 mirrors are deleted. Played cards now sit in
+    `played_cards_area` while scoring, as in `G.play`.
+- **Fixed, each with a test seen failing first.**
+  - Mirrors: the solver scored every hypothetical play against the previous
+    real play's leftover mirror values (dollars, tallies, deck counts).
+  - C13: Omen Globe, Telescope and Astronomer.
+  - D42: the enhancement pool gate.
+  - D10: Stencil and Swashbuckler count debuffed jokers. Stencil fires only
+    with an empty slot (`card.lua:3967`), which the review caught.
+  - D39: Wheel, Ectoplasm and Hex candidates include debuffed jokers.
+  - D03 / D02: `is_face` and `is_suit` take a REQUIRED `Rules`. Fixes Ride the
+    Bus, Faceless Joker, Flower Pot and Seeing Double under Smeared, the
+    suit-debuff bosses under Smeared, and stops a Stone King counting as a
+    face.
+  - D40: Lua's `set_consumeable_usage` is ported. Tarots are now counted, and
+    Black Hole counts as a Spectral (not a Planet).
+  - D19 Satellite: counts distinct Planet keys.
+- **Registry and lints:**
+  - `state.STATE_KEYS` and `GROUP_KEYS` register every key.
+  - `tests/engine/test_state_registry.py` fails on: an unregistered key (a new
+    alias), a key that is read but never written, a dead registry entry, or a
+    handler reading raw state.
+- **The reader/writer scan found three more dead keys:**
+  - **`observation.py` read the flat `four_fingers` / `shortcut` / `smeared` /
+    `splash` keys, which nothing ever wrote.** Global-context index 29 and the
+    Splash term of card feature 9 were constant for every state. They now read
+    `read.rules(gs)`. **This is an obs VALUE change for every existing
+    checkpoint** (Part 6: warm-start only anyway).
+  - `played_hand_types` was a mirror re-synced at three call sites. It is now a
+    getter.
+  - The challenge Inflation pass looped over `all_shop_cards`, which was never
+    written. It now uses `read.all_cards`.
+- **Performance:**
+  - `score_hand`, worst case (5 tally jokers, 52-card state): 113 → 118 µs.
+    Plain boards are unchanged.
+  - 45 fixed solver decisions: 2.02 s → 1.97 s.
+- **Residuals, owned by later phases:**
+  - Hypothetical solver plays see pre-play counters (`hands_left` not yet
+    decremented). This is what each handler sees during `evaluate_play`, which
+    is Phase 5 / S4-a.
+  - Each money consumer still reads committed dollars. The Bull vs Vagabond
+    split (C05) is Phase 5.
+  - Hand-DETECTION flags (`get_flush(smeared=)`, solver templates) still travel
+    as booleans derived once per joker list and bridged to `Rules`.
+  - The non-handler procedural code (`game.py` flows) still reads `gs`
+    directly. Phases 4–5 rewrite it.
+  - `shop.buy_card` is an unused duplicate of `_handle_buy_card` (Phase 7
+    helper deletion).
+
 ### Phase 3. Lifecycle (S3)
 
 The `lifecycle` module; route every creation, copy, removal, edition, ability,

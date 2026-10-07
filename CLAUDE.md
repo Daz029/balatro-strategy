@@ -22,7 +22,12 @@ analysis and potential overhaul.
   map `jackdaw/engine/state_map.py` + `tests/engine/test_state_map.py` (zero unmapped), aliases
   collapsed (C04/C07/C14-Green/D26/D04 fixed early), `migrate_state` on restore, new finding:
   D6/Coupon tags were all consumed in one shop. Status block in the plan doc under Phase 1.
-  NEXT: Phase 2 grabbers (+ Phase 0 instrument / Q quick wins in parallel).
+  PHASE 2 (grabbers) EXIT MET 2026-10-06, same branch: `jackdaw/engine/read.py` (getters,
+  Rules, StateView), mirrors deleted, key registry + reader/writer + handler lint
+  (`tests/engine/test_state_registry.py`). Fixed C13/D02/D03/D10/D19/D39/D40/D42 + stale solver
+  mirrors. OBS VALUE CHANGE: observation.py's meta-joker flags read dead keys (always 0) until
+  now. Status block under Phase 2 in the plan doc.
+  NEXT: Phase 3 lifecycle (+ Phase 0 instrument / Q quick wins in parallel).
 - descriptors: in progress
 - winrate-scaled reward: less importnat right now
 
