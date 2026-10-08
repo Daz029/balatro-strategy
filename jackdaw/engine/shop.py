@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from jackdaw.engine import read
+from jackdaw.engine import lifecycle, read
 from jackdaw.engine.data.prototypes import BOOSTERS, CENTER_POOLS
 from jackdaw.engine.read import StateView
 
@@ -45,12 +45,6 @@ TYPE_TAROT = "Tarot"
 TYPE_PLANET = "Planet"
 TYPE_SPECTRAL = "Spectral"
 TYPE_PLAYING_CARD = "PlayingCard"
-
-# Available enhancements for Illusion playing cards (ordered as in CENTER_POOLS)
-_ENHANCEMENTS: list[str] = CENTER_POOLS.get("Enhanced", [])
-
-# Seal options for Illusion playing cards
-_SEALS: list[str] = ["Red", "Blue", "Gold", "Purple"]
 
 # ---------------------------------------------------------------------------
 # Card type selection — UI_definitions.lua:742
@@ -142,7 +136,7 @@ def select_shop_card_type(
 # ---------------------------------------------------------------------------
 
 # Probability thresholds
-_ILLUSION_ENH_THRESHOLD = 0.4  # roll > 0.4 → enhanced (60% chance)
+_ILLUSION_ENH_THRESHOLD = 0.6
 _ILLUSION_EDI_CHANCE_THRESHOLD = 0.8  # roll > 0.8 → get edition (20% chance)
 
 # Edition distribution for Illusion: Foil 50%, Holo 35%, Poly 15%
@@ -155,7 +149,7 @@ def roll_illusion_modifiers(
     rng: PseudoRandom,
     ante: int,
     *,
-    append: str = "",
+    include_edition: bool = True,
 ) -> dict[str, Any]:
     """Roll Illusion voucher modifiers for a playing card drawn from the shop.
 
@@ -164,22 +158,11 @@ def roll_illusion_modifiers(
 
     Probabilities
     ~~~~~~~~~~~~~
-    * **60%** the card receives a random enhancement (one of the 8 standard
-      playing-card enhancements); otherwise base card.
+    * **40%** the card is created as Enhanced; otherwise Base.
     * **20%** the card receives a random edition:
       Foil 50 %, Holo 35 %, Polychrome 15 %.
-    * Seal is not determined here — deferred to the post-creation hook pass.
-
-    RNG streams consumed (always, for determinism):
-
-    1. ``'illusion_enh' + append + str(ante)`` — enhancement chance roll
-    2. ``'illusion_enh_pick' + append + str(ante)`` — enhancement selection
-       (seeded via :meth:`~jackdaw.engine.rng.PseudoRandom.seed` passed to
-       :meth:`~jackdaw.engine.rng.PseudoRandom.element`) — consumed only
-       when enhancement is granted
-    3. ``'illusion_edi_chance' + append + str(ante)`` — edition chance roll
-    4. ``'illusion_edi' + append + str(ante)`` — edition type roll (consumed
-       only when edition is granted)
+    All draws use the single ``illusion`` stream: type, edition gate, then
+    edition kind when the gate succeeds (UI_definitions.lua:772,786-793).
 
     Parameters
     ----------
@@ -187,32 +170,23 @@ def roll_illusion_modifiers(
         Live :class:`~jackdaw.engine.rng.PseudoRandom` instance.
     ante:
         Current ante number.
-    append:
-        Optional seed-key suffix for context disambiguation.
-
     Returns
     -------
     dict
         Dict with zero or more of the following keys:
 
-        * ``'enhancement'`` : str — e.g. ``'m_glass'``
+        * ``'card_type'`` : ``'Enhanced'`` or ``'Base'``
         * ``'edition'`` : dict — e.g. ``{'foil': True}``
     """
-    result: dict[str, Any] = {}
-
-    suffix = append + str(ante)
-
-    # -- Enhancement (60%) --
-    enh_roll = rng.random("illusion_enh" + suffix)
-    if enh_roll > _ILLUSION_ENH_THRESHOLD:
-        enh_seed = rng.seed("illusion_enh_pick" + suffix)
-        enhancement, _ = rng.element(_ENHANCEMENTS, enh_seed)
-        result["enhancement"] = enhancement
-
-    # -- Edition (20%) --
-    edi_chance = rng.random("illusion_edi_chance" + suffix)
+    del ante
+    result: dict[str, Any] = {
+        "card_type": "Enhanced" if rng.random("illusion") > _ILLUSION_ENH_THRESHOLD else "Base"
+    }
+    if not include_edition:
+        return result
+    edi_chance = rng.random("illusion")
     if edi_chance > _ILLUSION_EDI_CHANCE_THRESHOLD:
-        edi_roll = rng.random("illusion_edi" + suffix)
+        edi_roll = rng.random("illusion")
         if edi_roll > _ILLUSION_POLY_THRESHOLD:
             result["edition"] = {"polychrome": True}
         elif edi_roll > _ILLUSION_HOLO_THRESHOLD:
@@ -383,6 +357,20 @@ def create_shop_slot_card(
             spectral_rate=gs.get("spectral_rate", 0.0),
             playing_card_rate=gs.get("playing_card_rate", 0.0),
         )
+        illusion: dict[str, Any] | None = None
+        if read.has_voucher(gs, "v_illusion"):
+            # The type expression is evaluated after the cdt draw and before
+            # create_card (UI_definitions.lua:766-776), even when another
+            # weighted type ultimately wins.
+            illusion = roll_illusion_modifiers(
+                rng,
+                ante,
+                include_edition=card_type == TYPE_PLAYING_CARD,
+            )
+            if card_type == TYPE_PLAYING_CARD:
+                card_type = illusion["card_type"]
+        elif card_type == TYPE_PLAYING_CARD:
+            card_type = "Base"
         card = create_card(
             card_type,
             rng,
@@ -391,6 +379,8 @@ def create_shop_slot_card(
             append=_SHOP_APPEND,
             game_state=gs,
         )
+        if illusion and card_type in ("Base", "Enhanced") and illusion.get("edition"):
+            card.set_edition(gs, illusion["edition"])
 
     card_set = card.ability.get("set", "") if isinstance(card.ability, dict) else ""
     if card_set == "Joker" and not card.edition:
@@ -456,8 +446,7 @@ def populate_shop(
         ``{'jokers': list[Card], 'voucher': Card | None,
         'boosters': list[Card]}``
     """
-    from jackdaw.engine.card import Card as _Card
-    from jackdaw.engine.card_factory import create_voucher
+    from jackdaw.engine.card_factory import create_card, create_voucher
 
     gs = game_state
 
@@ -466,28 +455,34 @@ def populate_shop(
     banned_keys: set[str] = set(gs.get("banned_keys") or {})
 
     # -- 1. Joker slots --
-    jokers: list[_Card] = []
+    jokers: list[Card] = []
     for _ in range(shop_joker_max):
         jokers.append(create_shop_slot_card(rng, ante, gs))
 
     # -- 2. Voucher --
-    voucher: _Card | None = None
+    voucher: Card | None = None
     voucher_key: str | None = gs.get("current_round", {}).get("voucher")
     if voucher_key:
-        voucher = create_voucher(voucher_key)
+        voucher = create_voucher(voucher_key, game_state=gs)
         voucher.set_cost(gs)
 
     # -- 3. Boosters (always exactly 2 slots) --
-    boosters: list[_Card] = []
+    boosters: list[Card] = []
     for i in range(2):
         first_shop = i == 0 and not gs.get(_FIRST_SHOP_BUFFOON_KEY, False)
         pack_key = get_pack(rng, ante, "shop_pack", first_shop=first_shop, banned_keys=banned_keys)
         # Mark guarantee consumed when it fires (pack returned and not banned)
         if first_shop and _FIRST_SHOP_BUFFOON_PACK not in banned_keys:
             gs[_FIRST_SHOP_BUFFOON_KEY] = True
-        pack_card = _Card()
-        pack_card.set_ability(pack_key)
-        pack_card.set_cost(gs)
+        pack_card = create_card(
+            "Booster",
+            rng,
+            ante,
+            area="shop",
+            soulable=False,
+            forced_key=pack_key,
+            game_state=gs,
+        )
         boosters.append(pack_card)
 
     return {"jokers": jokers, "voucher": voucher, "boosters": boosters}
@@ -578,7 +573,7 @@ def buy_card(
     2. **Funds check** — ``game_state['dollars'] >= card.cost``.  Returns
        ``{'ok': False, 'reason': 'insufficient_funds'}`` if short.
     3. **Remove** card from *from_area*.
-    4. **Passive effects** — ``card.add_to_deck(game_state)``.
+    4. **Passive effects** — canonical ``lifecycle.emplace`` placement.
     5. **Place** card in *to_area*.
     6. **Playing-card bookkeeping** — if the card is a Default/Enhanced
        playing card, append to ``game_state['playing_cards']`` and notify
@@ -590,7 +585,7 @@ def buy_card(
        on every card that exists
        (``read.all_cards``; Lua iterates ``G.I.CARD``).
     9. **Track** — ``game_state['cards_purchased'] += 1`` and, for Jokers,
-       ``game_state['used_jokers'][card.center_key] = True``.
+       pool registration is already owned by the lifecycle.
 
     Parameters
     ----------
@@ -608,7 +603,7 @@ def buy_card(
         * ``modifiers.inflation`` (bool) — whether inflation is active.
         * ``discount_percent`` (int) — 0 / 25 / 50.
         * ``cards_purchased`` (int) — running tally this round.
-        * ``used_jokers`` (dict) — tracks which joker keys have been seen.
+        * ``used_jokers`` (dict) — tracks center keys that currently exist.
         * ``playing_cards`` (list) — all playing cards in run.
         * ``jokers`` (list[Card]) — active jokers (for notifications).
 
@@ -632,9 +627,16 @@ def buy_card(
     # -- 3. Remove from shop --
     from_area.remove(card)
 
-    # -- 4-5. Place first so state-owning setters can identify its area. --
-    to_area.add(card)
-    card.add_to_deck(game_state)
+    # -- 4-5. Canonical placement/bookkeeping. --
+    area_name = {
+        "joker": "jokers",
+        "consumeable": "consumables",
+        "deck": "deck",
+        "hand": "hand",
+    }.get(to_area.type, "deck")
+    if game_state.get(area_name) is not to_area.cards:
+        game_state[area_name] = to_area.cards
+    lifecycle.emplace(game_state, card, area_name)
 
     # -- 6. Playing-card bookkeeping --
     if card.ability.get("set") in _PLAYING_CARD_SETS:
@@ -648,7 +650,7 @@ def buy_card(
         owned_jokers = game_state.get("jokers", [])
         game_view = StateView(game_state, jokers=owned_jokers)
         for joker in owned_jokers:
-            ctx = JokerContext(buying_card=True, card=card, game=game_view)
+            ctx = JokerContext(buying_card=True, other_card=card, game=game_view)
             calculate_joker(joker, ctx)
 
     # -- 7. Deduct cost --
@@ -664,9 +666,6 @@ def buy_card(
 
     # -- 9. Track --
     game_state["cards_purchased"] = game_state.get("cards_purchased", 0) + 1
-    if card.ability.get("set") == "Joker":
-        game_state.setdefault("used_jokers", {})[card.center_key] = True
-
     return {"ok": True}
 
 
@@ -695,7 +694,7 @@ def sell_card(
     3. **Selling-card notification** — call
        ``calculate_joker(j, {selling_card=True, card=card})`` for every
        other joker in ``game_state['jokers']``.
-    4. **Reverse passive effects** — ``card.remove_from_deck(game_state)``.
+    4. **Reverse passive effects** — canonical ``lifecycle.remove`` teardown.
     5. **Award sell value** — ``game_state['dollars'] += card.sell_cost``.
     6. **Remove** card from *from_area*.
 
@@ -735,12 +734,12 @@ def sell_card(
         if joker is not card:
             calculate_joker(
                 joker,
-                JokerContext(selling_card=True, card=card, game=game_view),
+                JokerContext(selling_card=True, other_card=card, game=game_view),
             )
 
     # Remove first so Astronomer repricing sees the post-sale owned set.
     from_area.remove(card)
-    card.remove_from_deck(game_state)
+    lifecycle.remove(game_state, card)
 
     # -- 5. Award money --
     dollars_gained = card.sell_cost
@@ -833,7 +832,9 @@ def reroll_shop(
     calculate_reroll_cost(game_state)
 
     # -- 5. Clear shop --
-    shop_jokers.cards.clear()
+    for old_card in list(shop_jokers.cards):
+        shop_jokers.remove(old_card)
+        lifecycle.remove(game_state, old_card)
 
     # -- 6. Repopulate --
     shop_joker_max: int = game_state.get("shop", {}).get("joker_max", 2)
@@ -863,7 +864,9 @@ def reroll_shop(
             append=_SHOP_APPEND,
             game_state=game_state,
         )
-        shop_jokers.add(new_card)
+        if game_state.get("shop_cards") is not shop_jokers.cards:
+            game_state["shop_cards"] = shop_jokers.cards
+        lifecycle.emplace(game_state, new_card, "shop_cards")
         new_cards.append(new_card)
 
     # -- 7. Notify active jokers --

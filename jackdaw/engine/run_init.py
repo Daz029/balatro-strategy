@@ -335,8 +335,13 @@ def initialize_run(
     # -----------------------------------------------------------------------
     from jackdaw.engine.deck_builder import build_deck
 
-    deck = build_deck(back_key, rng, challenge, sp)
-    gs["deck"] = deck
+    built_deck = build_deck(back_key, rng, challenge, sp, game_state=gs)
+    gs["deck"] = []
+    from jackdaw.engine.lifecycle import emplace
+
+    for card in built_deck:
+        emplace(gs, card, "deck")
+    deck = gs["deck"]
     gs["starting_deck_size"] = len(deck)
 
     # -----------------------------------------------------------------------

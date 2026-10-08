@@ -324,8 +324,8 @@ encoder read them as constant 0 until Phase 2.
 
 ::
 
-    used_jokers        dict[str, bool]   Joker keys that have appeared {key: True}.
-                                         For "already seen" pool checks.
+    used_jokers        dict[str, bool]   Center keys for cards that currently exist.
+                                         For live duplicate-exclusion checks.
     joker_usage        dict              Per-joker usage stats.  Set by init ({}).
     consumeable_usage  dict              Per-consumable type usage.  Set by init ({}).
     hand_usage         dict              Per-hand-type play counts.  Set by init ({}).
@@ -505,6 +505,12 @@ def migrate_state(gs: dict[str, Any]) -> dict[str, Any]:
         if isinstance(blind, Blind):
             blind.__dict__.pop("hands", None)
 
+    # Pre-P3 blobs stored a historical "ever seen" set. Lua excludes only
+    # centers represented by cards that still exist (card.lua:4741-4749).
+    from jackdaw.engine.lifecycle import PoolTracker
+
+    gs["used_jokers"] = PoolTracker.expected(gs)
+
     return gs
 
 
@@ -610,7 +616,7 @@ STATE_KEYS: dict[str, str] = {
     "boss_blind_rerolls": "boss rerolls left; vouchers",
     "boss_blind_reroll_cost": "boss reroll cost; vouchers",
     # pools / vouchers
-    "used_jokers": "pool exclusion set; card_factory",
+    "used_jokers": "current-card pool exclusion set; lifecycle",
     "used_vouchers": "redeemed vouchers; run_init, game",
     "banned_keys": "banned centers; init, challenges",
     "pool_flags": "pool flags (gros_michel_extinct); init, game",

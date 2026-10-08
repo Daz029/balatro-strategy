@@ -389,8 +389,8 @@ def _filter_key(
     # --- Universal duplicate check (common_events.lua:1987) ---
     # Lua checks G.GAME.used_jokers[v.key] for ALL remaining types
     # (Joker, Tarot, Planet, Spectral, Voucher).  Despite the name,
-    # used_jokers tracks every center key that has been created via
-    # Card:set_ability (card.lua:349-354).
+    # used_jokers tracks every center key represented by a card that currently
+    # exists: set_ability registers it and Card:remove releases it.
     if not has_showman and key in used_jokers:
         return UNAVAILABLE
 

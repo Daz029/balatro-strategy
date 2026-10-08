@@ -234,6 +234,7 @@ class SimBackend:
                 perishable=perishable,
                 rental=rental,
                 hands_played=self._gs.get("hands_played", 0),
+                game_state=self._gs,
             )
             # Poll for edition to match balatrobot's create_card() behaviour.
             # Balatrobot's add command goes through the full Lua create_card()
@@ -250,10 +251,11 @@ class SimBackend:
                 if edition is None:
                     card.set_edition(self._gs, polled)
             card.set_cost(self._gs)
-            self._gs["jokers"].append(card)
+            from jackdaw.engine.lifecycle import emplace
+
             # Apply passive effects (hand_size, discards, joker_slots, etc.)
             old_hand_size = self._gs.get("hand_size", 8)
-            card.add_to_deck(self._gs)
+            emplace(self._gs, card, "jokers")
             # If hand_size increased mid-round, draw cards to fill the new
             # size — matches balatrobot which immediately fills on add.
             if self._gs.get("hand_size", 8) > old_hand_size and phase == GamePhase.SELECTING_HAND:
@@ -261,8 +263,10 @@ class SimBackend:
 
                 _draw_hand(self._gs)
         elif key.startswith("c_"):
-            card = create_consumable(key)
-            self._gs["consumables"].append(card)
+            card = create_consumable(key, game_state=self._gs)
+            from jackdaw.engine.lifecycle import emplace
+
+            emplace(self._gs, card, "consumables")
         elif len(key) == 3 and key[1] == "_":
             # Playing card key like "H_A", "S_2"
             suit_letter, rank_letter = key[0], key[2]
@@ -276,13 +280,18 @@ class SimBackend:
                 enhancement=enhancement,
                 edition=edition,
                 seal=seal,
+                game_state=self._gs,
             )
             # Add to hand if in SELECTING_HAND, otherwise to deck
             phase = self._gs.get("phase")
             if phase == GamePhase.SELECTING_HAND:
-                self._gs["hand"].append(card)
+                from jackdaw.engine.lifecycle import emplace
+
+                emplace(self._gs, card, "hand")
             else:
-                self._gs["deck"].append(card)
+                from jackdaw.engine.lifecycle import emplace
+
+                emplace(self._gs, card, "deck")
         else:
             raise RPCError(BAD_REQUEST, f"Unrecognised card key prefix: {key!r}")
 

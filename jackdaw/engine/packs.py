@@ -66,34 +66,10 @@ def generate_pack_cards(
     kind = proto.kind
     extra: int = proto.config.get("extra", 1)
     choose: int = proto.config.get("choose", 1)
-    gs = game_state or {}
+    gs = game_state
 
     cards: list[Card] = []
-    # Track keys added during this pack generation so we can clean up after.
-    # In Lua, Card:set_ability (card.lua:349-354) adds every created card's
-    # center key to G.GAME.used_jokers, preventing duplicates within a pack.
-    # The keys are later removed when unpicked cards are destroyed
-    # (card.lua:4741-4748).  We replicate this by temporarily adding keys
-    # during generation and removing them after.
-    _pack_added_keys: list[str] = []
     for i in range(extra):
-        # Membership must be snapshotted BEFORE the card is created.
-        # ``create_card`` now performs the registration itself (mirroring
-        # Card:set_ability), so a post-hoc "is the key absent?" test can never
-        # be True — nothing would ever be recorded for cleanup and every card
-        # merely SHOWN in a pack would permanently poison the run-wide pool.
-        # Deciding beforehand keeps add/delete accounting exact.
-        #
-        # Showman: duplicates within one pack are legal (the pool filter is
-        # bypassed entirely, pools.py `if not has_showman and ...`).  The
-        # per-iteration snapshot handles that correctly — the second copy of a
-        # key sees it already present and is not recorded, so cleanup deletes
-        # it exactly once rather than raising KeyError on a double delete.
-        # A key registered BEFORE this pack (e.g. bought earlier, re-shown
-        # under Showman) is likewise never recorded, so a real registration is
-        # never erased.
-        _seen_before = set(gs.get("used_jokers", {}))
-
         if kind == "Arcana":
             card = _gen_arcana(rng, ante, gs)
         elif kind == "Celestial":
@@ -107,18 +83,6 @@ def generate_pack_cards(
         else:
             raise ValueError(f"Unknown pack kind: {kind!r}")
         cards.append(card)
-
-        if "used_jokers" in gs and card.center_key != "c_base":
-            if card.center_key not in _seen_before:
-                # create_card already registered it; this is a no-op that keeps
-                # the branch correct if the card came from a non-create_card path.
-                gs["used_jokers"][card.center_key] = True
-                _pack_added_keys.append(card.center_key)
-
-    # Clean up temporarily added keys (will be re-added by pick logic
-    # for whichever card the player selects)
-    for k in _pack_added_keys:
-        del gs["used_jokers"][k]
 
     return cards, choose
 
@@ -216,7 +180,12 @@ def _gen_standard(rng: PseudoRandom, ante: int, gs: dict) -> Card:
     else:
         enhancement_key = "c_base"
 
-    card = create_playing_card(suit, rank, enhancement=enhancement_key)
+    card = create_playing_card(
+        suit,
+        rank,
+        enhancement=enhancement_key,
+        game_state=gs,
+    )
 
     # Edition
     edition = poll_edition(

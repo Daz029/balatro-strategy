@@ -81,7 +81,7 @@ def test_selling_duplicate_removes_only_that_cards_passive() -> None:
 
     assert gs["jokers"] == [first]
     assert gs["hand_size"] == 9
-    # Run-wide duplicate exclusion records seen keys, not current ownership.
+    # The remaining current copy keeps the key excluded, even when debuffed.
     assert gs["used_jokers"] == {"j_juggler": True}
 
 

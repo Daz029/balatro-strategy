@@ -138,8 +138,7 @@ class TestModifiedRates:
 class TestRollIllusionModifiers:
     def test_known_seed_with_enhancement(self):
         result = roll_illusion_modifiers(PseudoRandom("ILLUS_A"), 1)
-        assert "enhancement" in result
-        assert result["enhancement"] == "m_stone"
+        assert result["card_type"] == "Enhanced"
 
     def test_deterministic_same_seed(self):
         r1 = roll_illusion_modifiers(PseudoRandom("DET_ILLUS"), 1)

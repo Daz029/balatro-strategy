@@ -1,4 +1,4 @@
-"""Run-wide duplicate exclusion: registration, pack cleanup, and Showman.
+"""Current-card duplicate exclusion: registration, pack lifetime, and Showman.
 
 Covers the ``used_jokers`` half of the engine PR-2 fixes.
 
@@ -10,16 +10,16 @@ A joker you saw in a shop and declined therefore stayed fully eligible forever.
 ``create_card`` now registers every created key at creation, mirroring
 ``Card:set_ability`` (card.lua:349-354).
 
-That change collides with the pack layer, which temporarily registers keys and
-deletes them again so unpicked pack cards don't poison the pool
-(card.lua:4741-4748).  The tests below pin the resulting add/delete accounting,
-including the Showman case where duplicates within a single pack are legal.
+Pack contents remain registered while displayed and are released by the
+canonical lifecycle only when picked/used or when the pack closes
+(card.lua:4741-4748).
 """
 
 from __future__ import annotations
 
 from jackdaw.engine.card import Card
 from jackdaw.engine.card_factory import _has_showman, create_card
+from jackdaw.engine.lifecycle import remove
 from jackdaw.engine.packs import generate_pack_cards
 from jackdaw.engine.rng import PseudoRandom
 
@@ -51,22 +51,32 @@ class TestCreateCardRegisters:
         assert first.center_key != second.center_key
 
 
-class TestPackCleanup:
-    """Unpicked pack cards must not permanently register."""
+class TestPackLifetime:
+    """Displayed cards stay registered exactly until they stop existing."""
 
-    def test_pack_leaves_used_jokers_unchanged(self):
+    def test_pack_cards_stay_registered_until_removed(self):
         gs: dict = {"used_jokers": {}}
         cards, _ = generate_pack_cards("p_arcana_normal_1", PseudoRandom("PACK1"), 1, gs)
         assert cards, "pack generated no cards — fixture assumption broken"
-        # Regression: with post-hoc membership testing, create_card's own
-        # registration made the cleanup list always empty and every displayed
-        # pack card leaked into the pool permanently.
+        assert {card.center_key for card in cards} <= set(gs["used_jokers"])
+        for card in cards:
+            remove(gs, card)
         assert gs["used_jokers"] == {}
 
     def test_pre_existing_registration_survives_a_pack(self):
-        """A key registered before the pack must never be erased by cleanup."""
-        gs: dict = {"used_jokers": {"c_fool": True}}
-        generate_pack_cards("p_arcana_normal_1", PseudoRandom("PACK2"), 1, gs)
+        """An owned copy must survive removal of unrelated pack cards."""
+        gs: dict = {"used_jokers": {}, "consumables": []}
+        owned = create_card(
+            "Tarot",
+            PseudoRandom("PACK2_OWNED"),
+            1,
+            forced_key="c_fool",
+            game_state=gs,
+        )
+        gs["consumables"].append(owned)
+        cards, _ = generate_pack_cards("p_arcana_normal_1", PseudoRandom("PACK2"), 1, gs)
+        for card in cards:
+            remove(gs, card)
         assert gs["used_jokers"].get("c_fool") is True
 
     def test_showman_duplicates_in_pack_do_not_double_delete(self):
@@ -76,8 +86,9 @@ class TestPackCleanup:
         exactly once.  Deleting per generated card instead would raise KeyError.
         """
         gs: dict = {"used_jokers": {}, "jokers": [_joker("j_ring_master")]}
-        # Must not raise, and must leave the pool clean.
-        generate_pack_cards("p_arcana_normal_1", PseudoRandom("PACK3"), 1, gs)
+        cards, _ = generate_pack_cards("p_arcana_normal_1", PseudoRandom("PACK3"), 1, gs)
+        for card in cards:
+            remove(gs, card)
         assert gs["used_jokers"] == {}
 
 

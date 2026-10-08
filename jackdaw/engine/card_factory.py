@@ -17,7 +17,6 @@ Source references:
 
 from __future__ import annotations
 
-import copy
 from typing import TYPE_CHECKING, Any
 
 from jackdaw.engine import read
@@ -78,6 +77,7 @@ def create_playing_card(
     *,
     playing_card_index: int | None = None,
     hands_played: int = 0,
+    game_state: dict[str, Any] | None = None,
 ) -> Card:
     """Create a playing card (goes into the deck).
 
@@ -99,13 +99,18 @@ def create_playing_card(
     """
     card = Card()
     key = _card_key(suit, rank)
-    card.set_base(key, suit.value, rank.value)
-    card.set_ability(enhancement, hands_played=hands_played)
+    gs = game_state if game_state is not None else {}
+    card.set_base(key, suit.value, rank.value, gs=game_state)
+    card.set_ability(enhancement, hands_played=hands_played, gs=game_state)
     card.playing_card = playing_card_index
     if edition:
-        card.set_edition({}, edition)
+        card.set_edition(gs, edition)
     if seal:
-        card.set_seal({}, seal)
+        card.set_seal(gs, seal)
+    if game_state is not None:
+        from jackdaw.engine.lifecycle import PoolTracker
+
+        PoolTracker.register(game_state, card)
     return card
 
 
@@ -122,6 +127,7 @@ def create_joker(
     perishable: bool = False,
     rental: bool = False,
     hands_played: int = 0,
+    game_state: dict[str, Any] | None = None,
 ) -> Card:
     """Create a joker card from a P_CENTERS key (e.g. ``"j_joker"``).
 
@@ -134,15 +140,20 @@ def create_joker(
         hands_played: Current hands_played for post-init fields.
     """
     card = Card()
-    card.set_ability(key, hands_played=hands_played)
+    gs = game_state if game_state is not None else {}
+    card.set_ability(key, hands_played=hands_played, gs=game_state)
     if edition:
-        card.set_edition({}, edition)
+        card.set_edition(gs, edition)
     if eternal:
         card.set_eternal(True)
     if perishable:
-        card.set_perishable({}, True)
+        card.set_perishable(gs, True)
     if rental:
-        card.set_rental({}, True)
+        card.set_rental(gs, True)
+    if game_state is not None:
+        from jackdaw.engine.lifecycle import PoolTracker
+
+        PoolTracker.register(game_state, card)
     return card
 
 
@@ -151,7 +162,12 @@ def create_joker(
 # ---------------------------------------------------------------------------
 
 
-def create_consumable(key: str, *, hands_played: int = 0) -> Card:
+def create_consumable(
+    key: str,
+    *,
+    hands_played: int = 0,
+    game_state: dict[str, Any] | None = None,
+) -> Card:
     """Create a tarot, planet, or spectral card from a P_CENTERS key.
 
     Args:
@@ -159,7 +175,11 @@ def create_consumable(key: str, *, hands_played: int = 0) -> Card:
         hands_played: Current hands_played for post-init fields.
     """
     card = Card()
-    card.set_ability(key, hands_played=hands_played)
+    card.set_ability(key, hands_played=hands_played, gs=game_state)
+    if game_state is not None:
+        from jackdaw.engine.lifecycle import PoolTracker
+
+        PoolTracker.register(game_state, card)
     return card
 
 
@@ -168,10 +188,14 @@ def create_consumable(key: str, *, hands_played: int = 0) -> Card:
 # ---------------------------------------------------------------------------
 
 
-def create_voucher(key: str) -> Card:
+def create_voucher(key: str, *, game_state: dict[str, Any] | None = None) -> Card:
     """Create a voucher card from a P_CENTERS key (e.g. ``"v_overstock_norm"``)."""
     card = Card()
-    card.set_ability(key)
+    card.set_ability(key, gs=game_state)
+    if game_state is not None:
+        from jackdaw.engine.lifecycle import PoolTracker
+
+        PoolTracker.register(game_state, card)
     return card
 
 
@@ -185,6 +209,7 @@ def card_from_control(
     *,
     playing_card_index: int | None = None,
     hands_played: int = 0,
+    game_state: dict[str, Any] | None = None,
 ) -> Card:
     """Create a playing card from a control dict.
 
@@ -218,6 +243,7 @@ def card_from_control(
         seal=seal,
         playing_card_index=playing_card_index,
         hands_played=hands_played,
+        game_state=game_state,
     )
 
 
@@ -268,19 +294,18 @@ def create_card(
     1. **Key determination** — ``forced_key`` → soul/Black-Hole chance →
        pool pick.
     2. **Card construction** — :meth:`Card.set_ability` from the resolved key.
-    3. **Joker modifiers** (only when ``card.ability["set"] == "Joker"`` and
-       *area* is ``"shop"`` or ``"pack"``):
+    3. **Joker modifiers**:
 
-       a. Eternal / Perishable roll (shared; mutually exclusive).
-       b. Rental roll (independent).
-       c. Edition roll via :func:`~jackdaw.engine.card_utils.poll_edition`.
+       a. In shop/pack only, Eternal / Perishable and Rental rolls.
+       b. In every area, Edition via
+          :func:`~jackdaw.engine.card_utils.poll_edition`.
 
     4. **Cost** — :meth:`Card.set_cost` with values extracted from
        *game_state*.
 
-    All three modifier RNG streams are always advanced for Jokers in
-    shop/pack context (even when the corresponding stake option is disabled)
-    so that the stream positions remain deterministic regardless of stake.
+    The sticker RNG streams are always advanced for Jokers in shop/pack
+    context even when the corresponding stake option is disabled. The edition
+    stream advances for every created Joker, matching Lua.
 
     Parameters
     ----------
@@ -338,7 +363,7 @@ def create_card(
     from jackdaw.engine.card_utils import poll_edition
     from jackdaw.engine.pools import check_soul_chance, pick_card_from_pool
 
-    gs = game_state or {}
+    gs = game_state if game_state is not None else {}
 
     # ------------------------------------------------------------------
     # 1. Determine center key
@@ -376,17 +401,27 @@ def create_card(
     # 2. Construct the card
     # ------------------------------------------------------------------
     card = Card()
-    card.set_ability(key)
+    card.set_ability(key, gs=game_state)
 
-    # Card:set_ability registers EVERY created center key in
-    # G.GAME.used_jokers (card.lua:349-354) — shop displays, pack contents,
-    # and consumable-created cards alike.  This drives run-wide duplicate
-    # exclusion in all pools (a key never repeats without Showman).
+    # Base and Enhanced cards always receive a front (common_events.lua:2124).
+    if card_type in ("Base", "PlayingCard", "Enhanced"):
+        from jackdaw.engine.data.prototypes import PLAYING_CARDS
+
+        front, _ = rng.element(PLAYING_CARDS, rng.seed("front" + append + str(ante)))
+        card.set_base(
+            _card_key(Suit(front.suit), Rank(front.rank)),
+            front.suit,
+            front.rank,
+            gs=game_state,
+        )
+
     if game_state is not None:
-        game_state.setdefault("used_jokers", {})[key] = True
+        from jackdaw.engine.lifecycle import PoolTracker
+
+        PoolTracker.register(game_state, card)
 
     # ------------------------------------------------------------------
-    # 3. Joker modifiers (shop / pack context only)
+    # 3. Joker modifiers. Stickers are shop/pack-only; editions are not.
     # ------------------------------------------------------------------
     if card.ability.get("set") == "Joker" and area in ("shop", "pack"):
         modifiers = gs.get("modifiers", {})
@@ -406,7 +441,7 @@ def create_card(
         if r_roll > _RENTAL_THRESHOLD and enable_rentals:
             card.set_rental(gs, True)
 
-        # -- Edition --
+    if card.ability.get("set") == "Joker":
         edition = poll_edition(
             "edi" + append + str(ante),
             rng,
@@ -524,6 +559,7 @@ def resolve_create_descriptor(
             Suit(suit_str),
             Rank(rank_str),
             enhancement=enhancement,
+            game_state=game_state,
         )
 
     # ------------------------------------------------------------------
@@ -531,7 +567,13 @@ def resolve_create_descriptor(
     # ------------------------------------------------------------------
     copy_source: Card | None = descriptor.get("copy_of")
     if copy_source is not None:
-        return copy.deepcopy(copy_source)
+        from jackdaw.engine.lifecycle import copy_card
+
+        return copy_card(
+            game_state,
+            copy_source,
+            strip_edition=bool(descriptor.get("strip_edition")),
+        )
 
     # ------------------------------------------------------------------
     # Pool-drawn consumables and jokers

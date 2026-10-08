@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from jackdaw.engine import read
+from jackdaw.engine import lifecycle, read
 from jackdaw.engine.actions import (
     Action,
     BuyCard,
@@ -120,33 +120,20 @@ def _require_phase(gs: dict[str, Any], *phases: GamePhase) -> GamePhase:
 
 
 def _gain_joker(gs: dict[str, Any], card: Any) -> bool:
-    """Move one card into Joker ownership and apply its passive once.
-
-    Identity, rather than center key or dataclass equality, defines ownership:
-    Showman can create distinct copies of the same Joker and each copy must
-    apply its own passive.  Re-processing the exact same card object is a
-    no-op, which prevents observer/restore seams from double-applying it.
-
-    ``used_jokers`` is run-wide duplicate-exclusion history.  Acquisition
-    registers the key idempotently; removal deliberately never unregisters it.
-    """
+    """Thin compatibility wrapper over :func:`lifecycle.emplace`."""
     jokers: list = gs.setdefault("jokers", [])
     if any(owned is card for owned in jokers):
         return False
-
-    jokers.append(card)
-    card.add_to_deck(gs)
-    gs.setdefault("used_jokers", {})[card.center_key] = True
+    lifecycle.emplace(gs, card, "jokers")
     return True
 
 
 def _lose_joker(gs: dict[str, Any], card: Any) -> bool:
-    """Remove one owned Joker by identity and reverse its passive once."""
+    """Thin compatibility wrapper over :func:`lifecycle.remove`."""
     jokers: list = gs.get("jokers", [])
-    for idx, owned in enumerate(jokers):
+    for owned in jokers:
         if owned is card:
-            jokers.pop(idx)
-            owned.remove_from_deck(gs)
+            lifecycle.remove(gs, owned)
             return True
     return False
 
@@ -185,16 +172,24 @@ def _handle_select_blind(gs: dict[str, Any], *, allow_forced_boss: bool = False)
     # 1. Create the active Blind
     # ------------------------------------------------------------------
     ante = rr["ante"]
-    if blind_on_deck == "Boss" and not allow_forced_boss:
+    # Boss eligibility guard (plan Part 4, C08 note): catches forced/sampled
+    # bosses that get_new_boss (common_events.lua:2353) could never produce.
+    # Lua picks the boss when the ante starts; Hieroglyph / Petroglyph
+    # (vouchers.py, card.lua:1958 ease_ante(-1)) can lower the ante AFTER
+    # that, so a legitimately chosen boss may face a lower ante here. The
+    # guard is therefore skipped once an ante-lowering voucher is redeemed.
+    ante_lowered = read.has_voucher(gs, "v_hieroglyph") or read.has_voucher(gs, "v_petroglyph")
+    if blind_on_deck == "Boss" and not allow_forced_boss and not ante_lowered:
         from jackdaw.engine.data.prototypes import BLINDS
 
         boss = BLINDS[blind_key].boss or {}
-        showdown_ante = ante >= 2 and ante % gs.get("win_ante", 8) == 0
+        eff_ante = max(1, ante)
+        showdown_ante = eff_ante % gs.get("win_ante", 8) == 0 and ante >= 2
         assert bool(boss.get("showdown")) == showdown_ante, (
             f"{blind_key} showdown eligibility does not match ante {ante}"
         )
         if not boss.get("showdown"):
-            assert boss.get("min", 1) <= ante, (
+            assert boss.get("min", 1) <= eff_ante, (
                 f"{blind_key} requires ante {boss.get('min', 1)}, got {ante}"
             )
     scaling = gs.get("modifiers", {}).get("scaling", 1)
@@ -650,6 +645,8 @@ def _handle_play_hand(gs: dict[str, Any], indices: tuple[int, ...]) -> dict[str,
         _lose_joker(gs, removed)
 
     # Playing card destruction (Glass shatter, etc.)
+    for destroyed_card in result.cards_destroyed:
+        lifecycle.remove(gs, destroyed_card)
     destroyed_set = set(id(c) for c in result.cards_destroyed)
     played = [c for c in played if id(c) not in destroyed_set]
 
@@ -888,6 +885,8 @@ def _handle_discard(gs: dict[str, Any], indices: tuple[int, ...]) -> dict[str, A
 
     for joker in jokers_to_remove:
         _lose_joker(gs, joker)
+    for destroyed_card in destroyed:
+        lifecycle.remove(gs, destroyed_card)
 
     # ------------------------------------------------------------------
     # 6. Discard cost (Golden Needle challenge)
@@ -1070,9 +1069,9 @@ def _handle_buy_card(gs: dict[str, Any], idx: int) -> dict[str, Any]:
     if card_set == "Joker":
         _gain_joker(gs, card)
     elif card_set in ("Tarot", "Planet", "Spectral"):
-        gs.setdefault("consumables", []).append(card)
+        lifecycle.emplace(gs, card, "consumables")
     else:
-        gs.setdefault("deck", []).append(card)
+        lifecycle.emplace(gs, card, "deck")
         added_playing_card = True
 
     # Fire buying_card joker context
@@ -1106,7 +1105,7 @@ def _handle_sell_card(gs: dict[str, Any], area: str, idx: int) -> dict[str, Any]
     if area == "jokers":
         _lose_joker(gs, card)
     else:
-        cards.pop(idx)
+        lifecycle.remove(gs, card)
 
     # Fire selling_card joker context (Campfire +xMult per card sold)
     _fire_shop_joker_context(gs, selling_card=True)
@@ -1164,6 +1163,7 @@ def _handle_use_consumable(
 
     consumables.pop(idx)
     _use_consumable_card(gs, card, targets)
+    lifecycle.remove(gs, card)
 
     # Phase does NOT change — returns to whatever it was
     return gs
@@ -1188,6 +1188,7 @@ def _handle_redeem_voucher(gs: dict[str, Any], idx: int) -> dict[str, Any]:
 
     gs["used_vouchers"][card.center_key] = True
     apply_voucher(card.center_key, gs)
+    lifecycle.remove(gs, card)
 
     # Clear the voucher slot so the next shop doesn't re-offer it.
     # Matches card.lua:1850: G.GAME.current_round.voucher = nil
@@ -1218,6 +1219,7 @@ def _handle_open_booster(gs: dict[str, Any], idx: int) -> dict[str, Any]:
 
     gs["dollars"] -= pack.cost
     boosters.pop(idx)
+    lifecycle.remove(gs, pack)
 
     # Generate pack cards
     from jackdaw.engine.data.prototypes import BOOSTERS
@@ -1309,6 +1311,7 @@ def _handle_pick_pack_card(
 
         # Fire using_consumeable joker context
         _fire_shop_joker_context(gs, using_consumeable=True)
+        lifecycle.remove(gs, card)
 
     elif card_set == "Joker":
         # Buffoon pack: add to joker slots
@@ -1316,7 +1319,7 @@ def _handle_pick_pack_card(
 
     else:
         # Standard pack: playing card → add to deck
-        gs.setdefault("deck", []).append(card)
+        lifecycle.emplace(gs, card, "deck")
         # Fire playing_card_added joker context (Hologram)
         _fire_shop_joker_context(gs, playing_card_added=True, cards=[card])
 
@@ -1399,10 +1402,10 @@ def _handle_next_round(gs: dict[str, Any]) -> dict[str, Any]:
     mutations = _fire_shop_joker_context(gs, ending_shop=True)
     _apply_shop_mutations(gs, mutations)
 
-    # Clear shop areas
-    gs["shop_cards"] = []
-    gs["shop_vouchers"] = []
-    gs["shop_boosters"] = []
+    # G.shop:remove() removes each remaining card before the CardArea dies.
+    for area in ("shop_cards", "shop_vouchers", "shop_boosters"):
+        for card in list(gs.get(area, [])):
+            lifecycle.remove(gs, card)
 
     rr = gs["round_resets"]
     blind_on_deck = gs.get("blind_on_deck", "Small")
@@ -1631,11 +1634,10 @@ def _round_won(gs: dict[str, Any]) -> None:
                         planet_key = pk
                         break
                 if planet_key:
-                    from jackdaw.engine.card import Card as _BSCard
+                    from jackdaw.engine.card_factory import create_consumable
 
-                    planet = _BSCard(center_key=planet_key)
-                    planet.ability = {"set": "Planet", "effect": ""}
-                    consumables.append(planet)
+                    planet = create_consumable(planet_key, game_state=gs)
+                    lifecycle.emplace(gs, planet, "consumables")
 
     # ------------------------------------------------------------------
     # 4. Return all cards to deck
@@ -1846,26 +1848,23 @@ def _apply_setting_blind_mutations(
             create = mut["create"]
             ctype = create.get("type", "")
             if ctype == "playing_card":
-                # Marble Joker: add Stone Card; Certificate: add card with seal
-                deck: list = gs.setdefault("deck", [])
-                from jackdaw.engine.card import Card
+                # Marble/Certificate draw a real P_CARDS front before applying
+                # the enhancement (card.lua:2580-2601 / 2462-2480).
+                from jackdaw.engine.card_factory import create_playing_card
+                from jackdaw.engine.data.enums import Rank, Suit
+                from jackdaw.engine.data.prototypes import PLAYING_CARDS
 
-                c = Card()
                 enhancement = create.get("enhancement")
-                if enhancement:
-                    # Resolve the enhancement CENTER (e.g. "m_stone") via
-                    # set_ability, matching the deck-init path (~L2058).
-                    # Hand-building {"effect": enhancement} stored the center
-                    # KEY ("m_stone") where the effect NAME ("Stone Card") was
-                    # expected, so every Marble-Joker stone card was malformed:
-                    # it scored as a normal card everywhere (all Stone logic
-                    # checks effect == "Stone Card") AND crashed
-                    # reset_round_targets (it leaked the Stone filter, then hit
-                    # the base=None a stone card carries).
-                    c.set_ability(enhancement, gs=gs)
-                if create.get("seal"):
-                    c.set_seal(gs, "Gold")  # Certificate default
-                deck.append(c)
+                front_key = "marb_fr" if enhancement == "m_stone" else "cert_fr"
+                front, _ = rng.element(PLAYING_CARDS, rng.seed(front_key))
+                c = create_playing_card(
+                    Suit(front.suit),
+                    Rank(front.rank),
+                    enhancement=enhancement or "c_base",
+                    seal="Gold" if create.get("seal") else None,
+                    game_state=gs,
+                )
+                lifecycle.emplace(gs, c, "deck")
             elif ctype in ("Joker", "Tarot", "Planet", "Spectral"):
                 # Riff-raff ('rif', Common), Cartomancer ('car'), 8 Ball
                 # ('8ba'), etc. — roll the real pool with the descriptor's
@@ -2047,31 +2046,12 @@ def _apply_consumable_result(
     # d. Copy card (Death)
     if getattr(result, "copy_card", None):
         source, target = result.copy_card
-        if hasattr(target, "copy_from"):
-            target.copy_from(source)
-        else:
-            # Manual copy: base, enhancement, edition, seal
-            if source.base and target.base:
-                target.set_base(
-                    source.card_key or "",
-                    source.base.suit.value,
-                    source.base.rank.value,
-                    gs=gs,
-                )
-            target.set_edition(gs, source.edition)
-            target.set_seal(gs, source.seal)
-            if hasattr(source, "center_key") and hasattr(target, "set_ability"):
-                target.set_ability(source.center_key, gs=gs)
+        lifecycle.copy_card(gs, source, into=target)
 
     # e. Destroy playing cards
     if getattr(result, "destroy", None):
-        deck: list = gs.get("deck", [])
-        hand: list = gs.get("hand", [])
         for destroyed in result.destroy:
-            if destroyed in hand:
-                hand.remove(destroyed)
-            if destroyed in deck:
-                deck.remove(destroyed)
+            lifecycle.remove(gs, destroyed)
 
     # f. Add seal
     if getattr(result, "add_seal", None):
@@ -2105,36 +2085,33 @@ def _apply_consumable_result(
 
     # k. Add playing cards to deck
     if getattr(result, "add_to_deck", None):
-        import copy as _copy
+        from jackdaw.engine.card_factory import create_playing_card
+        from jackdaw.engine.data.enums import Rank, Suit
 
-        from jackdaw.engine.card import Card as _Card
-        from jackdaw.engine.card import _next_sort_id
-
-        deck_list: list = gs.setdefault("deck", [])
         for card_spec in result.add_to_deck:
             # Cryptid: copy an existing card — copies are emplaced into the
             # HAND, not the draw pile (card.lua:1206-1213: copy_card +
             # G.hand:emplace), with a fresh sort_id like any new Card.
             copy_source = card_spec.get("copy_of")
             if copy_source is not None:
-                new_card = _copy.deepcopy(copy_source)
-                new_card.sort_id = _next_sort_id()
-                if gs.get("phase") == GamePhase.SELECTING_HAND:
-                    gs.setdefault("hand", []).append(new_card)
-                    _sort_hand_desc(gs.get("hand", []))
-                else:
-                    deck_list.append(new_card)
-                continue
-            new_card = _Card()
-            if "suit" in card_spec and "rank" in card_spec:
-                new_card.set_base(
-                    card_spec.get("key", ""),
-                    card_spec["suit"],
-                    card_spec["rank"],
+                new_card = lifecycle.copy_card(gs, copy_source)
+                destination = (
+                    "hand"
+                    if gs.get("phase") in {GamePhase.SELECTING_HAND, GamePhase.PACK_OPENING}
+                    else "deck"
                 )
-            if "enhancement" in card_spec:
-                new_card.set_ability(card_spec["enhancement"], gs=gs)
-            deck_list.append(new_card)
+                lifecycle.emplace(gs, new_card, destination)
+                continue
+            if "suit" in card_spec and "rank" in card_spec:
+                new_card = create_playing_card(
+                    Suit(card_spec["suit"]),
+                    Rank(card_spec["rank"]),
+                    enhancement=card_spec.get("enhancement", "c_base"),
+                    game_state=gs,
+                )
+                lifecycle.emplace(gs, new_card, "deck")
+        if gs.get("phase") in {GamePhase.SELECTING_HAND, GamePhase.PACK_OPENING}:
+            _sort_hand_desc(gs.get("hand", []))
 
     # ---- Joker effects ----
 
@@ -2178,8 +2155,6 @@ def _resolve_create_descriptors(gs: dict[str, Any], descriptors: list[dict[str, 
     consumable_limit = gs.get("consumable_slots", 2)
     jokers: list = gs.setdefault("jokers", [])
     joker_slots = gs.get("joker_slots", 5)
-    deck: list = gs.setdefault("deck", [])
-
     for desc in descriptors:
         count = desc.get("count", 1)
 
@@ -2193,20 +2168,26 @@ def _resolve_create_descriptors(gs: dict[str, Any], descriptors: list[dict[str, 
                 negative = card.edition and card.edition.get("negative")
                 if len(jokers) < joker_slots + (1 if negative else 0):
                     _gain_joker(gs, card)
+                else:
+                    lifecycle.remove(gs, card)
             elif card_set in ("Tarot", "Planet", "Spectral"):
                 if len(consumables) < consumable_limit:
-                    consumables.append(card)
+                    lifecycle.emplace(gs, card, "consumables")
+                else:
+                    lifecycle.remove(gs, card)
             elif card_set in ("Default", "Enhanced", ""):
                 # Playing card — add to hand if mid-round, otherwise deck.
                 # Matches Balatro which routes spectral-created cards to
                 # the hand area during SELECTING_HAND.
-                if gs.get("phase") == GamePhase.SELECTING_HAND:
-                    gs.setdefault("hand", []).append(card)
-                else:
-                    deck.append(card)
+                destination = (
+                    "hand"
+                    if gs.get("phase") in {GamePhase.SELECTING_HAND, GamePhase.PACK_OPENING}
+                    else "deck"
+                )
+                lifecycle.emplace(gs, card, destination)
 
-    # Re-sort hand if any cards were added during SELECTING_HAND
-    if gs.get("phase") == GamePhase.SELECTING_HAND:
+    # Re-sort hand if any cards were added to it
+    if gs.get("phase") in {GamePhase.SELECTING_HAND, GamePhase.PACK_OPENING}:
         _sort_hand_desc(gs.get("hand", []))
 
 
@@ -2260,7 +2241,7 @@ def _populate_shop(gs: dict[str, Any]) -> None:
             )
             if v_key is None:
                 continue
-            extra = create_voucher(v_key)
+            extra = create_voucher(v_key, game_state=gs)
             extra.set_cost(gs)
             gs["shop_vouchers"].append(extra)
 
@@ -2288,6 +2269,11 @@ def _reroll_shop_cards(gs: dict[str, Any]) -> None:
     rng = gs.get("rng")
     if rng is None:
         return
+
+    # Lua removes every old card before rolling replacements, making its key
+    # eligible for the new roll (button_callbacks.lua:2873-2881).
+    for old_card in list(gs.get("shop_cards", [])):
+        lifecycle.remove(gs, old_card)
 
     ante = gs.get("round_resets", {}).get("ante", 1)
     shop_joker_max: int = gs.get("shop", {}).get("joker_max", 2)
@@ -2362,13 +2348,11 @@ def _apply_shop_mutations(
                 if consumables:
                     rng = gs.get("rng")
                     if rng:
-                        import copy
-
                         seed_val = rng.seed("perkeo")
                         original, _ = rng.element(consumables, seed_val)
-                        duplicate = copy.copy(original)
+                        duplicate = lifecycle.copy_card(gs, original)
                         duplicate.set_edition(gs, {"negative": True})
-                        consumables.append(duplicate)
+                        lifecycle.emplace(gs, duplicate, "consumables")
 
 
 # ---------------------------------------------------------------------------
@@ -2385,8 +2369,9 @@ def _close_pack(gs: dict[str, Any]) -> None:
     - Fire ``new_blind_choice`` tags (deferred from skip)
     - Restore phase from ``shop_return_phase``
     """
-    # Clear pack state
-    gs["pack_cards"] = []
+    # CardArea:remove() calls Card:remove on every unpicked display card.
+    for card in list(gs.get("pack_cards", [])):
+        lifecycle.remove(gs, card)
     gs["pack_choices_remaining"] = 0
 
     # Return dealt hand cards to deck (Arcana/Spectral packs deal from deck)

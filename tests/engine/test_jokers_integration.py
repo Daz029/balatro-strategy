@@ -256,7 +256,7 @@ class TestMarbleJoker:
         """
         from jackdaw.engine.game import _apply_setting_blind_mutations
 
-        gs = {"deck": []}
+        gs = {"deck": [], "rng": PseudoRandom("MARB_FRONT")}
         _apply_setting_blind_mutations(gs, [self._MARBLE_MUT], [])
         assert len(gs["deck"]) == 1
         stone = gs["deck"][0]
@@ -270,7 +270,11 @@ class TestMarbleJoker:
         from jackdaw.engine.game import _apply_setting_blind_mutations
         from jackdaw.engine.round_lifecycle import reset_round_targets
 
-        gs = {"deck": [_card("Hearts", "5")], "current_round": {}}
+        gs = {
+            "deck": [_card("Hearts", "5")],
+            "current_round": {},
+            "rng": PseudoRandom("MARB_FRONT_RT"),
+        }
         _apply_setting_blind_mutations(gs, [self._MARBLE_MUT], [])
         # Must not raise even though a base-less stone card is in the deck.
         reset_round_targets(PseudoRandom("MARB_RT"), 1, gs)

@@ -26,6 +26,7 @@ def build_deck(
     rng: PseudoRandom,
     challenge: dict[str, Any] | None = None,
     starting_params: dict[str, Any] | None = None,
+    game_state: dict[str, Any] | None = None,
 ) -> list[Card]:
     """Build the starting deck for a run.
 
@@ -132,7 +133,11 @@ def build_deck(
     # -------------------------------------------------------------------
     cards: list[Card] = []
     for i, proto in enumerate(card_protos):
-        card = card_from_control(proto, playing_card_index=i + 1)
+        card = card_from_control(
+            proto,
+            playing_card_index=i + 1,
+            game_state=game_state,
+        )
         cards.append(card)
 
     # -------------------------------------------------------------------
