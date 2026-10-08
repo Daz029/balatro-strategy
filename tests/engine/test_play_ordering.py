@@ -193,7 +193,7 @@ class TestJokerOrderClassification:
     def test_polychrome_edition_classifies_as_xmult(self):
         j = create_joker("j_joker")  # plain +4 mult joker
         assert not joker_multiplies_at_position(j)
-        j.set_edition({"polychrome": True})
+        j.set_edition({}, {"polychrome": True})
         assert joker_multiplies_at_position(j)
 
     def test_order_matters_gate(self):

@@ -96,7 +96,7 @@ class TestPlayingCard:
 class TestEnhancedPlayingCard:
     def test_glass_card_with_gold_seal(self):
         card = _playing_card("Diamonds", "Queen", enhancement="m_glass")
-        card.set_seal("Gold")
+        card.set_seal({}, "Gold")
         result = serialize_card(card)
 
         assert result["set"] == "ENHANCED"
@@ -121,7 +121,7 @@ class TestEnhancedPlayingCard:
 class TestJoker:
     def test_basic_joker_with_foil(self):
         card = _joker("j_joker")
-        card.set_edition({"foil": True})
+        card.set_edition({}, {"foil": True})
         result = serialize_card(card)
 
         assert result["key"] == "j_joker"
@@ -135,17 +135,17 @@ class TestJoker:
 
     def test_holo_joker(self):
         card = _joker("j_joker")
-        card.set_edition({"holo": True})
+        card.set_edition({}, {"holo": True})
         assert serialize_card(card)["modifier"]["edition"] == "HOLO"
 
     def test_polychrome_joker(self):
         card = _joker("j_joker")
-        card.set_edition({"polychrome": True})
+        card.set_edition({}, {"polychrome": True})
         assert serialize_card(card)["modifier"]["edition"] == "POLYCHROME"
 
     def test_negative_joker(self):
         card = _joker("j_joker")
-        card.set_edition({"negative": True})
+        card.set_edition({}, {"negative": True})
         assert serialize_card(card)["modifier"]["edition"] == "NEGATIVE"
 
 
@@ -209,12 +209,16 @@ class TestBooster:
 class TestAllModifiers:
     def test_fully_modified_card(self):
         card = _playing_card("Hearts", "King", enhancement="m_glass")
-        card.set_edition({"polychrome": True})
-        card.set_seal("Purple")
-        card.set_eternal(True)
-        card.set_perishable(True)
-        card.set_rental(True)
-        card.set_debuff(True)
+        card.set_edition({}, {"polychrome": True})
+        card.set_seal({}, "Purple")
+        # Serialization-only fixture: Lua's set_eternal/set_perishable refuse
+        # this combination (mutually exclusive, and a playing card is not
+        # sticker-compatible), so write the fields directly.
+        card.eternal = True
+        card.perishable = True
+        card.perish_tally = 5
+        card.set_rental({}, True)
+        card.set_debuff({}, True)
 
         result = serialize_card(card)
 

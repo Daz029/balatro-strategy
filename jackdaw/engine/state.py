@@ -438,6 +438,8 @@ _CARD_AREAS = (
     "consumables",
     "played_cards_area",
     "shop_cards",
+    "shop_vouchers",
+    "shop_boosters",
     "pack_cards",
     "pack_hand",
 )
@@ -487,6 +489,11 @@ def migrate_state(gs: dict[str, Any]) -> dict[str, Any]:
             ability = getattr(card, "ability", None)
             if isinstance(ability, dict):
                 ability.pop("lucky_trigger", None)
+                for key in ("eternal", "perishable", "perish_tally", "rental"):
+                    if key in ability:
+                        setattr(card, key, ability.pop(key))
+            if area in {"jokers", "consumables"}:
+                card.added_to_deck = True
 
     from jackdaw.engine.blind import Blind
 

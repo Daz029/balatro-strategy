@@ -103,9 +103,9 @@ def create_playing_card(
     card.set_ability(enhancement, hands_played=hands_played)
     card.playing_card = playing_card_index
     if edition:
-        card.set_edition(edition)
+        card.set_edition({}, edition)
     if seal:
-        card.set_seal(seal)
+        card.set_seal({}, seal)
     return card
 
 
@@ -136,13 +136,13 @@ def create_joker(
     card = Card()
     card.set_ability(key, hands_played=hands_played)
     if edition:
-        card.set_edition(edition)
+        card.set_edition({}, edition)
     if eternal:
         card.set_eternal(True)
     if perishable:
-        card.set_perishable(True)
+        card.set_perishable({}, True)
     if rental:
-        card.set_rental(True)
+        card.set_rental({}, True)
     return card
 
 
@@ -399,12 +399,12 @@ def create_card(
         if ep_roll > _EP_ETERNAL_THRESHOLD and enable_eternals:
             card.set_eternal(True)
         elif ep_roll > _EP_PERISHABLE_THRESHOLD and enable_perishables:
-            card.set_perishable(True)
+            card.set_perishable(gs, True)
 
         # -- Rental (independent roll) --
         r_roll = rng.random(_RENTAL_KEY[area] + str(ante))
         if r_roll > _RENTAL_THRESHOLD and enable_rentals:
-            card.set_rental(True)
+            card.set_rental(gs, True)
 
         # -- Edition --
         edition = poll_edition(
@@ -412,18 +412,12 @@ def create_card(
             rng,
             rate=gs.get("edition_rate", 1.0),
         )
-        card.set_edition(edition)
+        card.set_edition(gs, edition)
 
     # ------------------------------------------------------------------
     # 4. Cost
     # ------------------------------------------------------------------
-    card.set_cost(
-        inflation=gs.get("inflation", 0),
-        discount_percent=gs.get("discount_percent", 0),
-        ante=ante,
-        booster_ante_scaling=gs.get("modifiers", {}).get("booster_ante_scaling", False),
-        has_astronomer=bool(read.find_joker(gs, "Astronomer")),
-    )
+    card.set_cost(gs)
 
     return card
 

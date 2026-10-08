@@ -44,7 +44,7 @@ _BOOSTER_KEYS: set[str] = set(CENTER_POOLS.get("Booster", []))
 
 def _joker(key: str = "j_joker", **kwargs) -> Card:
     card = create_joker(key, **kwargs)
-    card.set_cost()
+    card.set_cost({})
     return card
 
 
@@ -251,7 +251,7 @@ class TestBuyCard:
     def test_negative_edition_grants_bonus_space(self):
         card = _joker()
         card.cost = 3
-        card.set_edition({"negative": True})
+        card.set_edition({}, {"negative": True})
         shop = _shop_area()
         shop.add(card)
         dest = _joker_area(limit=1)
@@ -265,7 +265,7 @@ class TestBuyCard:
 class TestSellCard:
     def test_successful_sale_awards_dollars(self):
         card = _joker()
-        card.set_cost()
+        card.set_cost({})
         area = _joker_area()
         area.add(card)
         gs = _base_gs(dollars=0)
@@ -275,7 +275,7 @@ class TestSellCard:
 
     def test_eternal_joker_rejected(self):
         card = _joker(eternal=True)
-        card.set_cost()
+        card.set_cost({})
         area = _joker_area()
         area.add(card)
         gs = _base_gs(dollars=0)

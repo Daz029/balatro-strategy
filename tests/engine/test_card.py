@@ -334,7 +334,7 @@ class TestScoringMethods:
 
     def test_foil_edition(self):
         c = _playing_card("Hearts", "5")
-        c.set_edition({"foil": True})
+        c.set_edition({}, {"foil": True})
         ed = c.get_edition()
         assert ed is not None
         assert ed["chip_mod"] == 50
@@ -343,7 +343,7 @@ class TestScoringMethods:
 
     def test_holographic_edition(self):
         c = _playing_card("Hearts", "5")
-        c.set_edition({"holo": True})
+        c.set_edition({}, {"holo": True})
         ed = c.get_edition()
         assert ed is not None
         assert ed["mult_mod"] == 10
@@ -351,7 +351,7 @@ class TestScoringMethods:
 
     def test_polychrome_edition(self):
         c = _playing_card("Hearts", "5")
-        c.set_edition({"polychrome": True})
+        c.set_edition({}, {"polychrome": True})
         ed = c.get_edition()
         assert ed is not None
         assert ed["x_mult_mod"] == pytest.approx(1.5)
@@ -360,7 +360,7 @@ class TestScoringMethods:
 
     def test_edition_has_card_ref(self):
         c = _playing_card("Hearts", "5")
-        c.set_edition({"holo": True})
+        c.set_edition({}, {"holo": True})
         ed = c.get_edition()
         assert ed["card"] is c
 
@@ -369,7 +369,7 @@ class TestScoringMethods:
     def test_gold_seal(self):
         """Gold Seal: +$3 on score."""
         c = _playing_card("Hearts", "5")
-        c.set_seal("Gold")
+        c.set_seal({}, "Gold")
         assert c.get_p_dollars() == 3
 
     def test_gold_card_enhancement(self):
@@ -385,7 +385,7 @@ class TestScoringMethods:
 
     def test_red_seal_repetition(self):
         c = _playing_card("Hearts", "5")
-        c.set_seal("Red")
+        c.set_seal({}, "Red")
         result = c.calculate_seal(repetition=True)
         assert result is not None
         assert result["repetitions"] == 1
@@ -400,8 +400,9 @@ class TestScoringMethods:
 class TestStickers:
     def test_set_perishable_resets_tally(self):
         c = Card()
+        c.set_ability("j_joker")
         c.perish_tally = 0
-        c.set_perishable(True)
+        c.set_perishable({}, True)
         assert c.perish_tally == 5
 
 
@@ -424,7 +425,7 @@ class TestSetCost:
     def test_base_cost_no_modifiers(self):
         """j_joker: base_cost=2, no inflation/discount/edition."""
         c = self._make_joker("j_joker")
-        c.set_cost()
+        c.set_cost({})
         # floor((2 + 0 + 0.5) * 100/100) = floor(2.5) = 2
         assert c.cost == 2
 
@@ -433,7 +434,7 @@ class TestSetCost:
     def test_25_percent_discount(self):
         """Clearance Sale: 25% discount on cost=5."""
         c = self._make_joker("j_greedy_joker")
-        c.set_cost(discount_percent=25)
+        c.set_cost({"discount_percent": 25})
         # floor((5 + 0 + 0.5) * 75/100) = floor(4.125) = 4
         assert c.cost == 4
 
@@ -442,8 +443,8 @@ class TestSetCost:
     def test_foil_surcharge(self):
         """Foil edition adds +2 to cost."""
         c = self._make_joker("j_greedy_joker")
-        c.set_edition({"foil": True})
-        c.set_cost()
+        c.set_edition({}, {"foil": True})
+        c.set_cost({})
         # floor((5 + 2 + 0.5) * 100/100) = floor(7.5) = 7
         assert c.cost == 7
 
@@ -452,8 +453,8 @@ class TestSetCost:
     def test_rental_override(self):
         """Rental cards always cost 1."""
         c = self._make_joker("j_greedy_joker")
-        c.set_rental(True)
-        c.set_cost()
+        c.set_rental({}, True)
+        c.set_cost({})
         assert c.cost == 1
         assert c.sell_cost == 1  # floor(1/2) = 0, clamped to 1
 

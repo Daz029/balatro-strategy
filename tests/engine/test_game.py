@@ -376,7 +376,6 @@ class TestPackOpening:
         assert gs["phase"] == GamePhase.BLIND_SELECT
 
 
-
 class TestUseConsumable:
     def test_use_planet_in_shop(self):
         gs = _setup_shop("MERCURY_TEST")
@@ -593,7 +592,7 @@ class TestCardFlipping:
         step(gs, SkipBlind())
         step(gs, SkipBlind())
         gs["round_resets"]["blind_choices"]["Boss"] = "bl_fish"
-        step(gs, SelectBlind())
+        step(gs, SelectBlind(allow_forced_boss=True))
         # Play a hand
         gs["blind"].chips = 999999
         step(gs, PlayHand(card_indices=(0, 1, 2, 3, 4)))
@@ -624,7 +623,7 @@ class TestBossPressPlay:
         step(gs, SkipBlind())
         step(gs, SkipBlind())
         gs["round_resets"]["blind_choices"]["Boss"] = "bl_tooth"
-        step(gs, SelectBlind())
+        step(gs, SelectBlind(allow_forced_boss=True))
         dollars_before = gs["dollars"]
         gs["blind"].chips = 999999
         step(gs, PlayHand(card_indices=(0, 1, 2)))

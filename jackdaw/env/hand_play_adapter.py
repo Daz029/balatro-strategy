@@ -123,6 +123,7 @@ class HandPlayConfig:
     joker_count_bands: tuple[JokerCountBand, ...] | None = None
     randomize_joker_state: bool = True
     randomize_boss_history: bool = True
+    allow_forced_boss: bool = False
     boss_history_hands_played_range: tuple[int, int] = (0, 3)
     boss_history_best_hand_weight: float = 0.05
     # Flat hand-size tail (off by default): with probability
@@ -508,7 +509,10 @@ class HandPlayAdapter:
             gs["hand_size"] = gs.get("hand_size", 0) + sampler.randint(*cfg.hand_size_delta_range)
 
         self._gs = gs
-        engine_step(self._gs, SelectBlind())
+        engine_step(
+            self._gs,
+            SelectBlind(allow_forced_boss=cfg.allow_forced_boss),
+        )
         _randomize_boss_history(self._gs, cfg, sampler)
         return snapshot(self._gs)
 

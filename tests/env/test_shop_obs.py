@@ -74,7 +74,7 @@ class TestS1JokerWidening:
         try:
             jokers = [create_joker("j_joker") for _ in range(12)]
             for j in jokers[8:]:
-                j.set_edition({"negative": True})  # bypass joker_slots
+                j.set_edition({}, {"negative": True})  # bypass joker_slots
             gs["jokers"] = jokers
             obs = build_shop_observation(gs, s1_schema=True)
             assert obs["joker_mask"].sum() == 12

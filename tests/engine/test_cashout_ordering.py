@@ -187,7 +187,7 @@ class TestRentalChargedOnceBeforeInterest:
     def test_single_charge_interest_on_post_rental_balance(self):
         gs = _init_gs()
         joker = create_joker("j_joker")
-        joker.set_rental(True)
+        joker.set_rental({}, True)
         gs["jokers"].append(joker)
         _beat_blind_at(gs, dollars=20)
 
@@ -204,8 +204,8 @@ class TestRentalChargedOnceBeforeInterest:
         # Rental is a sticker, not an ability: no debuff gate in vanilla.
         gs = _init_gs()
         joker = create_joker("j_joker")
-        joker.set_rental(True)
-        joker.set_debuff(True)
+        joker.set_rental({}, True)
+        joker.set_debuff({}, True)
         gs["jokers"].append(joker)
         _beat_blind_at(gs, dollars=0)
         assert gs["round_earnings"].rental_cost == 3
@@ -239,7 +239,7 @@ class TestHeldGoldCardMoney:
 
     def test_held_gold_seal_pays_nothing(self):
         sealed = create_playing_card(Suit.HEARTS, Rank.KING)
-        sealed.set_seal("Gold")
+        sealed.set_seal({}, "Gold")
         gs = self._win_with_held_card(sealed, dollars=2)
         assert gs["dollars"] == 2
         assert gs["round_earnings"].interest == 0
@@ -256,7 +256,7 @@ class TestHeldGoldCardMoney:
             create_playing_card(Suit.DIAMONDS, Rank.FOUR),
             create_playing_card(Suit.SPADES, Rank.SIX),
         ]
-        played[seal_index].set_seal("Gold")
+        played[seal_index].set_seal({}, "Gold")
         gs["hand"][0:5] = played
         gs["blind"].chips = 1
         gs["dollars"] = 2  # +$3 seal -> 5, crossing the bracket

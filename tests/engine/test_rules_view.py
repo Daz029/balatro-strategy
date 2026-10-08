@@ -74,7 +74,7 @@ def test_goad_debuffs_clubs_with_smeared():
     club = _card(Suit.CLUBS, Rank.TWO)
     smeared = create_joker("j_smeared")
 
-    Blind.create("bl_goad", ante=1).debuff_card(club, rules_for([smeared]))
+    Blind.create("bl_goad", ante=1).debuff_card(club, rules_for([smeared]), {})
 
     assert club.debuff is True
 

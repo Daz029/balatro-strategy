@@ -163,7 +163,7 @@ class TestDebuffCardSuitBlinds:
         reset_sort_id_counter()
         b = Blind.create("bl_goad", ante=1)
         c = _card("Spades", "5")
-        b.debuff_card(c, Rules())
+        b.debuff_card(c, Rules(), {})
         assert c.debuff is True
 
 
@@ -174,7 +174,7 @@ class TestDebuffCardPlant:
         reset_sort_id_counter()
         b = Blind.create("bl_plant", ante=1)
         c = _card("Hearts", "King")
-        b.debuff_card(c, Rules())
+        b.debuff_card(c, Rules(), {})
         assert c.debuff is True
 
     def test_with_pareidolia(self):
@@ -182,7 +182,7 @@ class TestDebuffCardPlant:
         reset_sort_id_counter()
         b = Blind.create("bl_plant", ante=1)
         c = _card("Hearts", "5")
-        b.debuff_card(c, Rules(pareidolia=True))
+        b.debuff_card(c, Rules(pareidolia=True), {})
         assert c.debuff is True
 
 
@@ -194,7 +194,7 @@ class TestDebuffCardPillar:
         b = Blind.create("bl_pillar", ante=1)
         c = _card("Hearts", "5")
         c.ability["played_this_ante"] = True
-        b.debuff_card(c, Rules())
+        b.debuff_card(c, Rules(), {})
         assert c.debuff is True
 
 
@@ -205,7 +205,7 @@ class TestDebuffCardVerdantLeaf:
         reset_sort_id_counter()
         b = Blind.create("bl_final_leaf", ante=1)
         c = _card("Hearts", "5")
-        b.debuff_card(c, Rules())
+        b.debuff_card(c, Rules(), {})
         assert c.debuff is True
 
 
@@ -217,7 +217,7 @@ class TestDebuffCardDisabled:
         b = Blind.create("bl_goad", ante=1)
         b.disabled = True
         c = _card("Spades", "5")
-        b.debuff_card(c, Rules())
+        b.debuff_card(c, Rules(), {})
         assert c.debuff is False
 
 
@@ -229,7 +229,7 @@ class TestDebuffCardClearsDebuff:
         b = Blind.create("bl_goad", ante=1)
         c = _card("Hearts", "5")
         c.debuff = True  # previously debuffed
-        b.debuff_card(c, Rules())
+        b.debuff_card(c, Rules(), {})
         assert c.debuff is False  # Hearts not debuffed by The Goad
 
 
@@ -339,7 +339,7 @@ class TestDrawnToHandBell:
         b = Blind.create("bl_final_bell", ante=1)
         hand = [_card("Hearts", "5"), _card("Spades", "King"), _card("Clubs", "Ace")]
         rng = PseudoRandom("TESTSEED")
-        result = b.drawn_to_hand(hand, rng=rng)
+        result = b.drawn_to_hand(hand, rng=rng, gs={})
         assert "forced_card_index" in result
         assert 0 <= result["forced_card_index"] < len(hand)
 
@@ -354,7 +354,7 @@ class TestDrawnToHandCrimsonHeart:
 
         jokers = [create_joker("j_joker"), create_joker("j_greedy_joker")]
         rng = PseudoRandom("TESTSEED")
-        result = b.drawn_to_hand([], joker_cards=jokers, rng=rng)
+        result = b.drawn_to_hand([], joker_cards=jokers, rng=rng, gs={})
         assert "debuffed_joker_index" in result
         # Exactly one joker should be debuffed
         debuffed = [j for j in jokers if j.debuff]
@@ -382,16 +382,16 @@ class TestStayFlipped:
 class TestDisable:
     def test_sets_disabled(self):
         b = Blind.create("bl_hook", ante=1)
-        b.disable()
+        b.disable({})
         assert b.disabled is True
 
     def test_clears_card_debuffs(self):
         reset_sort_id_counter()
         b = Blind.create("bl_goad", ante=1)
         c = _card("Spades", "5")
-        b.debuff_card(c, Rules())
+        b.debuff_card(c, Rules(), {})
         assert c.debuff is True
-        b.disable(playing_cards=[c])
+        b.disable({"deck": [c]})
         assert c.debuff is False
 
 

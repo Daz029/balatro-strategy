@@ -397,7 +397,7 @@ def create_shop_slot_card(
         fired = fire_tag_context(gs, "store_joker_modify", first_only=True, rng=rng)
         if fired:
             _entry, result = fired[0]
-            card.set_edition({result.force_edition: True})
+            card.set_edition(gs, {result.force_edition: True})
             card.cost = 0
 
     return card
@@ -475,11 +475,7 @@ def populate_shop(
     voucher_key: str | None = gs.get("current_round", {}).get("voucher")
     if voucher_key:
         voucher = create_voucher(voucher_key)
-        voucher.set_cost(
-            inflation=gs.get("inflation", 0),
-            discount_percent=gs.get("discount_percent", 0),
-            ante=ante,
-        )
+        voucher.set_cost(gs)
 
     # -- 3. Boosters (always exactly 2 slots) --
     boosters: list[_Card] = []
@@ -491,13 +487,7 @@ def populate_shop(
             gs[_FIRST_SHOP_BUFFOON_KEY] = True
         pack_card = _Card()
         pack_card.set_ability(pack_key)
-        pack_card.set_cost(
-            inflation=gs.get("inflation", 0),
-            discount_percent=gs.get("discount_percent", 0),
-            ante=ante,
-            booster_ante_scaling=gs.get("modifiers", {}).get("booster_ante_scaling", False),
-            has_astronomer=bool(read.find_joker(gs, "Astronomer")),
-        )
+        pack_card.set_cost(gs)
         boosters.append(pack_card)
 
     return {"jokers": jokers, "voucher": voucher, "boosters": boosters}
@@ -596,8 +586,8 @@ def buy_card(
        ``calculate_joker({playing_card_added=True, cards=[card]})``.
     7. **Deduct cost** — ``game_state['dollars'] -= card.cost``.
     8. **Inflation** — if ``game_state['modifiers']['inflation']`` is True,
-       increment ``game_state['inflation']`` and call
-       ``card.set_cost(inflation=…)`` on every card that exists
+       increment ``game_state['inflation']`` and call ``card.set_cost(game_state)``
+       on every card that exists
        (``read.all_cards``; Lua iterates ``G.I.CARD``).
     9. **Track** — ``game_state['cards_purchased'] += 1`` and, for Jokers,
        ``game_state['used_jokers'][card.center_key] = True``.
@@ -642,11 +632,9 @@ def buy_card(
     # -- 3. Remove from shop --
     from_area.remove(card)
 
-    # -- 4. Passive add_to_deck effects --
-    card.add_to_deck(game_state)
-
-    # -- 5. Place in destination --
+    # -- 4-5. Place first so state-owning setters can identify its area. --
     to_area.add(card)
+    card.add_to_deck(game_state)
 
     # -- 6. Playing-card bookkeeping --
     if card.ability.get("set") in _PLAYING_CARD_SETS:
@@ -670,18 +658,9 @@ def buy_card(
     modifiers = game_state.get("modifiers", {})
     if modifiers.get("inflation"):
         game_state["inflation"] = game_state.get("inflation", 0) + 1
-        inflation = game_state["inflation"]
-        discount = game_state.get("discount_percent", 0)
-        ante = game_state.get("round_resets", {}).get("ante", 1)
         for shop_card in read.all_cards(game_state):
             if hasattr(shop_card, "set_cost"):
-                shop_card.set_cost(
-                    inflation=inflation,
-                    discount_percent=discount,
-                    ante=ante,
-                    booster_ante_scaling=modifiers.get("booster_ante_scaling", False),
-                    has_astronomer=bool(read.find_joker(game_state, "Astronomer")),
-                )
+                shop_card.set_cost(game_state)
 
     # -- 9. Track --
     game_state["cards_purchased"] = game_state.get("cards_purchased", 0) + 1
@@ -759,15 +738,13 @@ def sell_card(
                 JokerContext(selling_card=True, card=card, game=game_view),
             )
 
-    # -- 4. Reverse passive effects --
+    # Remove first so Astronomer repricing sees the post-sale owned set.
+    from_area.remove(card)
     card.remove_from_deck(game_state)
 
     # -- 5. Award money --
     dollars_gained = card.sell_cost
     game_state["dollars"] = game_state.get("dollars", 0) + dollars_gained
-
-    # -- 6. Remove from area --
-    from_area.remove(card)
 
     return {"ok": True, "dollars_gained": dollars_gained}
 

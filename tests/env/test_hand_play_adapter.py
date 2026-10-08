@@ -375,6 +375,7 @@ def _force_boss(monkeypatch, boss_key: str) -> None:
 
 def _reset_boss(monkeypatch, boss_key: str, cfg: HandPlayConfig, seed: str = SEED):
     _force_boss(monkeypatch, boss_key)
+    cfg.allow_forced_boss = True
     adapter = HandPlayAdapter(cfg)
     adapter.reset(BACK, STAKE, seed)
     return adapter

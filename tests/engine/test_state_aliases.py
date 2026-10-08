@@ -182,6 +182,7 @@ class TestC15ChallengeModifierAliases:
     def test_booster_ante_scaling_is_read_from_modifiers(self):
         gs = init_game_object()
         gs["modifiers"]["booster_ante_scaling"] = True
+        gs["round_resets"]["ante"] = 3
 
         booster = create_card(
             "Booster",

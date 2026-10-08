@@ -64,7 +64,7 @@ def _run_pair_aces_basic():
 def _run_three_kings_foil():
     reset_sort_id_counter()
     k1 = _card("Hearts", "King")
-    k1.set_edition({"foil": True})
+    k1.set_edition({}, {"foil": True})
     played = [
         k1,
         _card("Spades", "King"),
@@ -121,7 +121,7 @@ def _run_full_house_steel_held():
 def _run_pair_aces_red_seal():
     reset_sort_id_counter()
     c = _card("Hearts", "Ace")
-    c.set_seal("Red")
+    c.set_seal({}, "Red")
     played = [c, _card("Spades", "Ace")]
     return score_hand_base(
         played,
@@ -294,7 +294,7 @@ def _run_foil_joker():
     reset_sort_id_counter()
     played = [_card("Hearts", "Ace"), _card("Spades", "Ace")]
     j = _joker("j_joker", mult=4)
-    j.set_edition({"foil": True})
+    j.set_edition({}, {"foil": True})
     return score_hand(
         played,
         [],
@@ -376,7 +376,7 @@ def _run_sock_buskin_3_kings():
 def _run_red_seal_dusk_last_hand():
     reset_sort_id_counter()
     red_ace = _card("Hearts", "Ace")
-    red_ace.set_seal("Red")
+    red_ace.set_seal({}, "Red")
     j = _joker("j_dusk", extra=1)
     return score_hand(
         [red_ace, _card("Spades", "Ace")],

@@ -55,7 +55,7 @@ def _predeal_boss_blob() -> bytes:
     gs["blind_on_deck"] = "Boss"
     joker = create_joker("j_green_joker")
     joker.ability["mult"] = 17
-    joker.set_edition({"foil": True})
+    joker.set_edition({}, {"foil": True})
     joker.eternal = True
     joker.perishable = True
     joker.perish_tally = 2

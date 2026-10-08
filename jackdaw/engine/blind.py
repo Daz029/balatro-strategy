@@ -12,9 +12,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from jackdaw.engine import read
 from jackdaw.engine.data.blind_scaling import get_blind_amount
 from jackdaw.engine.data.prototypes import BLINDS
-from jackdaw.engine.read import Rules, rules_for
+from jackdaw.engine.read import Rules
 
 
 @dataclass
@@ -122,7 +123,8 @@ class Blind:
     def debuff_card(
         self,
         card: Any,
-        rules: Rules,
+        rules: Rules | None,
+        gs: dict[str, Any],
         *,
         is_joker_area: bool = False,
     ) -> None:
@@ -139,6 +141,9 @@ class Blind:
             is_joker_area: If True, the card is in the joker area (not a
                 playing card).  Most debuffs only apply to playing cards.
         """
+        rules = rules or read.rules(gs)
+        is_joker_area = is_joker_area or read.area_of(gs, card) == "jokers"
+
         # Check prototype-driven debuffs (suit, face, pillar, value, nominal)
         # Note: in Lua, empty table {} is truthy.  All boss blinds have a
         # debuff table (even if empty), so this block runs for all bosses.
@@ -150,31 +155,31 @@ class Blind:
             # The Head (Hearts), The Window (Diamonds)
             if "suit" in cfg:
                 if card.is_suit(cfg["suit"], rules, bypass_debuff=True):
-                    card.set_debuff(True)
+                    card.set_debuff(gs, True)
                     return
 
             # Face card debuff: The Plant
             if cfg.get("is_face") == "face":
                 if card.is_face(rules, from_boss=True):
-                    card.set_debuff(True)
+                    card.set_debuff(gs, True)
                     return
 
             # The Pillar: debuffs cards played in previous hands this ante
             if self.name == "The Pillar":
                 if card.ability.get("played_this_ante"):
-                    card.set_debuff(True)
+                    card.set_debuff(gs, True)
                     return
 
             # Value-based debuff (not used by vanilla blinds, but supported)
             if "value" in cfg and card.base is not None:
                 if cfg["value"] == card.base.rank.value:
-                    card.set_debuff(True)
+                    card.set_debuff(gs, True)
                     return
 
             # Nominal-based debuff (not used by vanilla blinds, but supported)
             if "nominal" in cfg and card.base is not None:
                 if cfg["nominal"] == card.base.nominal:
-                    card.set_debuff(True)
+                    card.set_debuff(gs, True)
                     return
 
         # Crimson Heart: debuffs a random joker (handled elsewhere, not here)
@@ -183,11 +188,17 @@ class Blind:
 
         # Verdant Leaf: debuffs ALL non-joker cards unconditionally
         if self.name == "Verdant Leaf" and not self.disabled and not is_joker_area:
-            card.set_debuff(True)
+            card.set_debuff(gs, True)
             return
 
         # No debuff applies
-        card.set_debuff(False)
+        card.set_debuff(gs, False)
+
+    def refresh_debuffs(self, gs: dict[str, Any]) -> None:
+        """Re-run blind debuffs over playing cards only (set_blind reset path)."""
+        active_rules = read.rules(gs)
+        for card in read.playing_cards(gs):
+            self.debuff_card(card, active_rules, gs)
 
     def debuff_hand(
         self,
@@ -357,6 +368,8 @@ class Blind:
         hand_cards: list[Any],
         joker_cards: list[Any] | None = None,
         rng: Any | None = None,
+        *,
+        gs: dict[str, Any],
     ) -> dict[str, Any]:
         """Boss effect when cards are drawn to hand.
 
@@ -387,13 +400,13 @@ class Blind:
             for i, j in enumerate(joker_cards):
                 if not j.debuff or len(joker_cards) < 2:
                     eligible.append(i)
-                j.set_debuff(False)
+                j.set_debuff(gs, False)
             if eligible:
                 _, idx = rng.element(
                     {i: i for i in eligible},
                     rng.seed("crimson_heart"),
                 )
-                joker_cards[idx].set_debuff(True)
+                joker_cards[idx].set_debuff(gs, True)
                 result["debuffed_joker_index"] = idx
 
         return result
@@ -435,53 +448,58 @@ class Blind:
 
         return False
 
-    def disable(
-        self,
-        playing_cards: list[Any] | None = None,
-        joker_cards: list[Any] | None = None,
-    ) -> dict[str, Any]:
+    def disable(self, gs: dict[str, Any]) -> None:
         """Disable this boss blind's effects.
 
         Matches ``Blind:disable`` (blind.lua:356-415).
         Called by Chicot joker (on boss set) or Luchador (when sold).
 
-        Returns side-effect descriptor:
-            ``restore_discards``: discards to restore (The Water)
-            ``restore_hands``: hands to restore (The Needle)
-            ``restore_hand_size``: hand size change (The Manacle: +1)
-            ``halve_chips``: True if chips halved (The Wall, Violet Vessel)
-            ``clear_forced``: True if forced_selection cleared (Cerulean Bell)
+        Mutates the run directly, matching Lua's state effects.
         """
         self.disabled = True
-        result: dict[str, Any] = {}
+
+        for joker in gs.get("jokers", []):
+            if joker.facing == "back":
+                joker.facing = "front"
 
         if self.name == "The Water" and self.discards_sub is not None:
-            result["restore_discards"] = self.discards_sub
+            cr = gs.setdefault("current_round", {})
+            cr["discards_left"] = cr.get("discards_left", 0) + self.discards_sub
+
+        if self.name in {"The Wheel", "The House", "The Mark", "The Fish"}:
+            for card in gs.get("hand", []):
+                if card.facing == "back":
+                    card.facing = "front"
+            for card in read.playing_cards(gs):
+                card.ability.pop("wheel_flipped", None)
 
         if self.name == "The Needle" and self.hands_sub is not None:
-            result["restore_hands"] = self.hands_sub
+            cr = gs.setdefault("current_round", {})
+            cr["hands_left"] = cr.get("hands_left", 0) + self.hands_sub
 
         if self.name == "The Wall":
-            self.chips = int(self.chips / 2)
-            result["halve_chips"] = True
+            self.chips = self.chips / 2
 
         if self.name == "Violet Vessel":
-            self.chips = int(self.chips / 3)
-            result["halve_chips"] = True
+            self.chips = self.chips / 3
 
         if self.name == "Cerulean Bell":
-            result["clear_forced"] = True
+            for card in read.playing_cards(gs):
+                card.ability.pop("forced_selection", None)
 
         if self.name == "The Manacle":
-            result["restore_hand_size"] = 1
+            gs["hand_size"] = gs.get("hand_size", 0) + 1
+            from jackdaw.engine.game import _draw_hand
 
-        # Re-debuff all cards (clears debuffs since disabled=True)
-        rules = rules_for(joker_cards or [])
-        for cards in [playing_cards or [], joker_cards or []]:
+            _draw_hand(gs, count=1)
+
+        # Re-debuff all cards (expired perishables remain debuffed in setter).
+        rules = read.rules(gs)
+        for cards in [read.playing_cards(gs), gs.get("jokers", [])]:
             for card in cards:
-                self.debuff_card(card, rules)
+                self.debuff_card(card, rules, gs)
 
-        return result
+        # TODO(phase5, C08): queue NEW_ROUND when disabling beats the boss.
 
     def get_type(self) -> str:
         """Return blind type string: ``'Small'``, ``'Big'``, or ``'Boss'``."""

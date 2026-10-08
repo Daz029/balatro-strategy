@@ -185,7 +185,7 @@ class TestPackRowLegality:
 
     def test_negative_joker_bypasses_slots(self):
         card = create_joker("j_joker")
-        card.set_edition({"negative": True})
+        card.set_edition({}, {"negative": True})
         assert pack_row_legal(card, self._gs(5))
 
     def test_targeted_tarot_needs_hand_cards(self):
@@ -206,7 +206,7 @@ class TestPackRowLegality:
         aura = create_consumable("c_aura")
         plain = create_playing_card(Suit.HEARTS, Rank.ACE)
         foiled = create_playing_card(Suit.SPADES, Rank.KING)
-        foiled.set_edition({"foil": True})
+        foiled.set_edition({}, {"foil": True})
         assert not pack_row_legal(aura, self._gs(0, hand=[foiled]))
         assert pack_row_legal(aura, self._gs(0, hand=[foiled, plain]))
 
@@ -218,7 +218,7 @@ class TestAuraTargetMask:
         gs = env._adapter.raw_state
         plain = create_playing_card(Suit.HEARTS, Rank.ACE)
         foiled = create_playing_card(Suit.SPADES, Rank.KING)
-        foiled.set_edition({"foil": True})
+        foiled.set_edition({}, {"foil": True})
         gs["phase"] = GamePhase.PACK_OPENING
         gs["pack_cards"] = [create_consumable("c_aura")]
         gs["pack_choices_remaining"] = 1

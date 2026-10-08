@@ -162,18 +162,4 @@ def _change_suit(card: Card, new_suit: Suit) -> None:
 
     Matches ``Card:change_suit`` (card.lua:547).
     """
-    if card.base is None:
-        return
-
-    # Suit nominal values
-    suit_nominals = {
-        Suit.DIAMONDS: (0.01, 0.001),
-        Suit.CLUBS: (0.02, 0.002),
-        Suit.HEARTS: (0.03, 0.003),
-        Suit.SPADES: (0.04, 0.004),
-    }
-
-    card.base.suit = new_suit
-    nom, nom_orig = suit_nominals[new_suit]
-    card.base.suit_nominal = nom
-    card.base.suit_nominal_original = nom_orig
+    card.change_suit(new_suit.value)

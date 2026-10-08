@@ -227,18 +227,18 @@ def _gen_standard(rng: PseudoRandom, ante: int, gs: dict) -> Card:
         no_neg=True,
     )
     if edition:
-        card.set_edition(edition)
+        card.set_edition(gs, edition)
 
     # Seal
     if rng.random("stdseal" + str(ante)) > 0.8:
         seal_roll = rng.random("stdsealtype" + str(ante))
         if seal_roll > 0.75:
-            card.set_seal("Red")
+            card.set_seal(gs, "Red")
         elif seal_roll > 0.5:
-            card.set_seal("Blue")
+            card.set_seal(gs, "Blue")
         elif seal_roll > 0.25:
-            card.set_seal("Gold")
+            card.set_seal(gs, "Gold")
         else:
-            card.set_seal("Purple")
+            card.set_seal(gs, "Purple")
 
     return card

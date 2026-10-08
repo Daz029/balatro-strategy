@@ -1016,7 +1016,7 @@ class TestAdditiveRetriggers:
         Normal King: 10 chips x 1 = 10.
         Total: 10 + 30 + 10 = 50. Score: 50 x 2 = 100."""
         k1 = _card("Hearts", "King")
-        k1.set_seal("Red")
+        k1.set_seal({}, "Red")
         k2 = _card("Spades", "King")
         played = [k1, k2]
         j = _joker("j_sock_and_buskin", extra=1)

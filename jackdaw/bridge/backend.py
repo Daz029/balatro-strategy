@@ -248,22 +248,12 @@ class SimBackend:
                     rate=self._gs.get("edition_rate", 1.0),
                 )
                 if edition is None:
-                    card.set_edition(polled)
-            card.set_cost()
+                    card.set_edition(self._gs, polled)
+            card.set_cost(self._gs)
             self._gs["jokers"].append(card)
             # Apply passive effects (hand_size, discards, joker_slots, etc.)
             old_hand_size = self._gs.get("hand_size", 8)
             card.add_to_deck(self._gs)
-            # Also update current round counters for mid-round adds.
-            # Only discards are adjusted immediately — extra discards are
-            # usable in the current round.  Hand count changes (h_plays)
-            # take effect on future rounds via round_resets (already set
-            # by add_to_deck), matching balatrobot behaviour.
-            cr = self._gs.get("current_round")
-            if cr is not None:
-                d_size = card.ability.get("d_size", 0)
-                if d_size > 0:
-                    cr["discards_left"] = cr.get("discards_left", 0) + d_size
             # If hand_size increased mid-round, draw cards to fill the new
             # size — matches balatrobot which immediately fills on add.
             if self._gs.get("hand_size", 8) > old_hand_size and phase == GamePhase.SELECTING_HAND:

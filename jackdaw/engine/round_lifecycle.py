@@ -121,7 +121,7 @@ def process_round_end_cards(
                 if tally == 1:
                     # Hits zero — permanently debuff
                     _set_perish_tally(joker, 0)
-                    joker.debuff = True
+                    joker.set_debuff(game_state, True)
                     result.perished.append(joker)
                 else:
                     _set_perish_tally(joker, tally - 1)
@@ -130,46 +130,24 @@ def process_round_end_cards(
 
 
 # ---------------------------------------------------------------------------
-# Card field accessors — handle both attribute and dict-based ability
+# Card field accessors
 # ---------------------------------------------------------------------------
-# The Card dataclass stores perishable/rental as top-level fields AND
-# historically some code stores them in card.ability dict (matching Lua's
-# self.ability.perishable).  We check both for robustness.
-
-
 def is_rental(card: Card) -> bool:
     """Vanilla ``calculate_rental`` has no debuff gate — rental is a
     sticker, not an ability, so debuffed rentals still charge. Shared with
     ``economy.calculate_round_earnings`` so the two can't drift."""
-    if getattr(card, "rental", False):
-        return True
-    ability = getattr(card, "ability", None)
-    if isinstance(ability, dict):
-        return bool(ability.get("rental"))
-    return False
+    return bool(card.rental)
 
 
 def _is_perishable(card: Card) -> bool:
-    if getattr(card, "perishable", False):
-        return True
-    ability = getattr(card, "ability", None)
-    if isinstance(ability, dict):
-        return bool(ability.get("perishable"))
-    return False
+    return bool(card.perishable)
 
 
 def _get_perish_tally(card: Card) -> int:
-    # Prefer card.ability.perish_tally (matches Lua) then card.perish_tally
-    ability = getattr(card, "ability", None)
-    if isinstance(ability, dict) and "perish_tally" in ability:
-        return ability["perish_tally"]
-    return getattr(card, "perish_tally", 0)
+    return card.perish_tally
 
 
 def _set_perish_tally(card: Card, value: int) -> None:
-    # Update both locations for consistency
-    if isinstance(getattr(card, "ability", None), dict):
-        card.ability["perish_tally"] = value
     card.perish_tally = value
 
 

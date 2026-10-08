@@ -48,7 +48,7 @@ def _joker(key: str, **ability_kw) -> Card:
 def _rental_joker() -> Card:
     """A rental joker (costs $3/round)."""
     j = _joker("j_spare_trousers")
-    j.ability["rental"] = True
+    j.rental = True
     return j
 
 
@@ -173,11 +173,6 @@ def _lifecycle_joker(
     c.rental = rental
     c.eternal = eternal
     c.debuff = debuff
-    if perishable:
-        c.ability["perishable"] = True
-        c.ability["perish_tally"] = perish_tally
-    if rental:
-        c.ability["rental"] = True
     return c
 
 
@@ -197,7 +192,7 @@ class TestPerishableCountdown:
         j = _lifecycle_joker(perishable=True, perish_tally=1)
         result = process_round_end_cards([j], _lifecycle_gs())
         assert j.perish_tally == 0
-        assert j.ability["perish_tally"] == 0
+        assert j.perish_tally == 0
         assert j.debuff is True
         assert result.perished == [j]
 

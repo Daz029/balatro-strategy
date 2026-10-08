@@ -131,8 +131,8 @@ def _apply_copy_card(source: Card, target: Card) -> None:
     if source.base is not None and target.base is not None:
         target.set_base(source.card_key or "", source.base.suit.value, source.base.rank.value)
     target.enhance(source.center_key)
-    target.set_edition(source.edition)
-    target.set_seal(source.seal)
+    target.set_edition({}, source.edition)
+    target.set_seal({}, source.seal)
 
 
 # ============================================================================
@@ -618,7 +618,7 @@ class TestWheelOfFortuneIntegration:
                 game_state={"probabilities": {"normal": 1}},
             ),
         )
-        j.set_edition(result.add_edition["edition"])
+        j.set_edition({}, result.add_edition["edition"])
         assert j.edition is not None and j.edition.get("foil") is True
 
         ace = _c("S", "A")
@@ -647,7 +647,7 @@ class TestClearanceSaleIntegration:
 
         j = Card()
         j.set_ability("j_greedy_joker")
-        j.set_cost(discount_percent=game_state["discount_percent"])
+        j.set_cost(game_state)
         assert j.cost == 4
 
 
@@ -670,7 +670,8 @@ class TestFullRoundEarnings:
 
         rental = Card()
         rental.center_key = "j_spare_trousers"
-        rental.ability = {"name": "j_spare_trousers", "set": "Joker", "rental": True}
+        rental.ability = {"name": "j_spare_trousers", "set": "Joker"}
+        rental.rental = True
         rental.sell_cost = 1
 
         return [golden, cloud9, rental]

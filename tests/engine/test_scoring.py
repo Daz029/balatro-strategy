@@ -139,7 +139,7 @@ class TestEditions:
     def test_foil(self):
         """Foil: +50 chips from edition."""
         c = _card("Hearts", "Ace")
-        c.set_edition({"foil": True})
+        c.set_edition({}, {"foil": True})
         played = [c, _card("Spades", "Ace")]
         r = score_hand_base(played, [], HandLevels(), _small_blind(), PseudoRandom("T"))
         assert r.chips == 82.0  # 32 + 50
@@ -148,7 +148,7 @@ class TestEditions:
     def test_holo(self):
         """Holo: +10 mult from edition."""
         c = _card("Hearts", "Ace")
-        c.set_edition({"holo": True})
+        c.set_edition({}, {"holo": True})
         played = [c, _card("Spades", "Ace")]
         r = score_hand_base(played, [], HandLevels(), _small_blind(), PseudoRandom("T"))
         assert r.mult == 12.0  # 2 + 10
@@ -156,7 +156,7 @@ class TestEditions:
     def test_polychrome(self):
         """Polychrome: x1.5 mult from edition."""
         c = _card("Hearts", "Ace")
-        c.set_edition({"polychrome": True})
+        c.set_edition({}, {"polychrome": True})
         played = [c, _card("Spades", "Ace")]
         r = score_hand_base(played, [], HandLevels(), _small_blind(), PseudoRandom("T"))
         assert r.mult == pytest.approx(3.0)  # 2 × 1.5
@@ -171,7 +171,7 @@ class TestRedSealRetrigger:
     def test_effects_double(self):
         """Red Seal: card evaluated twice — chips from both reps."""
         c = _card("Hearts", "Ace")
-        c.set_seal("Red")
+        c.set_seal({}, "Red")
         played = [c, _card("Spades", "Ace")]
         r = score_hand_base(played, [], HandLevels(), _small_blind(), PseudoRandom("T"))
         # 10 + 11×2 + 11 = 43 chips, 2 mult
@@ -262,7 +262,7 @@ class TestJokerEdition:
         """Foil joker: +50 chips BEFORE joker effect."""
         played = [_card("Hearts", "Ace"), _card("Spades", "Ace")]
         j = _joker("j_joker", mult=4)
-        j.set_edition({"foil": True})
+        j.set_edition({}, {"foil": True})
         r = score_hand(
             played,
             [],
@@ -279,7 +279,7 @@ class TestJokerEdition:
         """Holo joker: +10 mult BEFORE joker effect."""
         played = [_card("Hearts", "Ace"), _card("Spades", "Ace")]
         j = _joker("j_joker", mult=4)
-        j.set_edition({"holo": True})
+        j.set_edition({}, {"holo": True})
         r = score_hand(
             played,
             [],
@@ -295,7 +295,7 @@ class TestJokerEdition:
         """Polychrome joker: x1.5 AFTER joker effect."""
         played = [_card("Hearts", "Ace"), _card("Spades", "Ace")]
         j = _joker("j_joker", mult=4)
-        j.set_edition({"polychrome": True})
+        j.set_edition({}, {"polychrome": True})
         r = score_hand(
             played,
             [],

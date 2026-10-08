@@ -63,8 +63,8 @@ def step(game_state: dict[str, Any], action: Action) -> dict[str, Any]:
     if the action is not valid in the current phase.
     """
     match action:
-        case SelectBlind():
-            return _handle_select_blind(game_state)
+        case SelectBlind(allow_forced_boss=allow_forced_boss):
+            return _handle_select_blind(game_state, allow_forced_boss=allow_forced_boss)
         case SkipBlind():
             return _handle_skip_blind(game_state)
         case PlayHand(card_indices=indices):
@@ -134,8 +134,8 @@ def _gain_joker(gs: dict[str, Any], card: Any) -> bool:
     if any(owned is card for owned in jokers):
         return False
 
-    card.add_to_deck(gs)
     jokers.append(card)
+    card.add_to_deck(gs)
     gs.setdefault("used_jokers", {})[card.center_key] = True
     return True
 
@@ -145,8 +145,8 @@ def _lose_joker(gs: dict[str, Any], card: Any) -> bool:
     jokers: list = gs.get("jokers", [])
     for idx, owned in enumerate(jokers):
         if owned is card:
-            owned.remove_from_deck(gs)
             jokers.pop(idx)
+            owned.remove_from_deck(gs)
             return True
     return False
 
@@ -156,7 +156,7 @@ def _lose_joker(gs: dict[str, Any], card: Any) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _handle_select_blind(gs: dict[str, Any]) -> dict[str, Any]:
+def _handle_select_blind(gs: dict[str, Any], *, allow_forced_boss: bool = False) -> dict[str, Any]:
     """Accept the current blind and start the round.
 
     Full sequence matching ``game.lua`` select_blind → ``blind.lua``
@@ -185,6 +185,18 @@ def _handle_select_blind(gs: dict[str, Any]) -> dict[str, Any]:
     # 1. Create the active Blind
     # ------------------------------------------------------------------
     ante = rr["ante"]
+    if blind_on_deck == "Boss" and not allow_forced_boss:
+        from jackdaw.engine.data.prototypes import BLINDS
+
+        boss = BLINDS[blind_key].boss or {}
+        showdown_ante = ante >= 2 and ante % gs.get("win_ante", 8) == 0
+        assert bool(boss.get("showdown")) == showdown_ante, (
+            f"{blind_key} showdown eligibility does not match ante {ante}"
+        )
+        if not boss.get("showdown"):
+            assert boss.get("min", 1) <= ante, (
+                f"{blind_key} requires ante {boss.get('min', 1)}, got {ante}"
+            )
     scaling = gs.get("modifiers", {}).get("scaling", 1)
     ante_scaling = gs["starting_params"].get("ante_scaling", 1.0)
     no_reward = gs.get("modifiers", {}).get("no_blind_reward", {})
@@ -209,7 +221,7 @@ def _handle_select_blind(gs: dict[str, Any]) -> dict[str, Any]:
     # ------------------------------------------------------------------
     # 3. Process setting_blind side-effects
     # ------------------------------------------------------------------
-    _apply_setting_blind_mutations(gs, setting_mutations, jokers)
+    disable_requested = _apply_setting_blind_mutations(gs, setting_mutations, jokers)
 
     # ------------------------------------------------------------------
     # 4. Start round (reset counters, targeting cards)
@@ -232,14 +244,17 @@ def _handle_select_blind(gs: dict[str, Any]) -> dict[str, Any]:
     #    In Lua, set_blind fires inside new_round BEFORE the shuffle.
     #    Order: set_blind → joker setting_blind → shuffle → draw.
     # ------------------------------------------------------------------
-    if blind.boss and not blind.disabled:
+    if blind.boss:
         _apply_boss_blind_effects(gs, blind)
+
+    if disable_requested:
+        blind.disable(gs)
 
     # Debuff playing cards based on boss blind
     deck: list = gs.get("deck", [])
     active_rules = read.rules(gs)
     for card in deck:
-        blind.debuff_card(card, active_rules)
+        blind.debuff_card(card, active_rules, gs)
 
     # ------------------------------------------------------------------
     # 6. Per-round deck shuffle (state_events.lua:344)
@@ -258,7 +273,7 @@ def _handle_select_blind(gs: dict[str, Any]) -> dict[str, Any]:
     _draw_hand(gs)
     # Debuff hand cards too (they were drawn from the deck)
     for card in gs.get("hand", []):
-        blind.debuff_card(card, active_rules)
+        blind.debuff_card(card, active_rules, gs)
 
     # ------------------------------------------------------------------
     # 7b. Boss drawn_to_hand effects (Cerulean Bell, Crimson Heart)
@@ -268,6 +283,7 @@ def _handle_select_blind(gs: dict[str, Any]) -> dict[str, Any]:
             hand_cards=gs.get("hand", []),
             joker_cards=gs.get("jokers"),
             rng=rng,
+            gs=gs,
         )
         if dth.get("forced_card_index") is not None:
             hand = gs.get("hand", [])
@@ -710,7 +726,7 @@ def _handle_play_hand(gs: dict[str, Any], indices: tuple[int, ...]) -> dict[str,
         if blind.boss and not blind.disabled:
             active_rules = read.rules(gs)
             for card in gs.get("hand", []):
-                blind.debuff_card(card, active_rules)
+                blind.debuff_card(card, active_rules, gs)
 
         # The Fish: flip newly drawn cards face-down
         if getattr(blind, "name", "") == "The Fish" and getattr(blind, "prepped", False):
@@ -723,6 +739,7 @@ def _handle_play_hand(gs: dict[str, Any], indices: tuple[int, ...]) -> dict[str,
                 hand_cards=gs.get("hand", []),
                 joker_cards=jokers,
                 rng=rng,
+                gs=gs,
             )
             if dth.get("forced_card_index") is not None:
                 hand = gs.get("hand", [])
@@ -926,7 +943,7 @@ def _handle_discard(gs: dict[str, Any], indices: tuple[int, ...]) -> dict[str, A
     if blind and getattr(blind, "boss", False) and not getattr(blind, "disabled", False):
         active_rules = read.rules(gs)
         for card in gs.get("hand", []):
-            blind.debuff_card(card, active_rules)
+            blind.debuff_card(card, active_rules, gs)
 
         # Boss drawn_to_hand effects on discard redraw
         rng = gs.get("rng")
@@ -934,6 +951,7 @@ def _handle_discard(gs: dict[str, Any], indices: tuple[int, ...]) -> dict[str, A
             hand_cards=gs.get("hand", []),
             joker_cards=jokers,
             rng=rng,
+            gs=gs,
         )
         if dth.get("forced_card_index") is not None:
             hand = gs.get("hand", [])
@@ -1475,7 +1493,7 @@ def _sort_hand_desc(hand: list) -> None:
     hand.sort(key=lambda c: c.get_nominal() if hasattr(c, "get_nominal") else -1e9, reverse=True)
 
 
-def _draw_hand(gs: dict[str, Any]) -> None:
+def _draw_hand(gs: dict[str, Any], *, count: int | None = None) -> None:
     """Draw cards from deck to fill the hand up to hand_size.
 
     Cards are drawn from the END of the deck list (top of the visual
@@ -1490,6 +1508,8 @@ def _draw_hand(gs: dict[str, Any]) -> None:
     hand: list = gs.setdefault("hand", [])
     hand_size: int = gs.get("hand_size", 8)
     to_draw = min(len(deck), hand_size - len(hand))
+    if count is not None:
+        to_draw = min(to_draw, count)
     for _ in range(to_draw):
         if deck:
             hand.append(deck.pop())
@@ -1652,7 +1672,7 @@ def _round_won(gs: dict[str, Any]) -> None:
         # Only clear blind-applied debuffs; perishable debuffs are permanent
         if getattr(card, "debuff", False):
             if not (getattr(card, "perishable", False) and getattr(card, "perish_tally", 1) <= 0):
-                card.debuff = False
+                card.set_debuff(gs, False)
 
     # ------------------------------------------------------------------
     # 6. Track unused discards / hands played (for Garbage/Handy Tags)
@@ -1792,19 +1812,15 @@ def _apply_setting_blind_mutations(
     gs: dict[str, Any],
     mutations: list[dict[str, Any]],
     jokers: list,
-) -> None:
+) -> bool:
     """Process side-effects from setting_blind jokers."""
     rng = gs.get("rng")
+    disable_requested = False
 
     for mut in mutations:
         # Chicot / Luchador: disable blind
         if mut.get("disable_blind"):
-            blind = gs.get("blind")
-            if blind:
-                blind.disabled = True
-                # Un-debuff all playing cards
-                for card in gs.get("deck", []):
-                    card.debuff = False
+            disable_requested = True
 
         # Madness: destroy random joker (not self)
         if mut.get("destroy_random_joker") and len(jokers) > 1:
@@ -1846,9 +1862,9 @@ def _apply_setting_blind_mutations(
                     # checks effect == "Stone Card") AND crashed
                     # reset_round_targets (it leaked the Stone filter, then hit
                     # the base=None a stone card carries).
-                    c.set_ability(enhancement)
+                    c.set_ability(enhancement, gs=gs)
                 if create.get("seal"):
-                    c.seal = "Gold"  # Certificate default
+                    c.set_seal(gs, "Gold")  # Certificate default
                 deck.append(c)
             elif ctype in ("Joker", "Tarot", "Planet", "Spectral"):
                 # Riff-raff ('rif', Common), Cartomancer ('car'), 8 Ball
@@ -1863,6 +1879,8 @@ def _apply_setting_blind_mutations(
                 # overfills past joker_slots, producing states the fixed-width
                 # obs encoders cannot represent.
                 _resolve_create_descriptors(gs, [create])
+
+    return disable_requested
 
 
 # ---------------------------------------------------------------------------
@@ -2012,19 +2030,19 @@ def _apply_consumable_result(
     if getattr(result, "enhance", None):
         for target, enh_key in result.enhance:
             if hasattr(target, "set_ability"):
-                target.set_ability(enh_key)
+                target.set_ability(enh_key, gs=gs)
 
     # b. Suit changes
     if getattr(result, "change_suit", None):
         for target, suit in result.change_suit:
             if hasattr(target, "change_suit"):
-                target.change_suit(suit)
+                target.change_suit(suit, gs=gs)
 
     # c. Rank changes
     if getattr(result, "change_rank", None):
         for target, delta in result.change_rank:
             if hasattr(target, "change_rank"):
-                target.change_rank(delta)
+                target.change_rank(delta, gs=gs)
 
     # d. Copy card (Death)
     if getattr(result, "copy_card", None):
@@ -2038,11 +2056,12 @@ def _apply_consumable_result(
                     source.card_key or "",
                     source.base.suit.value,
                     source.base.rank.value,
+                    gs=gs,
                 )
-            target.edition = source.edition
-            target.seal = source.seal
+            target.set_edition(gs, source.edition)
+            target.set_seal(gs, source.seal)
             if hasattr(source, "center_key") and hasattr(target, "set_ability"):
-                target.set_ability(source.center_key)
+                target.set_ability(source.center_key, gs=gs)
 
     # e. Destroy playing cards
     if getattr(result, "destroy", None):
@@ -2057,7 +2076,7 @@ def _apply_consumable_result(
     # f. Add seal
     if getattr(result, "add_seal", None):
         for target, seal_type in result.add_seal:
-            target.seal = seal_type
+            target.set_seal(gs, seal_type)
 
     # g. Create cards (High Priestess, Emperor, Judgement, etc.)
     if getattr(result, "create", None):
@@ -2114,7 +2133,7 @@ def _apply_consumable_result(
                     card_spec["rank"],
                 )
             if "enhancement" in card_spec:
-                new_card.set_ability(card_spec["enhancement"])
+                new_card.set_ability(card_spec["enhancement"], gs=gs)
             deck_list.append(new_card)
 
     # ---- Joker effects ----
@@ -2125,7 +2144,7 @@ def _apply_consumable_result(
         target = ae.get("target")
         edition = ae.get("edition")
         if target and edition:
-            target.edition = edition
+            target.set_edition(gs, edition)
 
     # m. Destroy jokers (Ankh: destroy all except one)
     if getattr(result, "destroy_jokers", None):
@@ -2242,11 +2261,7 @@ def _populate_shop(gs: dict[str, Any]) -> None:
             if v_key is None:
                 continue
             extra = create_voucher(v_key)
-            extra.set_cost(
-                inflation=gs.get("inflation", 0),
-                discount_percent=gs.get("discount_percent", 0),
-                ante=ante,
-            )
+            extra.set_cost(gs)
             gs["shop_vouchers"].append(extra)
 
     # Coupon Tag (shop_final_pass context): initial shop cards and booster
@@ -2255,8 +2270,10 @@ def _populate_shop(gs: dict[str, Any]) -> None:
     for _entry, tag_res in fire_tag_context(gs, "shop_final_pass"):
         if tag_res.coupon:
             for card in gs["shop_cards"]:
+                card.ability["couponed"] = True
                 card.cost = 0
             for booster in gs["shop_boosters"]:
+                booster.ability["couponed"] = True
                 booster.cost = 0
 
 
@@ -2271,7 +2288,6 @@ def _reroll_shop_cards(gs: dict[str, Any]) -> None:
     rng = gs.get("rng")
     if rng is None:
         return
-
 
     ante = gs.get("round_resets", {}).get("ante", 1)
     shop_joker_max: int = gs.get("shop", {}).get("joker_max", 2)
@@ -2351,7 +2367,7 @@ def _apply_shop_mutations(
                         seed_val = rng.seed("perkeo")
                         original, _ = rng.element(consumables, seed_val)
                         duplicate = copy.copy(original)
-                        duplicate.edition = {"negative": True}
+                        duplicate.set_edition(gs, {"negative": True})
                         consumables.append(duplicate)
 
 

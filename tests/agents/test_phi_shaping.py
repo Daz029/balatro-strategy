@@ -33,7 +33,7 @@ def _overfull_joker_state() -> dict:
     gs = _fresh_state()
     jokers = [create_joker("j_joker") for _ in range(12)]
     for joker in jokers[8:]:
-        joker.set_edition({"negative": True})
+        joker.set_edition({}, {"negative": True})
     gs["jokers"] = jokers
     return gs
 

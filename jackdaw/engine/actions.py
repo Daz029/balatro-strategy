@@ -66,6 +66,8 @@ class GamePhase(StrEnum):
 class SelectBlind:
     """Accept the current blind and start the round."""
 
+    allow_forced_boss: bool = False
+
 
 @dataclass(frozen=True)
 class SkipBlind:

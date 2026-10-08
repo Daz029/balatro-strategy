@@ -87,6 +87,28 @@ def editionless_jokers(jokers: list[Card]) -> list[Card]:
 
 _PLAYING_CARD_AREAS = ("deck", "hand", "discard_pile", "played_cards_area", "pack_hand")
 
+_CARD_AREAS = (
+    "jokers",
+    "consumables",
+    "deck",
+    "hand",
+    "discard_pile",
+    "played_cards_area",
+    "shop_cards",
+    "shop_vouchers",
+    "shop_boosters",
+    "pack_cards",
+    "pack_hand",
+)
+
+
+def area_of(gs: dict[str, Any], card: Card) -> str | None:
+    """Return the state-list key containing *card*, comparing by identity."""
+    for area in _CARD_AREAS:
+        if any(candidate is card for candidate in (gs.get(area, []) or [])):
+            return area
+    return None
+
 
 def playing_cards(gs: dict[str, Any]) -> list[Card]:
     """Return all owned playing cards, deduplicated by identity.

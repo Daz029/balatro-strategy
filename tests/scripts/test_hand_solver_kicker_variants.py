@@ -254,7 +254,7 @@ class TestHypotheses:
         hand = _flush_plus_junk_hand()
         junk = [c for c in hand if c.base.suit != Suit.HEARTS.value]
         poly = min(junk, key=lambda c: c.base.nominal)  # the WORST junk card
-        poly.set_edition({"polychrome": True})
+        poly.set_edition({}, {"polychrome": True})
         counts = {id(c): (0, 0) for c in hand}
         key = hand_solver._scored_kicker_key(counts)
         assert all(key(poly) > key(o) for o in junk if o is not poly), (

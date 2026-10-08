@@ -290,7 +290,7 @@ class TestFullPipeline:
             _card("Hearts", "Ace"),
         ]
         ff = create_joker("j_four_fingers")
-        ff.set_debuff(True)
+        ff.set_debuff({}, True)
         result = evaluate_hand(hand, jokers=[ff])
         assert result.detected_hand != "Flush"
 

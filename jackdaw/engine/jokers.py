@@ -1799,7 +1799,7 @@ def _vampire(card: Card, ctx: JokerContext) -> JokerResult | None:
             ):
                 enhanced_count += 1
                 c.vampired = True
-                c.set_ability("c_base")
+                c.set_ability("c_base", gs=getattr(ctx.game, "gs", None))
         if enhanced_count > 0:
             card.ability["x_mult"] = (
                 card.ability.get("x_mult", 1) + card.ability.get("extra", 0.1) * enhanced_count
@@ -2298,7 +2298,7 @@ def _midas_mask(card: Card, ctx: JokerContext) -> JokerResult | None:
                 faces.append(c)
         if faces:
             for c in faces:
-                c.set_ability("m_gold")
+                c.set_ability("m_gold", gs=getattr(ctx.game, "gs", None))
             return JokerResult()
     return None
 

@@ -153,7 +153,7 @@ class TestSellJokerExt:
         gs["phase"] = GamePhase.SHOP
         jokers = [create_joker("j_joker") for _ in range(12)]
         for j in jokers[8:]:
-            j.set_edition({"negative": True})  # bypass joker_slots
+            j.set_edition({}, {"negative": True})  # bypass joker_slots
         gs["jokers"] = jokers
         obs = build_shop_observation(gs, s1_schema=True)
         assert obs["joker_mask"].sum() == 12
@@ -178,7 +178,7 @@ class TestSellJokerExt:
         gs = env._adapter.raw_state
         gs["phase"] = GamePhase.SHOP
         jokers = [create_joker("j_joker") for _ in range(9)]
-        jokers[-1].set_edition({"negative": True})
+        jokers[-1].set_edition({}, {"negative": True})
         gs["jokers"] = jokers
         mask = env.action_masks()
         assert mask.shape == (NUM_TOTAL_ACTIONS,)

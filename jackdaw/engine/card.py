@@ -14,6 +14,7 @@ import copy
 from dataclasses import dataclass, field
 from typing import Any
 
+from jackdaw.engine import read
 from jackdaw.engine.data.enums import Rank, Suit
 from jackdaw.engine.read import Rules
 
@@ -235,16 +236,26 @@ class Card:
         """
         return 1 - self.sort_id / 1603301
 
-    def set_base(self, card_key: str, suit: str, value: str) -> None:
+    def set_base(
+        self, card_key: str, suit: str, value: str, *, gs: dict[str, Any] | None = None
+    ) -> None:
         """Populate base fields from P_CARDS data, matching Card:set_base."""
+        old_base = self.base
         self.card_key = card_key
         self.base = CardBase.from_card_key(card_key, suit, value)
+        if old_base is not None:
+            self.base.suit_nominal_original = old_base.suit_nominal_original
+            self.base.original_value = old_base.original_value
+            # times_played is NOT carried: Lua rebuilds self.base with
+            # times_played = 0 on every set_base (card.lua:111-120).
+        self._refresh_blind_debuff(gs)
 
     def set_ability(
         self,
         center: dict[str, Any] | str,
         *,
         hands_played: int = 0,
+        gs: dict[str, Any] | None = None,
     ) -> None:
         """Populate ability from a prototype, matching card.lua:223 (Card:set_ability).
 
@@ -322,7 +333,13 @@ class Card:
         # hands_played_at_create (card.lua:337)
         self.ability["hands_played_at_create"] = hands_played
 
-    def enhance(self, center_key: str) -> None:
+        self._refresh_blind_debuff(gs)
+
+    def _refresh_blind_debuff(self, gs: dict[str, Any] | None) -> None:
+        if gs is not None and (blind := gs.get("blind")) is not None:
+            blind.debuff_card(self, read.rules(gs), gs=gs)
+
+    def enhance(self, center_key: str, *, gs: dict[str, Any] | None = None) -> None:
         """Change enhancement while preserving base, edition, seal, perma_bonus.
 
         Mirrors the tarot enhancement path in card.lua:use_consumeable
@@ -338,7 +355,7 @@ class Card:
         old_bonus = self.ability.get("bonus", 0)
 
         # Apply new center (resets ability dict)
-        self.set_ability(center_key)
+        self.set_ability(center_key, gs=gs)
 
         # Restore preserved fields
         self.edition = old_edition
@@ -346,7 +363,7 @@ class Card:
         self.ability["perma_bonus"] = old_perma_bonus
         self.ability["bonus"] = old_bonus
 
-    def change_suit(self, new_suit: str) -> None:
+    def change_suit(self, new_suit: str, *, gs: dict[str, Any] | None = None) -> None:
         """Change suit while preserving rank. Matches card.lua:547.
 
         Recalculates suit_nominal and suit_nominal_original. Preserves
@@ -372,9 +389,9 @@ class Card:
             "Ace": "A",
         }
         card_key = f"{suit_letter[new_suit]}_{rank_letter[rank_str]}"
-        self.set_base(card_key, new_suit, rank_str)
+        self.set_base(card_key, new_suit, rank_str, gs=gs)
 
-    def change_rank(self, new_rank: str) -> None:
+    def change_rank(self, new_rank: str, *, gs: dict[str, Any] | None = None) -> None:
         """Change rank while preserving suit. Matches Strength tarot logic.
 
         Recalculates id, nominal, face_nominal. Preserves suit,
@@ -400,77 +417,110 @@ class Card:
             "Ace": "A",
         }
         card_key = f"{suit_letter[suit_str]}_{rank_letter[new_rank]}"
-        self.set_base(card_key, suit_str, new_rank)
+        self.set_base(card_key, suit_str, new_rank, gs=gs)
 
-    def set_edition(self, edition: dict[str, bool] | None) -> None:
+    def set_edition(
+        self,
+        gs: dict[str, Any],
+        edition: dict[str, bool] | None,
+        *,
+        silent: bool = True,
+    ) -> None:
         """Set the card's edition, populating scoring values.
 
         Matches card.lua:387 (Card:set_edition).  The source stores both
         the boolean flag (``foil=True``) and the scoring value (``chips=50``)
         on ``self.edition``.
         """
+        had_edition = self.edition is not None
         self.edition = None
+        if edition is None:
+            # Lua returns before set_cost for a nil edition (card.lua:389);
+            # an empty table ({}, e.g. copy_card's ``other.edition or {}``)
+            # is truthy in Lua, matches no branch and still reprices.
+            return
         if not edition:
+            self.set_cost(gs)
             return
         self.edition = {}
         if edition.get("foil"):
             self.edition["foil"] = True
-            self.edition["chips"] = 50
+            self.edition["chips"] = _resolve_center("e_foil")["config"]["extra"]
             self.edition["type"] = "foil"
         elif edition.get("holo"):
             self.edition["holo"] = True
-            self.edition["mult"] = 10
+            self.edition["mult"] = _resolve_center("e_holo")["config"]["extra"]
             self.edition["type"] = "holo"
         elif edition.get("polychrome"):
             self.edition["polychrome"] = True
-            self.edition["x_mult"] = 1.5
+            self.edition["x_mult"] = _resolve_center("e_polychrome")["config"]["extra"]
             self.edition["type"] = "polychrome"
         elif edition.get("negative"):
             self.edition["negative"] = True
             self.edition["type"] = "negative"
+            if not had_edition and self.added_to_deck:
+                slot = "consumable_slots" if self.ability.get("consumeable") else "joker_slots"
+                gs[slot] = gs.get(slot, 0) + 1
+        self.set_cost(gs)
 
-    def set_seal(self, seal: str | None) -> None:
-        """Set the card's seal."""
+    def set_seal(self, gs: dict[str, Any], seal: str | None) -> None:
+        """Set the card's seal (card.lua Card:set_seal), then reprice."""
         self.seal = seal
+        self.set_cost(gs)
 
     def set_eternal(self, eternal: bool) -> None:
-        self.eternal = eternal
+        self.eternal = False
+        if _resolve_center(self.center_key).get("eternal_compat") and not self.perishable:
+            self.eternal = eternal
 
-    def set_perishable(self, perishable: bool) -> None:
-        self.perishable = perishable
-        if perishable:
-            self.perish_tally = 5
+    def set_perishable(self, gs: dict[str, Any], perishable: bool) -> None:
+        self.perishable = False
+        if (
+            perishable
+            and _resolve_center(self.center_key).get("perishable_compat")
+            and not self.eternal
+        ):
+            self.perishable = True
+            self.perish_tally = gs.get("perishable_rounds", 5)
 
-    def set_rental(self, rental: bool) -> None:
+    def set_rental(self, gs: dict[str, Any], rental: bool) -> None:
         self.rental = rental
+        self.set_cost(gs)
 
-    def set_debuff(self, should_debuff: bool) -> None:
-        self.debuff = should_debuff
+    def set_debuff(self, gs: dict[str, Any], should_debuff: bool) -> None:
+        """Port of card.lua:526-538. ``gs`` is required: toggling an owned
+        joker's debuff must remove/re-add its passives (D25)."""
+        if self.perishable and self.perish_tally <= 0:
+            if not self.debuff:
+                self.debuff = True
+                if read.area_of(gs, self) == "jokers":
+                    self.remove_from_deck(gs, from_debuff=True)
+            return
+        if bool(should_debuff) != self.debuff:
+            if read.area_of(gs, self) == "jokers":
+                if should_debuff:
+                    # Lua queues Astronomer's repricing until after this flag
+                    # changes; synchronous Python must expose the same state.
+                    self.debuff = True
+                    self.remove_from_deck(gs, from_debuff=True)
+                else:
+                    self.debuff = False
+                    self.add_to_deck(gs, from_debuff=True)
+            else:
+                self.debuff = bool(should_debuff)
 
-    def set_cost(
-        self,
-        *,
-        inflation: int = 0,
-        discount_percent: int = 0,
-        ante: int = 1,
-        booster_ante_scaling: bool = False,
-        has_astronomer: bool = False,
-        is_couponed: bool = False,
-    ) -> None:
+    def set_cost(self, gs: dict[str, Any]) -> None:
         """Calculate cost and sell_cost, matching card.lua:369 (Card:set_cost).
 
-        Takes game-state values as parameters rather than reading global state,
-        keeping Card independent of the game loop.
-
-        Args:
-            inflation: ``G.GAME.inflation`` — cumulative price inflation.
-            discount_percent: ``G.GAME.discount_percent`` — 0/25/50 from vouchers.
-            ante: Current ante (for booster ante scaling).
-            booster_ante_scaling: ``G.GAME.modifiers.booster_ante_scaling``.
-            has_astronomer: Whether the Astronomer joker is active.
-            is_couponed: Whether a tag set ``ability.couponed = true``.
+        All pricing inputs come from the live run state.
         """
         import math
+
+        inflation = gs.get("inflation", 0)
+        discount_percent = gs.get("discount_percent", 0)
+        ante = gs.get("round_resets", {}).get("ante", 1)
+        booster_ante_scaling = gs.get("modifiers", {}).get("booster_ante_scaling", False)
+        has_astronomer = bool(read.find_joker(gs, "Astronomer"))
 
         # Edition surcharge
         edition_extra = 0
@@ -502,7 +552,7 @@ class Card:
                 self.cost = 0
 
         # Rental override (card.lua:381)
-        if self.ability.get("rental") or self.rental:
+        if self.rental:
             self.cost = 1
 
         # Sell price (card.lua:382)
@@ -510,7 +560,12 @@ class Card:
         self.sell_cost = max(1, math.floor(self.cost / 2)) + extra_value
 
         # Couponed by tag: cost 0 (card.lua:383)
-        if is_couponed:
+        # The tutorial-only +3 Booster branch is UI/profile state and is out
+        # of scope for this engine.
+        if self.ability.get("couponed") and read.area_of(gs, self) in {
+            "shop_cards",
+            "shop_boosters",
+        }:
             self.cost = 0
 
     def is_face(
@@ -775,13 +830,19 @@ class Card:
                 return {"repetitions": 1, "card": self}
         return None
 
-    def add_to_deck(self, game_state: dict) -> None:
+    def add_to_deck(self, game_state: dict, *, from_debuff: bool = False) -> None:
         """Apply joker's passive effects when added to deck (card.lua:Card:add_to_deck).
 
         Mutates *game_state* in-place.  Matches card.lua:564 exactly.
         game_state keys: hand_size, discards, joker_slots, probabilities,
         bankrupt_at, current_round, hands_per_round, interest_amount.
         """
+        if self.added_to_deck:
+            return
+        self.added_to_deck = True
+        if self.ability.get("set") in {"Enhanced", "Default"}:
+            return
+
         name = self.ability.get("name", "")
         extra = self.ability.get("extra")
 
@@ -792,10 +853,17 @@ class Card:
             rr = game_state.get("round_resets")
             if rr is not None:
                 rr["discards"] = rr.get("discards", 0) + self.ability["d_size"]
+            cr = game_state.get("current_round")
+            if cr is not None:
+                cr["discards_left"] = cr.get("discards_left", 0) + self.ability["d_size"]
 
         if name == "Credit Card":
             amount = extra if isinstance(extra, int) else 0
             game_state["bankrupt_at"] = game_state.get("bankrupt_at", 0) - amount
+        if name == "Chicot":
+            blind = game_state.get("blind")
+            if blind is not None and blind.boss and not blind.disabled:
+                blind.disable(game_state)
         if name == "Chaos the Clown" and "current_round" in game_state:
             current_round = game_state["current_round"]
             current_round["free_rerolls"] = current_round.get("free_rerolls", 0) + 1
@@ -811,6 +879,9 @@ class Card:
         if name == "To the Moon":
             amount = extra if isinstance(extra, int) else 0
             game_state["interest_amount"] = game_state.get("interest_amount", 0) + amount
+        if name == "Astronomer":
+            for card in read.all_cards(game_state):
+                card.set_cost(game_state)
         if name == "Troubadour" and isinstance(extra, dict):
             game_state["hand_size"] = game_state.get("hand_size", 0) + extra.get("h_size", 0)
             rr = game_state.get("round_resets")
@@ -820,13 +891,26 @@ class Card:
             game_state["hand_size"] = game_state.get("hand_size", 0) - extra.get("h_size", 0)
 
         if self.edition and self.edition.get("negative"):
-            game_state["joker_slots"] = game_state.get("joker_slots", 0) + 1
+            if from_debuff:
+                self.ability.pop("queue_negative_removal", None)
+            else:
+                slot = "consumable_slots" if self.ability.get("consumeable") else "joker_slots"
+                game_state[slot] = game_state.get(slot, 0) + 1
 
-    def remove_from_deck(self, game_state: dict) -> None:
+        if (blind := game_state.get("blind")) is not None:
+            blind.refresh_debuffs(game_state)
+
+    def remove_from_deck(self, game_state: dict, *, from_debuff: bool = False) -> None:
         """Reverse joker's passive effects when removed from deck (card.lua:Card:remove_from_deck).
 
         Mirrors :meth:`add_to_deck` — each effect is undone.  Matches card.lua:648.
         """
+        if not self.added_to_deck:
+            return
+        self.added_to_deck = False
+        if self.ability.get("set") in {"Enhanced", "Default"}:
+            return
+
         name = self.ability.get("name", "")
         extra = self.ability.get("extra")
 
@@ -836,6 +920,9 @@ class Card:
             rr = game_state.get("round_resets")
             if rr is not None:
                 rr["discards"] = rr.get("discards", 0) - self.ability["d_size"]
+            cr = game_state.get("current_round")
+            if cr is not None:
+                cr["discards_left"] = cr.get("discards_left", 0) - self.ability["d_size"]
 
         if name == "Credit Card":
             amount = extra if isinstance(extra, int) else 0
@@ -855,6 +942,9 @@ class Card:
         if name == "To the Moon":
             amount = extra if isinstance(extra, int) else 0
             game_state["interest_amount"] = game_state.get("interest_amount", 0) - amount
+        if name == "Astronomer":
+            for card in read.all_cards(game_state):
+                card.set_cost(game_state)
         if name == "Troubadour" and isinstance(extra, dict):
             game_state["hand_size"] = game_state.get("hand_size", 0) - extra.get("h_size", 0)
             rr = game_state.get("round_resets")
@@ -864,7 +954,15 @@ class Card:
             game_state["hand_size"] = game_state.get("hand_size", 0) + extra.get("h_size", 0)
 
         if self.edition and self.edition.get("negative"):
-            game_state["joker_slots"] = game_state.get("joker_slots", 0) - 1
+            if from_debuff:
+                # TODO(P3-2): Card.remove consumes this queued slot removal.
+                self.ability["queue_negative_removal"] = True
+            else:
+                slot = "consumable_slots" if self.ability.get("consumeable") else "joker_slots"
+                game_state[slot] = game_state.get(slot, 0) - 1
+
+        if (blind := game_state.get("blind")) is not None:
+            blind.refresh_debuffs(game_state)
 
     def __repr__(self) -> str:
         if self.base:
