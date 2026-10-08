@@ -382,13 +382,22 @@ def create_shop_slot_card(
         if illusion and card_type in ("Base", "Enhanced") and illusion.get("edition"):
             card.set_edition(gs, illusion["edition"])
 
+    # Tag callbacks run with the card already in the shop area in Lua. Make
+    # that area visible before repricing so couponed cards resolve to $0.
+    lifecycle.emplace(gs, card, "shop_cards")
+
+    if fired:
+        card.ability["couponed"] = True
+        card.set_cost(gs)
+
     card_set = card.ability.get("set", "") if isinstance(card.ability, dict) else ""
     if card_set == "Joker" and not card.edition:
         fired = fire_tag_context(gs, "store_joker_modify", first_only=True, rng=rng)
         if fired:
             _entry, result = fired[0]
             card.set_edition(gs, {result.force_edition: True})
-            card.cost = 0
+            card.ability["couponed"] = True
+            card.set_cost(gs)
 
     return card
 
@@ -613,8 +622,6 @@ def buy_card(
         ``{'ok': True}`` on success, or ``{'ok': False, 'reason': str}``
         on failure.
     """
-    from jackdaw.engine.jokers import JokerContext, calculate_joker
-
     # -- 1. Space check --
     negative_bonus = 1 if (card.edition and card.edition.get("negative")) else 0
     if not to_area.has_space(negative_bonus):
@@ -636,22 +643,15 @@ def buy_card(
     }.get(to_area.type, "deck")
     if game_state.get(area_name) is not to_area.cards:
         game_state[area_name] = to_area.cards
-    lifecycle.emplace(game_state, card, area_name)
+    is_playing_card = card.ability.get("set") in _PLAYING_CARD_SETS
+    if is_playing_card:
+        lifecycle.add_playing_cards(game_state, [card], area_name)
+    else:
+        lifecycle.emplace(game_state, card, area_name)
 
     # -- 6. Playing-card bookkeeping --
-    if card.ability.get("set") in _PLAYING_CARD_SETS:
-        owned_jokers = game_state.get("jokers", [])
-        game_view = StateView(game_state, jokers=owned_jokers)
-        for joker in owned_jokers:
-            ctx = JokerContext(playing_card_added=True, cards=[card], game=game_view)
-            calculate_joker(joker, ctx)
-    else:
-        # buying_card notification for all active jokers
-        owned_jokers = game_state.get("jokers", [])
-        game_view = StateView(game_state, jokers=owned_jokers)
-        for joker in owned_jokers:
-            ctx = JokerContext(buying_card=True, other_card=card, game=game_view)
-            calculate_joker(joker, ctx)
+    if not is_playing_card:
+        lifecycle.fire_joker_context(game_state, buying_card=True, other_card=card)
 
     # -- 7. Deduct cost --
     game_state["dollars"] = game_state.get("dollars", 0) - card.cost

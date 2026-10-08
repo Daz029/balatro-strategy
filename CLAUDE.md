@@ -27,7 +27,14 @@ analysis and potential overhaul.
   (`tests/engine/test_state_registry.py`). Fixed C13/D02/D03/D10/D19/D39/D40/D42 + stale solver
   mirrors. OBS VALUE CHANGE: observation.py's meta-joker flags read dead keys (always 0) until
   now. Status block under Phase 2 in the plan doc.
-  NEXT: Phase 3 lifecycle (+ Phase 0 instrument / Q quick wins in parallel).
+  PHASE 3 (lifecycle) EXIT MET 2026-10-08, same branch: `jackdaw/engine/lifecycle.py`
+  (PoolTracker, copy_card, emplace, remove, batched notifications), setters require `gs`,
+  `Blind.disable(gs)`, lifecycle AST lint (`tests/engine/test_engine_lint.py`), shop-heavy
+  rollout driver `tests/engine/_rollout.py` for structural invariants. Fixed C06 C08 C10(init+
+  last-played) C12 C13(Magic Trick/Illusion) D16 D17 D20 D24 D25 D33 D35 D36 D37 D41 D42 D47
+  D53. Pool exclusion = Lua release-unless-owned (bounded, not equality). Status block under
+  Phase 3 in the plan doc.
+  NEXT: Phase 4 effect pipeline (+ Phase 0 instrument / Q quick wins in parallel).
 - descriptors: in progress
 - winrate-scaled reward: less importnat right now
 
@@ -1307,6 +1314,12 @@ ceiling open item.
   the leftmost card"), but the choice lives two layers down (engine `sort_id` semantics,
   possibly a faithfulness gap vs `card.lua:1111` — the author's own comment calls
   `sort_id` a "position proxy"), NOT in the action-space head.
+  **UPDATED 2026-10-08 (engine Phase 3, D33b):** the faithfulness gap was real and is
+  FIXED. `_death` now picks the rightmost highlighted card by HAND POSITION (Lua
+  compares `T.x`, `card.lua:1111`) and copies it with `lifecycle.copy_card`. So in the
+  engine today `SwapHand` DOES move Death's direction. The option (ii) design below is
+  unaffected: the env still hands the handler an explicit survivor, which is now a
+  choice between two engine-legal outcomes rather than a workaround for a bug.
 
 ### Death direction — env-side auto-direction via DIRECT CONSTRUCTION (option ii)
 

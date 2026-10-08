@@ -433,15 +433,15 @@ def _strength(card: Card, ctx: ConsumableContext) -> ConsumableResult:
 def _death(card: Card, ctx: ConsumableContext) -> ConsumableResult:
     """Death: copy the rightmost highlighted card onto the others.
 
-    Source: card.lua:1111. Rightmost by sort_id (position proxy).
+    Source: card.lua:1111. Rightmost by the card's current hand position.
     The copy transfers: base (suit+rank), enhancement, edition, seal.
     """
     highlighted = ctx.highlighted or []
     if len(highlighted) < 2:
         return ConsumableResult()
 
-    # Find rightmost card (highest sort_id = rightmost position)
-    rightmost = max(highlighted, key=lambda c: c.sort_id)
+    hand_positions = {id(c): index for index, c in enumerate(ctx.hand_cards or highlighted)}
+    rightmost = max(highlighted, key=lambda c: hand_positions[id(c)])
     targets = [c for c in highlighted if c is not rightmost]
 
     return ConsumableResult(
@@ -722,7 +722,7 @@ def _cryptid(card: Card, ctx: ConsumableContext) -> ConsumableResult:
     source = highlighted[0]
     count = card.ability.get("extra", 2)
     return ConsumableResult(
-        add_to_deck=[{"copy_of": source} for _ in range(count)],
+        add_to_deck=[{"copy_of": source, "area": "hand"} for _ in range(count)],
     )
 
 
@@ -790,6 +790,7 @@ def _roll_card_spec(
         "rank": _RANK_CODE[rank_code],
         "suit": _SUIT_CODE[suit_code],
         "enhancement": enhancement,
+        "area": "hand",
     }
 
 
@@ -1004,7 +1005,13 @@ def _ankh(_card: Card, ctx: ConsumableContext) -> ConsumableResult:
     others = [j for j in ctx.jokers if j is not chosen and not j.eternal]
     return ConsumableResult(
         destroy_jokers=others if others else None,
-        create=[{"type": "Joker", "copy_of": chosen}],
+        create=[
+            {
+                "type": "Joker",
+                "copy_of": chosen,
+                "strip_edition": bool(chosen.edition and chosen.edition.get("negative")),
+            }
+        ],
     )
 
 

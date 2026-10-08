@@ -483,6 +483,10 @@ class Card:
             self.perishable = True
             self.perish_tally = gs.get("perishable_rounds", 5)
 
+    def set_perish_tally(self, value: int) -> None:
+        """Update the remaining perishable rounds through the card boundary."""
+        self.perish_tally = value
+
     def set_rental(self, gs: dict[str, Any], rental: bool) -> None:
         self.rental = rental
         self.set_cost(gs)

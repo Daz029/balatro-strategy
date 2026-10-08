@@ -146,25 +146,25 @@ def build_deck(
 
     # Checkered Deck: Clubs→Spades, Diamonds→Hearts (back.lua:239-253)
     if back_key == "b_checkered":
-        _apply_checkered(cards)
+        _apply_checkered(cards, game_state or {})
 
     return cards
 
 
-def _apply_checkered(cards: list[Card]) -> None:
+def _apply_checkered(cards: list[Card], gs: dict[str, Any]) -> None:
     """Apply Checkered Deck suit swaps: Clubs→Spades, Diamonds→Hearts."""
     for card in cards:
         if card.base is None:
             continue
         if card.base.suit is Suit.CLUBS:
-            _change_suit(card, Suit.SPADES)
+            _change_suit(card, Suit.SPADES, gs)
         elif card.base.suit is Suit.DIAMONDS:
-            _change_suit(card, Suit.HEARTS)
+            _change_suit(card, Suit.HEARTS, gs)
 
 
-def _change_suit(card: Card, new_suit: Suit) -> None:
+def _change_suit(card: Card, new_suit: Suit, gs: dict[str, Any]) -> None:
     """Change a card's suit, updating all base fields.
 
     Matches ``Card:change_suit`` (card.lua:547).
     """
-    card.change_suit(new_suit.value)
+    card.change_suit(new_suit.value, gs=gs)

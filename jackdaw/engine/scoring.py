@@ -806,9 +806,14 @@ def score_hand(
             if rng.random("glass") < probabilities_normal / 4:
                 destroyed = True
         if destroyed:
+            if sc.ability.get("name") == "Glass Card":
+                sc.shattered = True
+            else:
+                sc.destroyed = True
             cards_destroyed.append(sc)
 
-    # Notify jokers of destruction (Caino, Glass Joker xMult growth)
+    # Notify jokers of destruction (Caino, Glass Joker xMult growth) at the
+    # same scoring-time observation point as before Phase 3.
     if cards_destroyed:
         for joker in jokers:
             if joker.debuff:
@@ -818,6 +823,11 @@ def score_hand(
                 **_shared,
             )
             calculate_joker(joker, dest_notify_ctx)
+
+    # Removal itself happens in the play handler (game.py), never here: the
+    # solver calls score_hand on cloned cards with the LIVE game_state, so
+    # lifecycle teardown inside the scorer would be one call away from
+    # deleting real cards during hypothetical scoring.
 
     # === Phase 12: Final score ===
     total = math.floor(hand_chips * mult)

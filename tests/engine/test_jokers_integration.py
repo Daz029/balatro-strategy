@@ -1588,6 +1588,7 @@ class TestGlassJoker:
     def test_one_glass_destroyed(self):
         j = self._make()
         glass = _card("Hearts", "5", enhancement="m_glass")
+        glass.shattered = True
         ctx = JokerContext(cards_destroyed=[glass])
         calculate_joker(j, ctx)
         assert j.ability["x_mult"] == pytest.approx(1.75)
@@ -1596,6 +1597,7 @@ class TestGlassJoker:
         j = self._make()
         glass1 = _card("Hearts", "5", enhancement="m_glass")
         glass2 = _card("Spades", "3", enhancement="m_glass")
+        glass1.shattered = glass2.shattered = True
         ctx = JokerContext(cards_destroyed=[glass1, glass2])
         calculate_joker(j, ctx)
         assert j.ability["x_mult"] == pytest.approx(2.5)
@@ -1640,6 +1642,7 @@ class TestCaino:
         caino = self._make()
         glass_j = _joker("j_glass", x_mult=1, extra=0.75)
         glass_king = _card("Hearts", "King", enhancement="m_glass")
+        glass_king.shattered = True
         ctx = JokerContext(cards_destroyed=[glass_king])
 
         calculate_joker(caino, ctx)

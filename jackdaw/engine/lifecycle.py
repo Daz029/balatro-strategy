@@ -163,6 +163,67 @@ def emplace(gs: dict[str, Any], card: Card, area: str) -> None:
         # explicitly.
 
 
+def fire_joker_context(gs: dict[str, Any], **context_flags: Any) -> list[dict[str, Any]]:
+    """Dispatch one live-state context to every active joker.
+
+    This is the shared equivalent of Lua's loops over ``G.jokers.cards``.
+    Lifecycle notifications and shop events use the same construction so
+    their state view, debuff gate, RNG, and mutation collection cannot drift.
+    """
+    from jackdaw.engine.jokers import JokerContext, calculate_joker
+
+    jokers: list[Card] = gs.get("jokers", [])
+    if not jokers:
+        return []
+
+    game_view = read.StateView(gs, jokers=jokers)
+    mutations: list[dict[str, Any]] = []
+    for joker in list(jokers):
+        if joker.debuff:
+            continue
+        result = calculate_joker(
+            joker,
+            JokerContext(
+                jokers=jokers,
+                game=game_view,
+                rng=gs.get("rng"),
+                **context_flags,
+            ),
+        )
+        if result and result.extra:
+            mutations.append(result.extra)
+    return mutations
+
+
+def add_playing_cards(
+    gs: dict[str, Any],
+    cards: list[Card],
+    area: str,
+    *,
+    notify: bool = True,
+) -> None:
+    """Place a batch of playing cards, then fire one Lua-style notification."""
+    batch = list(cards)
+    for card in batch:
+        emplace(gs, card, area)
+    if notify and batch:
+        fire_joker_context(gs, playing_card_added=True, cards=batch)
+
+
+def destroy_playing_cards(
+    gs: dict[str, Any],
+    cards: list[Card],
+    *,
+    notify: bool = True,
+) -> None:
+    """Remove a batch of playing cards, then notify each joker exactly once."""
+    batch = list(cards)
+    for card in batch:
+        remove(gs, card)
+    if notify and batch:
+        fire_joker_context(gs, cards_destroyed=batch)
+
+
 _AREAS = (
     "jokers",
     "consumables",

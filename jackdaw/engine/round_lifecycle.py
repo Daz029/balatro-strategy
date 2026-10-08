@@ -148,7 +148,7 @@ def _get_perish_tally(card: Card) -> int:
 
 
 def _set_perish_tally(card: Card, value: int) -> None:
-    card.perish_tally = value
+    card.set_perish_tally(value)
 
 
 # ---------------------------------------------------------------------------

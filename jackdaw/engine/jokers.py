@@ -1744,11 +1744,7 @@ def _constellation(card: Card, ctx: JokerContext) -> JokerResult | None:
 def _glass_joker(card: Card, ctx: JokerContext) -> JokerResult | None:
     """Glass Joker: +0.75 xMult per Glass Card destroyed. Source: card.lua:2647."""
     if ctx.cards_destroyed and not ctx.blueprint:
-        glass_count = sum(
-            1
-            for c in ctx.cards_destroyed
-            if c.ability.get("effect") == "Glass Card" or c.ability.get("name") == "Glass Card"
-        )
+        glass_count = sum(1 for c in ctx.cards_destroyed if c.shattered)
         if glass_count > 0:
             card.ability["x_mult"] = (
                 card.ability.get("x_mult", 1) + card.ability.get("extra", 0.75) * glass_count
@@ -2592,7 +2588,7 @@ def _turtle_bean(card: Card, ctx: JokerContext) -> JokerResult | None:
             return JokerResult(remove=True)
         extra["h_size"] = h_size - h_mod
         card.ability["extra"] = extra
-        return JokerResult()
+        return JokerResult(extra={"hand_size_delta": -h_mod})
     return None
 
 

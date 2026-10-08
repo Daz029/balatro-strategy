@@ -841,6 +841,66 @@ hands; notifications on every path.
 D16, D17, D20, D24, D25, D33, D35, D36, D37, D41, D42 (editions on created
 jokers), D47, D53. Lifecycle lint goes green.*
 
+**STATUS 2026-10-08: EXIT MET** (branch `engine-phase1-state`, P3-1 `dc6b7b3`,
+P3-2 `9822d36`, P3-3 after it). Three tickets ran through `codex exec` and
+were reviewed and tightened here. Every listed finding has a regression test
+that was seen failing first, except where an earlier ticket in the phase had
+already fixed it (noted per ticket in the commit messages).
+
+- **Setters** (`card.py`, `blind.py`): `set_edition`, `set_cost`, `set_seal`,
+  `set_rental`, `set_perishable`, `set_debuff` take `gs` as a REQUIRED
+  argument. There is no fallback to an empty state, because a debuff toggled
+  without `gs` would silently skip the passive removal (D25).
+  `add_to_deck` / `remove_from_deck` port Lua 564–704: an `added_to_deck`
+  guard, `from_debuff`, `queue_negative_removal`, `ease_discard`, Chicot
+  disabling an active boss, Astronomer repricing, and a blind debuff refresh.
+  `Blind.disable(gs)` ports `blind.lua:356`, including The Manacle's one-card
+  draw. Sticker storage is the `Card` fields only. `set_base` resets
+  `times_played` (Lua) and keeps `suit_nominal_original`.
+- **`lifecycle.py`**: `PoolTracker`, `copy_card`, `emplace`, `remove`,
+  `add_playing_cards`, `destroy_playing_cards`, `fire_joker_context`.
+  - `emplace` inserts deck cards at index 0 (Lua index 1, the bottom of the
+    draw pile; the position feeds later shuffles). It does not sort the hand.
+  - Pool exclusion: release on `Card:remove` unless an owned copy exists.
+    This is NOT an exact "currently exists" equality: removing one of two
+    displayed same-named cards (two Arcana packs) clears the key while the
+    sibling is still shown, exactly as Lua does. The tested invariant is
+    `owned keys ⊆ used_jokers ⊆ existing keys`. Playing-card centers are not
+    tracked, because no pool reads them.
+- **Notifications** (D17) fire once per batch, as Lua's
+  `playing_card_joker_effects` does. Glass Joker counts only `shattered`
+  cards. Scoring marks destroyed cards and notifies; the removal itself
+  happens in the play handler, never inside `score_hand`. The solver calls
+  `score_hand` on cloned cards with the LIVE `gs`.
+- **Lint**: `tests/engine/test_engine_lint.py` (AST, `jackdaw/engine` +
+  `jackdaw/env`) bans card-field assignment, bare `Card(`, `copy`/`deepcopy`
+  (import aliases included), and gs-less `set_ability`/`set_base`/… outside
+  `card.py`, `card_factory.py` and `lifecycle.py`. The allowlist has 3
+  entries, keyed by function name rather than line number, and a stale entry
+  fails the test.
+- **Structural rollouts**: `tests/engine/_rollout.py` is a greedy-hand,
+  shop-heavy seeded driver (20 runs, >1000 steps, hundreds of buys, sells,
+  rerolls and packs). Random play dies in the first blind and never reaches
+  the shop. The driver checks the pool bounds, `added_to_deck` on owned cards,
+  no card in two areas, and the slot identities after every step.
+- **Boss guard** (Part 4 C08 note): the selected boss must satisfy
+  `min <= max(1, ante)` and the showdown rule, unless `allow_forced_boss` is
+  set. The guard is skipped after Hieroglyph or Petroglyph, which lower the
+  ante after the boss was chosen. The shop-heavy driver found this crash at
+  ante 0.
+- **Deferred:**
+  - `Blind.defeat` (D30, D32) and the "disable beats the boss → NEW_ROUND"
+    event go to Phase 5.
+  - DNA, Sixth Sense, Certificate and 8 Ball creation, and the
+    `first_hand_drawn` dispatch (C02), go to Phase 4.
+  - Held-card retriggers (C10) go to Phase 5.
+  - Room checks still run AFTER the RNG draw for some creations (D46) and
+    move to Phase 4. The phase's own change: a no-room card is now `remove`d,
+    so it releases its pool key.
+- **Data impact (Part 6)**: shop sequences change (C06 release, D42 edition
+  rolls, the deck insert position), as do the obs `times_played` feature and
+  the economy. No checked-in fixture changed. Re-harvest as planned.
+
 ### Phase 4. Effect pipeline (S1)
 
 Effect vocabulary; single applier with room reservation and raise-on-unknown;
