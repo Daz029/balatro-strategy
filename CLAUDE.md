@@ -1395,10 +1395,19 @@ replace it.
 - The Death engine piece (direct-construction hook + heuristic) is engine-side and
   touches neither the head nor the obs, so it can be BUILT/tested in isolation any time;
   it only FIRES once targeting is live, i.e. functionally at the merge.
+- **Down the line (NOTE, user 2026-10-09): Death's effect DIRECTION should move to the
+  pointer.** The 16-rung ladder is the v1 placeholder, not the end state: after the merge
+  is stable, the pointer should also choose which of the two picked cards SURVIVES (is
+  duplicated), e.g. one extra pointer step over the already-picked pair, and the env
+  passes that choice through the same option (ii) survivor hint. Not scheduled, and not
+  gated on the ladder underperforming (this promotes the v2 escape hatch below to a
+  planned item). Since engine Phase 3 (D33b) the engine's own default direction is
+  vanilla's hand position, so either source of direction yields an engine-legal outcome.
 
 ### Escape hatches
 
-- **Learned Death direction (v2)** — if the fixed ladder underperforms: replace it with
+- **Learned Death direction (v2)** — PROMOTED to a planned item 2026-10-09 (see the
+  last Timeline bullet); the original contingency text follows. If the fixed ladder underperforms: replace it with
   a LEARNED survivor pick via the autoregressive pointer, **never combinatorial exposure**
   (C(n,k) explodes at large hand sizes — the same reason we retire `SelectTarget`).
   Because option (ii) already has the env honoring whatever direction it's handed, v2 is
