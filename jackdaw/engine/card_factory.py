@@ -76,7 +76,7 @@ def create_playing_card(
     seal: str | None = None,
     *,
     playing_card_index: int | None = None,
-    hands_played: int = 0,
+    hands_played: int | None = None,
     game_state: dict[str, Any] | None = None,
 ) -> Card:
     """Create a playing card (goes into the deck).
@@ -126,7 +126,7 @@ def create_joker(
     eternal: bool = False,
     perishable: bool = False,
     rental: bool = False,
-    hands_played: int = 0,
+    hands_played: int | None = None,
     game_state: dict[str, Any] | None = None,
 ) -> Card:
     """Create a joker card from a P_CENTERS key (e.g. ``"j_joker"``).
@@ -165,7 +165,7 @@ def create_joker(
 def create_consumable(
     key: str,
     *,
-    hands_played: int = 0,
+    hands_played: int | None = None,
     game_state: dict[str, Any] | None = None,
 ) -> Card:
     """Create a tarot, planet, or spectral card from a P_CENTERS key.
@@ -208,7 +208,7 @@ def card_from_control(
     control: dict,
     *,
     playing_card_index: int | None = None,
-    hands_played: int = 0,
+    hands_played: int | None = None,
     game_state: dict[str, Any] | None = None,
 ) -> Card:
     """Create a playing card from a control dict.

@@ -254,7 +254,7 @@ class Card:
         self,
         center: dict[str, Any] | str,
         *,
-        hands_played: int = 0,
+        hands_played: int | None = None,
         gs: dict[str, Any] | None = None,
     ) -> None:
         """Populate ability from a prototype, matching card.lua:223 (Card:set_ability).
@@ -262,8 +262,10 @@ class Card:
         Args:
             center: Either a P_CENTERS key string (e.g. ``"j_joker"``) or a raw
                     dict with ``name``, ``set``, ``config``, etc. fields.
-            hands_played: Current ``G.GAME.hands_played`` for the
-                          ``hands_played_at_create`` field.
+            hands_played: Explicit ``hands_played_at_create``. Omitted, it is
+                          the run-wide ``G.GAME.hands_played`` read from
+                          ``gs`` (card.lua:337; D07: every creation used to
+                          stamp 0).
         """
         if isinstance(center, str):
             center = _resolve_center(center)
@@ -331,6 +333,8 @@ class Card:
             self.ability["loyalty_remaining"] = self.ability["extra"].get("every", 0)
 
         # hands_played_at_create (card.lua:337)
+        if hands_played is None:
+            hands_played = read.hands_played_total(gs) if gs is not None else 0
         self.ability["hands_played_at_create"] = hands_played
 
         self._refresh_blind_debuff(gs)

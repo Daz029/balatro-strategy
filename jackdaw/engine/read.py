@@ -440,6 +440,14 @@ class StateView:
         return hands_played_this_round(self._gs)
 
     @cached_property
+    def hands_played_total(self) -> int:
+        return hands_played_total(self._gs)
+
+    @cached_property
+    def ante(self) -> int:
+        return self._gs.get("round_resets", {}).get("ante", 1)
+
+    @cached_property
     def discards_left(self) -> int:
         return discards_left(self._gs)
 
