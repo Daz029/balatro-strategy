@@ -1,7 +1,6 @@
 import importlib.util
 from pathlib import Path
 
-
 SERVER_PATH = Path(__file__).parents[2] / "prototypes" / "shop-slideshow-prototype" / "server.py"
 SPEC = importlib.util.spec_from_file_location("shop_slideshow_server", SERVER_PATH)
 assert SPEC and SPEC.loader

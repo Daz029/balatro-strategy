@@ -14,7 +14,7 @@ from jackdaw.engine.blind import Blind
 from jackdaw.engine.card import Card
 from jackdaw.engine.card_factory import create_consumable, create_joker
 from jackdaw.engine.game import step
-from jackdaw.engine.jokers import on_end_of_round
+from jackdaw.engine.jokers import round_dollar_bonus
 from jackdaw.engine.read import StateView
 from jackdaw.engine.run_init import initialize_run
 from jackdaw.engine.scoring import score_hand
@@ -92,10 +92,10 @@ class TestD19Satellite:
             _use_first(gs)
         satellite = create_joker("j_satellite")
 
-        eor = on_end_of_round([satellite], StateView(gs, jokers=[satellite]), gs["rng"])
+        dollars = round_dollar_bonus([satellite], StateView(gs, jokers=[satellite]))
 
         assert StateView(gs).planets_used == 2
-        assert eor["dollars_earned"] == satellite.ability["extra"] * 2
+        assert dollars == satellite.ability["extra"] * 2
 
     def test_black_hole_does_not_count_for_satellite(self):
         gs = _shop_state("USAGE_SATELLITE_BH", "c_black_hole")

@@ -23,7 +23,6 @@ docs/pre-regen-handoff.md).
 from __future__ import annotations
 
 import numpy as np
-
 from hand_solver import (
     DeckComposition,
     best_immediate_play,
@@ -148,7 +147,20 @@ class TestFullSolverExistenceProof:
     def _discard_ids(self, choice) -> frozenset[int]:
         return frozenset(id(c) for c in choice.discard)
 
-    def _emit(self, hand, jokers, deck, hand_levels, blind, rng, chips, *, top_k, discards_left, joker_aware):
+    def _emit(
+        self,
+        hand,
+        jokers,
+        deck,
+        hand_levels,
+        blind,
+        rng,
+        chips,
+        *,
+        top_k,
+        discards_left,
+        joker_aware,
+    ):
         return solve_hand_turn(
             hand, jokers, hand_levels, blind, rng, deck, chips,
             1, discards_left, [], None, 0,
@@ -170,8 +182,14 @@ class TestFullSolverExistenceProof:
         play_now = best_immediate_play(hand, jokers, hand_levels, blind, rng)[1].total
         chips = play_now * 1.5  # above play-now -> the label must be a discard
 
-        old = self._emit(hand, jokers, deck, hand_levels, blind, rng, chips, top_k=1, discards_left=1, joker_aware=False)
-        new = self._emit(hand, jokers, deck, hand_levels, blind, rng, chips, top_k=1, discards_left=1, joker_aware=True)
+        old = self._emit(
+            hand, jokers, deck, hand_levels, blind, rng, chips,
+            top_k=1, discards_left=1, joker_aware=False,
+        )
+        new = self._emit(
+            hand, jokers, deck, hand_levels, blind, rng, chips,
+            top_k=1, discards_left=1, joker_aware=True,
+        )
 
         # B7 flips the emitted discard toward Greedy's flush line.
         assert new.template_name == "flush_Diamonds"
@@ -207,7 +225,10 @@ class TestFullSolverExistenceProof:
         deck = _full_deck_minus(hand)
         hand_levels, blind, rng = _fixtures()
         play_now = best_immediate_play(hand, jokers, hand_levels, blind, rng)[1].total
-        new = self._emit(hand, jokers, deck, hand_levels, blind, rng, play_now * 1.5, top_k=1, discards_left=2, joker_aware=True)
+        new = self._emit(
+            hand, jokers, deck, hand_levels, blind, rng, play_now * 1.5,
+            top_k=1, discards_left=2, joker_aware=True,
+        )
         assert new.action == "discard"
         assert new.template_name == "flush_Diamonds"
 

@@ -13,7 +13,7 @@ Ports ``evaluate_round`` (state_events.lua:1135) and rental deduction
    Skipped when ``modifiers['no_extra_hand_money']`` is set.
 4. Unused discards bonus — ``discards_left × money_per_discard``.
    Only present when ``modifiers['money_per_discard']`` is set (Green Deck).
-5. Joker dollar bonuses — via :func:`on_end_of_round` (``calc_dollar_bonus``).
+5. Joker dollar bonuses — via ``round_dollar_bonus`` (``calc_dollar_bonus``).
 6. Interest — ``interest_amount × min(effective_money // 5, interest_cap // 5)``
    where ``effective_money = money − rental_cost``.
    Skipped when ``modifiers['no_interest']`` is set or ``effective_money < 5``.
@@ -38,7 +38,8 @@ if TYPE_CHECKING:
     from jackdaw.engine.card import Card
     from jackdaw.engine.rng import PseudoRandom
 
-from jackdaw.engine.jokers import GameSnapshot, on_end_of_round
+from jackdaw.engine.jokers import round_dollar_bonus
+from jackdaw.engine.read import StateView
 from jackdaw.engine.round_lifecycle import is_rental
 
 # ---------------------------------------------------------------------------
@@ -161,10 +162,8 @@ def calculate_round_earnings(
         jokers: Active joker cards.
         game_state: Run-level state dict.
         rng: PseudoRandom instance (for end-of-round joker RNG effects).
-        joker_dollars: Pre-computed joker dollar bonus from the
-            ``on_end_of_round`` call in ``_round_won``.  When provided,
-            ``on_end_of_round`` is **not** called again, avoiding a
-            duplicate RNG consumption that would desync the PRNG state.
+        joker_dollars: Pre-computed joker dollar bonus from ``_round_won``.
+            When provided, the fallback calculation is skipped.
 
     Returns:
         :class:`RoundEarnings` with all components and their net total.
@@ -212,19 +211,13 @@ def calculate_round_earnings(
     # calc_dollar_bonus per joker: Golden Joker, Cloud 9, Satellite, etc.
     #
     # When joker_dollars is pre-computed (passed from _round_won), skip
-    # on_end_of_round to avoid duplicate RNG consumption.
+    # end_of_round handlers are deliberately not fired by this fallback.
     # ------------------------------------------------------------------
     if joker_dollars is None:
-        # This compatibility fallback has no full gs.  The real _round_won
-        # path passes joker_dollars precomputed through its live StateView.
-        game_snap = GameSnapshot(
-            money=money,
-            hands_left=hands_left,
-            discards_left=discards_left,
-            joker_count=len(jokers),
+        joker_dollars = round_dollar_bonus(
+            jokers,
+            StateView(game_state or {}, jokers=jokers),
         )
-        end_result = on_end_of_round(jokers, game_snap, rng)
-        joker_dollars = end_result["dollars_earned"]
 
     # ------------------------------------------------------------------
     # Step 6 — Interest (state_events.lua:1191)

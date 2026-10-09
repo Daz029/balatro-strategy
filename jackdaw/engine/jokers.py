@@ -20,6 +20,7 @@ from jackdaw.engine import read
 from jackdaw.engine.data.hands import HAND_ORDER
 from jackdaw.engine.data.prototypes import JOKERS
 from jackdaw.engine.effects import (
+    AddTag,
     ChangeHandSize,
     ChangeRoundResource,
     CopyCard,
@@ -31,7 +32,6 @@ from jackdaw.engine.effects import (
     EffectQueue,
     SetPoolFlag,
     UnappliedEffectError,
-    AddTag,
 )
 
 if TYPE_CHECKING:

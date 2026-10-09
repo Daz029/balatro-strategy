@@ -8,17 +8,27 @@ import pytest
 from jackdaw.engine.blind import Blind
 from jackdaw.engine.card import Card, reset_sort_id_counter
 from jackdaw.engine.data.prototypes import _load_json
+from jackdaw.engine.effects import (
+    ChangeRoundResource,
+    CopyCard,
+    CreateCard,
+    CreatePlayingCard,
+    DestroyCard,
+    DisableBlind,
+    EffectQueue,
+    SetPoolFlag,
+)
 from jackdaw.engine.hand_levels import HandLevels
 from jackdaw.engine.jokers import (
     _REGISTRY,
     GameSnapshot,
-    JokerContext,
     calc_dollar_bonus,
     calculate_joker,
-    on_end_of_round,
+    round_dollar_bonus,
 )
 from jackdaw.engine.rng import PseudoRandom
 from jackdaw.engine.scoring import score_hand
+from tests.engine._joker_ctx import make_ctx
 
 # ============================================================================
 # Shared helpers
@@ -135,10 +145,10 @@ class TestPassiveJokers:
     def test_noop_in_all_contexts(self, key):
         j = _joker(key)
         for ctx in [
-            JokerContext(joker_main=True),
-            JokerContext(before=True),
-            JokerContext(after=True),
-            JokerContext(individual=True, cardarea="play"),
+            make_ctx(joker_main=True),
+            make_ctx(before=True),
+            make_ctx(after=True),
+            make_ctx(individual=True, cardarea="play"),
         ]:
             assert calculate_joker(j, ctx) is None
 
@@ -152,28 +162,29 @@ class TestDna:
     def test_first_hand_single_card(self):
         j = _joker("j_dna")
         played = [_card("Hearts", "Ace")]
-        ctx = JokerContext(before=True, full_hand=played, hands_played=0)
+        ctx = make_ctx(before=True, full_hand=played, hands_played=0)
         result = calculate_joker(j, ctx)
         assert result is not None
-        assert result.extra["create"]["type"] == "playing_card_copy"
-        assert result.extra["create"]["source_card"] is played[0]
+        assert len(result.effects) == 1
+        assert isinstance(result.effects[0], CopyCard)
+        assert result.effects[0].card is played[0]
 
     def test_first_hand_multiple_cards_no_effect(self):
         j = _joker("j_dna")
         played = [_card("Hearts", "Ace"), _card("Spades", "King")]
-        ctx = JokerContext(before=True, full_hand=played, hands_played=0)
+        ctx = make_ctx(before=True, full_hand=played, hands_played=0)
         assert calculate_joker(j, ctx) is None
 
     def test_second_hand_no_effect(self):
         j = _joker("j_dna")
         played = [_card("Hearts", "Ace")]
-        ctx = JokerContext(before=True, full_hand=played, hands_played=1)
+        ctx = make_ctx(before=True, full_hand=played, hands_played=1)
         assert calculate_joker(j, ctx) is None
 
     def test_blueprint_does_not_copy(self):
         j = _joker("j_dna")
         played = [_card("Hearts", "Ace")]
-        ctx = JokerContext(
+        ctx = make_ctx(
             before=True,
             full_hand=played,
             hands_played=0,
@@ -185,30 +196,33 @@ class TestDna:
 class TestRiffRaff:
     def test_creates_two_jokers(self):
         j = _joker("j_riff_raff", extra=2)
-        ctx = JokerContext(
+        ctx = make_ctx(
             setting_blind=True,
             joker_count=3,
             joker_slots=5,
         )
         result = calculate_joker(j, ctx)
         assert result is not None
-        assert result.extra["create"]["type"] == "Joker"
-        assert result.extra["create"]["rarity"] == "Common"
-        assert result.extra["create"]["count"] == 2
+        assert len(result.effects) == 1
+        assert isinstance(result.effects[0], CreateCard)
+        assert result.effects[0].set == "Joker"
+        assert result.effects[0].rarity == "Common"
+        assert result.effects[0].count == 2
 
     def test_one_slot_creates_one(self):
         j = _joker("j_riff_raff", extra=2)
-        ctx = JokerContext(
+        ctx = make_ctx(
             setting_blind=True,
             joker_count=4,
             joker_slots=5,
         )
         result = calculate_joker(j, ctx)
-        assert result.extra["create"]["count"] == 1
+        assert isinstance(result.effects[0], CreateCard)
+        assert result.effects[0].count == 1
 
     def test_no_slots_no_effect(self):
         j = _joker("j_riff_raff", extra=2)
-        ctx = JokerContext(
+        ctx = make_ctx(
             setting_blind=True,
             joker_count=5,
             joker_slots=5,
@@ -222,29 +236,26 @@ class TestRiffRaff:
         room guard, Riff-raff produced 6 jokers in a 5-slot game -- a state
         the fixed-width obs encoders (MAX_JOKERS=5) cannot represent.
         """
-        from jackdaw.engine.game import _apply_setting_blind_mutations
-
         jokers = [_joker("j_joker") for _ in range(4)]  # 1 slot free
         # gs must alias gs["jokers"] to the passed list and carry an rng:
         # Riff-raff now rolls the real Common pool via _resolve_create_descriptors
         # (which appends to gs["jokers"]) instead of hardcoding j_joker.
         gs = {"joker_slots": 5, "jokers": jokers, "rng": PseudoRandom("RIFFRAFF")}
-        mutations = [{"create": {"type": "Joker", "rarity": "Common", "count": 2}}]
-        _apply_setting_blind_mutations(gs, mutations, jokers)
+        queue = EffectQueue(gs)
+        queue.add(CreateCard(set="Joker", rarity="Common", count=2))
+        queue.apply()
         assert len(jokers) == 5  # created 1, not 2 -- capped at joker_slots
 
     def test_application_creates_nothing_when_full(self):
-        from jackdaw.engine.game import _apply_setting_blind_mutations
-
         jokers = [_joker("j_joker") for _ in range(5)]  # no room
         gs = {"joker_slots": 5, "jokers": jokers, "rng": PseudoRandom("RIFFRAFF")}
-        mutations = [{"create": {"type": "Joker", "rarity": "Common", "count": 2}}]
-        _apply_setting_blind_mutations(gs, mutations, jokers)
+        queue = EffectQueue(gs)
+        queue.add(CreateCard(set="Joker", rarity="Common", count=2))
+        queue.apply()
         assert len(jokers) == 5
 
 
 class TestMarbleJoker:
-    _MARBLE_MUT = {"create": {"type": "playing_card", "enhancement": "m_stone", "key": "marble"}}
 
     def test_creates_well_formed_stone_card(self):
         """Regression: Marble's stone card must carry effect 'Stone Card'.
@@ -254,10 +265,15 @@ class TestMarbleJoker:
         card scored as a normal card everywhere (all Stone logic checks
         ``effect == "Stone Card"``) and later crashed reset_round_targets.
         """
-        from jackdaw.engine.game import _apply_setting_blind_mutations
-
-        gs = {"deck": [], "rng": PseudoRandom("MARB_FRONT")}
-        _apply_setting_blind_mutations(gs, [self._MARBLE_MUT], [])
+        j = _joker("j_marble")
+        gs = {"deck": [], "jokers": [j], "rng": PseudoRandom("MARB_FRONT")}
+        queue = EffectQueue(gs)
+        result = calculate_joker(
+            j,
+            make_ctx(setting_blind=True, game=GameSnapshot(), queue=queue),
+        )
+        assert isinstance(result.effects[0], CreatePlayingCard)
+        queue.apply()
         assert len(gs["deck"]) == 1
         stone = gs["deck"][0]
         assert stone.ability["effect"] == "Stone Card"
@@ -267,15 +283,18 @@ class TestMarbleJoker:
         """The malformed stone card leaked reset_round_targets' Stone filter
         and hit the ``base is None`` a stone card carries -> AttributeError.
         """
-        from jackdaw.engine.game import _apply_setting_blind_mutations
         from jackdaw.engine.round_lifecycle import reset_round_targets
 
+        j = _joker("j_marble")
         gs = {
             "deck": [_card("Hearts", "5")],
+            "jokers": [j],
             "current_round": {},
             "rng": PseudoRandom("MARB_FRONT_RT"),
         }
-        _apply_setting_blind_mutations(gs, [self._MARBLE_MUT], [])
+        queue = EffectQueue(gs)
+        calculate_joker(j, make_ctx(setting_blind=True, game=GameSnapshot(), queue=queue))
+        queue.apply()
         # Must not raise even though a base-less stone card is in the deck.
         reset_round_targets(PseudoRandom("MARB_RT"), 1, gs)
         assert gs["current_round"]["mail_card"]["id"]  # computed off a real card
@@ -285,7 +304,7 @@ class TestEightBall:
     def test_rank_8_high_probability(self):
         j = _joker("j_8_ball", extra=4)
         eight = _card("Hearts", "8")
-        ctx = JokerContext(
+        ctx = make_ctx(
             individual=True,
             cardarea="play",
             other_card=eight,
@@ -294,13 +313,14 @@ class TestEightBall:
         )
         result = calculate_joker(j, ctx)
         assert result is not None
-        assert result.extra["create"]["type"] == "Tarot"
+        assert isinstance(result.effects[0], CreateCard)
+        assert result.effects[0].set == "Tarot"
 
 
 class TestVagabond:
     def test_exact_threshold(self):
         j = _joker("j_vagabond", extra=4)
-        ctx = JokerContext(joker_main=True, money=4)
+        ctx = make_ctx(joker_main=True, money=4)
         result = calculate_joker(j, ctx)
         assert result is not None
 
@@ -309,7 +329,7 @@ class TestSixthSense:
     def test_rank_6_first_hand_single_card(self):
         j = _joker("j_sixth_sense")
         six = _card("Hearts", "6")
-        ctx = JokerContext(
+        ctx = make_ctx(
             destroying_card=six,
             full_hand=[six],
             hands_played=0,
@@ -317,7 +337,8 @@ class TestSixthSense:
         result = calculate_joker(j, ctx)
         assert result is not None
         assert result.remove is True
-        assert result.extra["create"]["type"] == "Spectral"
+        assert isinstance(result.effects[0], CreateCard)
+        assert result.effects[0].set == "Spectral"
 
 
 # ============================================================================
@@ -326,10 +347,9 @@ class TestSixthSense:
 
 
 class TestGoldenJoker:
-    def test_via_on_end_of_round(self):
+    def test_via_round_dollar_bonus(self):
         j = _joker("j_golden", extra=4)
-        result = on_end_of_round([j], GameSnapshot())
-        assert result["dollars_earned"] == 4
+        assert round_dollar_bonus([j], GameSnapshot()) == 4
 
 
 class TestCloud9:
@@ -342,7 +362,7 @@ class TestRocket:
     def test_after_boss_increases(self):
         j = _joker("j_rocket", extra={"dollars": 1, "increase": 2})
         boss = Blind.create("bl_hook", ante=1)
-        ctx = JokerContext(end_of_round=True, blind=boss)
+        ctx = make_ctx(end_of_round=True, blind=boss)
         calculate_joker(j, ctx)
         # dollars should now be 3 (1 + 2)
         assert j.ability["extra"]["dollars"] == 3
@@ -352,24 +372,23 @@ class TestRocket:
         j = _joker("j_rocket", extra={"dollars": 1, "increase": 2})
         boss = Blind.create("bl_hook", ante=1)
         for _ in range(2):
-            calculate_joker(j, JokerContext(end_of_round=True, blind=boss))
+            calculate_joker(j, make_ctx(end_of_round=True, blind=boss))
         # 1 + 2 + 2 = 5
         assert calc_dollar_bonus(j, GameSnapshot()) == 5
 
 
 class TestDelayedGratification:
-    def test_via_on_end_of_round(self):
+    def test_via_round_dollar_bonus(self):
         j = _joker("j_delayed_grat", extra=2)
         game = GameSnapshot(discards_used=0, discards_left=4)
-        result = on_end_of_round([j], game)
-        assert result["dollars_earned"] == 8
+        assert round_dollar_bonus([j], game) == 8
 
 
 class TestEgg:
     def test_sell_value_increases(self):
         j = _joker("j_egg", extra=3)
         j.sell_cost = 2
-        ctx = JokerContext(end_of_round=True)
+        ctx = make_ctx(end_of_round=True)
         calculate_joker(j, ctx)
         assert j.ability["extra_value"] == 3
         assert j.sell_cost == 5  # 2 + 3
@@ -378,7 +397,7 @@ class TestEgg:
         j = _joker("j_egg", extra=3)
         j.sell_cost = 2
         for _ in range(3):
-            calculate_joker(j, JokerContext(end_of_round=True))
+            calculate_joker(j, make_ctx(end_of_round=True))
         assert j.ability["extra_value"] == 9
         assert j.sell_cost == 11  # 2 + 3*3
 
@@ -392,7 +411,7 @@ class TestGiftCard:
         for j in jokers:
             j.sell_cost = 2
 
-        ctx = JokerContext(end_of_round=True, jokers=jokers)
+        ctx = make_ctx(end_of_round=True, jokers=jokers)
         calculate_joker(gift, ctx)
 
         for j in jokers:
@@ -407,7 +426,7 @@ class TestGiftCard:
             j.sell_cost = 1
 
         for _ in range(3):
-            calculate_joker(gift, JokerContext(end_of_round=True, jokers=jokers))
+            calculate_joker(gift, make_ctx(end_of_round=True, jokers=jokers))
 
         assert j1.ability["extra_value"] == 3
         assert j1.sell_cost == 4
@@ -416,15 +435,20 @@ class TestGiftCard:
 class TestInvisible:
     def test_sell_at_threshold_duplicates(self):
         j = _joker("j_invisible", extra=2, invis_rounds=2)
-        result = calculate_joker(j, JokerContext(selling_self=True))
+        target = _joker("j_joker")
+        result = calculate_joker(
+            j,
+            make_ctx(selling_self=True, jokers=[j, target], rng=PseudoRandom("INVIS")),
+        )
         assert result is not None
-        assert result.extra["duplicate_random_joker"] is True
+        assert isinstance(result.effects[0], CopyCard)
+        assert result.effects[0].card is target
 
 
 class TestSpaceJoker:
     def test_high_probability_levels_up(self):
         j = _joker("j_space", extra=4)
-        ctx = JokerContext(
+        ctx = make_ctx(
             before=True,
             rng=PseudoRandom("SP"),
             probabilities_normal=1000.0,
@@ -439,8 +463,7 @@ class TestOnEndOfRound:
         golden = _joker("j_golden", extra=4)
         cloud = _joker("j_cloud_9", extra=1)
         game = GameSnapshot(nine_tally=5)
-        result = on_end_of_round([golden, cloud], game)
-        assert result["dollars_earned"] == 9  # 4 + 5
+        assert round_dollar_bonus([golden, cloud], game) == 9
 
 
 # ============================================================================
@@ -455,7 +478,7 @@ class TestBaseballCard:
         """j_steel_joker is rarity 2 (Uncommon) -> x1.5."""
         baseball = _joker("j_baseball", extra=1.5)
         uncommon = _joker("j_steel_joker", extra=0.2)
-        ctx = JokerContext(other_joker=uncommon)
+        ctx = make_ctx(other_joker=uncommon)
         result = calculate_joker(baseball, ctx)
         assert result is not None
         assert result.Xmult_mod == 1.5
@@ -464,7 +487,7 @@ class TestBaseballCard:
         """j_joker is rarity 1 (Common) -> no effect."""
         baseball = _joker("j_baseball", extra=1.5)
         common = _joker("j_joker", mult=4)
-        ctx = JokerContext(other_joker=common)
+        ctx = make_ctx(other_joker=common)
         result = calculate_joker(baseball, ctx)
         assert result is None
 
@@ -472,13 +495,13 @@ class TestBaseballCard:
         """j_blueprint is rarity 3 (Rare) -> no effect."""
         baseball = _joker("j_baseball", extra=1.5)
         rare = _joker("j_blueprint")
-        ctx = JokerContext(other_joker=rare)
+        ctx = make_ctx(other_joker=rare)
         assert calculate_joker(baseball, ctx) is None
 
     def test_does_not_trigger_on_self(self):
         """Baseball Card should not trigger on itself (even if Rare)."""
         baseball = _joker("j_baseball", extra=1.5)
-        ctx = JokerContext(other_joker=baseball)
+        ctx = make_ctx(other_joker=baseball)
         assert calculate_joker(baseball, ctx) is None
 
     def test_pipeline_three_uncommon_jokers(self):
@@ -570,7 +593,7 @@ class TestSwashbuckler:
         j2 = _joker("j_stuntman", extra={"chip_mod": 250})
         j2.sell_cost = 4
         jokers = [swash, j1, j2]
-        ctx = JokerContext(joker_main=True, jokers=jokers)
+        ctx = make_ctx(joker_main=True, jokers=jokers)
         result = calculate_joker(swash, ctx)
         assert result is not None
         assert result.mult_mod == 6  # 2 + 4
@@ -579,7 +602,7 @@ class TestSwashbuckler:
         swash = _joker("j_swashbuckler")
         swash.sell_cost = 3
         jokers = [swash]
-        ctx = JokerContext(joker_main=True, jokers=jokers)
+        ctx = make_ctx(joker_main=True, jokers=jokers)
         assert calculate_joker(swash, ctx) is None
 
     def test_includes_debuffed(self):
@@ -588,7 +611,7 @@ class TestSwashbuckler:
         j1.sell_cost = 5
         j1.debuff = True
         jokers = [swash, j1]
-        ctx = JokerContext(joker_main=True, jokers=jokers)
+        ctx = make_ctx(joker_main=True, jokers=jokers)
         assert calculate_joker(swash, ctx).mult_mod == 5
 
     def test_pipeline_with_other_jokers(self):
@@ -628,28 +651,31 @@ class TestGrosMichel:
 
     def test_joker_main_gives_mult(self):
         j = self._make()
-        result = calculate_joker(j, JokerContext(joker_main=True))
+        result = calculate_joker(j, make_ctx(joker_main=True))
         assert result is not None
         assert result.mult_mod == 15
 
     def test_end_of_round_high_probability_destroys(self):
         """With very high probability, should self-destruct."""
         j = self._make()
-        ctx = JokerContext(
+        ctx = make_ctx(
             end_of_round=True,
             rng=PseudoRandom("GM"),
             probabilities_normal=1000.0,
         )
         result = calculate_joker(j, ctx)
         assert result is not None
-        assert result.remove is True
-        assert result.extra["pool_flag"] == "gros_michel_extinct"
+        assert len(result.effects) == 2
+        assert isinstance(result.effects[0], DestroyCard)
+        assert result.effects[0].card is j
+        assert isinstance(result.effects[1], SetPoolFlag)
+        assert result.effects[1].flag == "gros_michel_extinct"
 
     def test_end_of_round_survives(self):
         """With very low probability, should survive."""
         j = self._make()
         j.ability["extra"]["odds"] = 1000000
-        ctx = JokerContext(
+        ctx = make_ctx(
             end_of_round=True,
             rng=PseudoRandom("GM"),
             probabilities_normal=1.0,
@@ -681,13 +707,13 @@ class TestCavendish:
 
     def test_joker_main_gives_xmult(self):
         j = self._make()
-        result = calculate_joker(j, JokerContext(joker_main=True))
+        result = calculate_joker(j, make_ctx(joker_main=True))
         assert result is not None
         assert result.Xmult_mod == 3
 
     def test_end_of_round_survives(self):
         j = self._make()
-        ctx = JokerContext(
+        ctx = make_ctx(
             end_of_round=True,
             rng=PseudoRandom("CV"),
             probabilities_normal=1.0,
@@ -699,36 +725,39 @@ class TestCavendish:
 
     def test_end_of_round_high_probability_destroys(self):
         j = self._make()
-        ctx = JokerContext(
+        ctx = make_ctx(
             end_of_round=True,
             rng=PseudoRandom("CV"),
             probabilities_normal=1000000.0,
         )
         result = calculate_joker(j, ctx)
         assert result is not None
-        assert result.remove is True
+        assert len(result.effects) == 1
+        assert isinstance(result.effects[0], DestroyCard)
+        assert result.effects[0].card is j
 
 
 class TestChicot:
     def test_disables_boss_blind(self):
         j = _joker("j_chicot")
         boss = Blind.create("bl_hook", ante=1)
-        ctx = JokerContext(setting_blind=True, blind=boss)
+        ctx = make_ctx(setting_blind=True, blind=boss)
         result = calculate_joker(j, ctx)
         assert result is not None
-        assert result.extra["disable_blind"] is True
+        assert len(result.effects) == 1
+        assert isinstance(result.effects[0], DisableBlind)
 
     def test_non_boss_no_effect(self):
         j = _joker("j_chicot")
         small = Blind.create("bl_small", ante=1)
-        ctx = JokerContext(setting_blind=True, blind=small)
+        ctx = make_ctx(setting_blind=True, blind=small)
         assert calculate_joker(j, ctx) is None
 
     def test_already_disabled_no_effect(self):
         j = _joker("j_chicot")
         boss = Blind.create("bl_hook", ante=1)
         boss.disabled = True
-        ctx = JokerContext(setting_blind=True, blind=boss)
+        ctx = make_ctx(setting_blind=True, blind=boss)
         assert calculate_joker(j, ctx) is None
 
 
@@ -736,26 +765,29 @@ class TestLuchador:
     def test_sell_during_boss(self):
         j = _joker("j_luchador")
         boss = Blind.create("bl_hook", ante=1)
-        ctx = JokerContext(selling_self=True, blind=boss)
+        ctx = make_ctx(selling_self=True, blind=boss)
         result = calculate_joker(j, ctx)
         assert result is not None
-        assert result.extra["disable_blind"] is True
+        assert len(result.effects) == 1
+        assert isinstance(result.effects[0], DisableBlind)
 
     def test_sell_during_non_boss(self):
         j = _joker("j_luchador")
         small = Blind.create("bl_small", ante=1)
-        ctx = JokerContext(selling_self=True, blind=small)
+        ctx = make_ctx(selling_self=True, blind=small)
         assert calculate_joker(j, ctx) is None
 
 
 class TestBurglar:
     def test_setting_blind(self):
         j = _joker("j_burglar", extra=3)
-        ctx = JokerContext(setting_blind=True)
+        ctx = make_ctx(setting_blind=True)
         result = calculate_joker(j, ctx)
         assert result is not None
-        assert result.extra["set_hands"] == 3
-        assert result.extra["set_discards"] == 0
+        assert len(result.effects) == 1
+        assert isinstance(result.effects[0], ChangeRoundResource)
+        assert result.effects[0].hands == 3
+        assert result.effects[0].zero_discards is True
 
 
 class TestMidasMask:
@@ -764,7 +796,7 @@ class TestMidasMask:
         king = _card("Hearts", "King")
         five = _card("Spades", "5")
         scoring = [king, five]
-        ctx = JokerContext(before=True, scoring_hand=scoring)
+        ctx = make_ctx(before=True, scoring_hand=scoring)
         calculate_joker(j, ctx)
         # King should be Gold now
         assert king.ability.get("name") == "Gold Card"
@@ -775,7 +807,7 @@ class TestMidasMask:
         """Enhancement change persists -- card stays Gold for future hands."""
         j = _joker("j_midas_mask")
         queen = _card("Hearts", "Queen")
-        ctx = JokerContext(before=True, scoring_hand=[queen])
+        ctx = make_ctx(before=True, scoring_hand=[queen])
         calculate_joker(j, ctx)
         assert queen.ability.get("name") == "Gold Card"
         # Card is still Gold on next access
@@ -784,7 +816,7 @@ class TestMidasMask:
     def test_no_face_no_effect(self):
         j = _joker("j_midas_mask")
         five = _card("Hearts", "5")
-        ctx = JokerContext(before=True, scoring_hand=[five])
+        ctx = make_ctx(before=True, scoring_hand=[five])
         result = calculate_joker(j, ctx)
         assert result is None
 
@@ -792,7 +824,7 @@ class TestMidasMask:
         j = _joker("j_midas_mask")
         king = _card("Hearts", "King")
         king.debuff = True
-        ctx = JokerContext(before=True, scoring_hand=[king])
+        ctx = make_ctx(before=True, scoring_hand=[king])
         result = calculate_joker(j, ctx)
         assert result is None
 
@@ -804,7 +836,7 @@ class TestMidasMask:
         scoring = [five, two]
         pareidolia = _joker("j_pareidolia_stub")
         pareidolia.ability = {"name": "Pareidolia", "set": "Joker"}
-        ctx = JokerContext(before=True, scoring_hand=scoring, pareidolia=True)
+        ctx = make_ctx(before=True, scoring_hand=scoring, pareidolia=True)
         calculate_joker(j, ctx)
         assert five.ability.get("name") == "Gold Card"
         assert two.ability.get("name") == "Gold Card"
@@ -840,7 +872,7 @@ class TestHiker:
     def test_adds_perma_bonus(self):
         j = _joker("j_hiker", extra=5)
         ace = _card("Hearts", "Ace")
-        ctx = JokerContext(individual=True, cardarea="play", other_card=ace)
+        ctx = make_ctx(individual=True, cardarea="play", other_card=ace)
         calculate_joker(j, ctx)
         assert ace.ability["perma_bonus"] == 5
 
@@ -849,7 +881,7 @@ class TestHiker:
         j = _joker("j_hiker", extra=5)
         ace = _card("Hearts", "Ace")
         for _ in range(3):
-            ctx = JokerContext(
+            ctx = make_ctx(
                 individual=True,
                 cardarea="play",
                 other_card=ace,
@@ -897,7 +929,7 @@ class TestHiker:
     def test_blueprint_does_not_mutate(self):
         j = _joker("j_hiker", extra=5)
         ace = _card("Hearts", "Ace")
-        ctx = JokerContext(
+        ctx = make_ctx(
             individual=True,
             cardarea="play",
             other_card=ace,
@@ -1043,7 +1075,7 @@ class TestSeltzer:
 
     def test_unit_always_retriggers(self):
         j = _joker("j_selzer", extra=10)
-        ctx = JokerContext(
+        ctx = make_ctx(
             repetition=True,
             cardarea="play",
             other_card=_card("Hearts", "5"),
@@ -1054,24 +1086,26 @@ class TestSeltzer:
 
     def test_after_decrements(self):
         j = _joker("j_selzer", extra=10)
-        ctx = JokerContext(after=True)
+        ctx = make_ctx(after=True)
         calculate_joker(j, ctx)
         assert j.ability["extra"] == 9
 
     def test_self_destructs_at_zero(self):
         j = _joker("j_selzer", extra=1)
-        ctx = JokerContext(after=True)
+        ctx = make_ctx(after=True)
         result = calculate_joker(j, ctx)
         assert result is not None
-        assert result.remove is True
+        assert isinstance(result.effects[0], DestroyCard)
+        assert result.effects[0].card is j
 
     def test_ten_hands_then_destruct(self):
         j = _joker("j_selzer", extra=10)
         for i in range(9):
-            calculate_joker(j, JokerContext(after=True))
+            calculate_joker(j, make_ctx(after=True))
         assert j.ability["extra"] == 1
-        result = calculate_joker(j, JokerContext(after=True))
-        assert result.remove is True
+        result = calculate_joker(j, make_ctx(after=True))
+        assert isinstance(result.effects[0], DestroyCard)
+        assert result.effects[0].card is j
 
     def test_pipeline_all_cards_retriggered(self):
         """Pair of Aces with Seltzer: all cards retriggered.
@@ -1190,7 +1224,7 @@ class TestGreenJoker:
 
     def test_hand_1_adds_1(self):
         j = self._make()
-        ctx = JokerContext(
+        ctx = make_ctx(
             before=True,
             scoring_hand=[_card("Hearts", "5"), _card("Spades", "5")],
         )
@@ -1200,7 +1234,7 @@ class TestGreenJoker:
     def test_hand_2_adds_2(self):
         j = self._make()
         # Hand 1
-        ctx = JokerContext(
+        ctx = make_ctx(
             before=True,
             scoring_hand=[_card("Hearts", "5"), _card("Spades", "5")],
         )
@@ -1212,7 +1246,7 @@ class TestGreenJoker:
     def test_discard_subtracts(self):
         j = self._make()
         # Play 2 hands: mult = 2
-        ctx_b = JokerContext(
+        ctx_b = make_ctx(
             before=True,
             scoring_hand=[_card("Hearts", "5"), _card("Spades", "5")],
         )
@@ -1222,7 +1256,7 @@ class TestGreenJoker:
 
         # Discard (fires on last card)
         last = _card("Hearts", "3")
-        ctx_d = JokerContext(
+        ctx_d = make_ctx(
             discard=True,
             other_card=last,
             full_hand=[last],
@@ -1233,7 +1267,7 @@ class TestGreenJoker:
     def test_discard_clamps_to_zero(self):
         j = self._make()
         last = _card("Hearts", "3")
-        ctx_d = JokerContext(
+        ctx_d = make_ctx(
             discard=True,
             other_card=last,
             full_hand=[last],
@@ -1244,19 +1278,19 @@ class TestGreenJoker:
     def test_joker_main_returns_accumulated(self):
         j = self._make()
         # Play 3 hands
-        ctx_b = JokerContext(
+        ctx_b = make_ctx(
             before=True,
             scoring_hand=[_card("Hearts", "5"), _card("Spades", "5")],
         )
         for _ in range(3):
             calculate_joker(j, ctx_b)
-        result = calculate_joker(j, JokerContext(joker_main=True))
+        result = calculate_joker(j, make_ctx(joker_main=True))
         assert result is not None
         assert result.mult_mod == 3
 
     def test_blueprint_does_not_mutate(self):
         j = self._make()
-        ctx = JokerContext(
+        ctx = make_ctx(
             before=True,
             blueprint=1,
             scoring_hand=[_card("Hearts", "5"), _card("Spades", "5")],
@@ -1272,7 +1306,7 @@ class TestRideTheBus:
     def test_three_no_face_hands(self):
         j = self._make()
         no_face_hand = [_card("Hearts", "5"), _card("Spades", "5")]
-        ctx = JokerContext(before=True, scoring_hand=no_face_hand)
+        ctx = make_ctx(before=True, scoring_hand=no_face_hand)
         for _ in range(3):
             calculate_joker(j, ctx)
         assert j.ability["mult"] == 3
@@ -1280,31 +1314,31 @@ class TestRideTheBus:
     def test_face_card_resets(self):
         j = self._make()
         no_face = [_card("Hearts", "5"), _card("Spades", "5")]
-        ctx_nf = JokerContext(before=True, scoring_hand=no_face)
+        ctx_nf = make_ctx(before=True, scoring_hand=no_face)
         for _ in range(3):
             calculate_joker(j, ctx_nf)
         assert j.ability["mult"] == 3
 
         face = [_card("Hearts", "King"), _card("Spades", "5")]
-        ctx_f = JokerContext(before=True, scoring_hand=face)
+        ctx_f = make_ctx(before=True, scoring_hand=face)
         calculate_joker(j, ctx_f)
         assert j.ability["mult"] == 0
 
     def test_joker_main_returns_accumulated(self):
         j = self._make()
-        ctx = JokerContext(
+        ctx = make_ctx(
             before=True,
             scoring_hand=[_card("Hearts", "5"), _card("Spades", "5")],
         )
         for _ in range(3):
             calculate_joker(j, ctx)
-        result = calculate_joker(j, JokerContext(joker_main=True))
+        result = calculate_joker(j, make_ctx(joker_main=True))
         assert result is not None
         assert result.mult_mod == 3
 
     def test_zero_mult_returns_none(self):
         j = self._make()
-        assert calculate_joker(j, JokerContext(joker_main=True)) is None
+        assert calculate_joker(j, make_ctx(joker_main=True)) is None
 
 
 class TestSpareTrousers:
@@ -1314,14 +1348,14 @@ class TestSpareTrousers:
     def test_two_pair_triggers(self):
         j = self._make()
         ph = _poker_hands_with("Two Pair", "Pair")
-        ctx = JokerContext(before=True, poker_hands=ph)
+        ctx = make_ctx(before=True, poker_hands=ph)
         calculate_joker(j, ctx)
         assert j.ability["mult"] == 2
 
     def test_accumulates(self):
         j = self._make()
         ph = _poker_hands_with("Two Pair", "Pair")
-        ctx = JokerContext(before=True, poker_hands=ph)
+        ctx = make_ctx(before=True, poker_hands=ph)
         calculate_joker(j, ctx)
         calculate_joker(j, ctx)
         assert j.ability["mult"] == 4
@@ -1334,14 +1368,14 @@ class TestSquareJoker:
     def test_four_cards_adds(self):
         j = self._make()
         hand = [_card("Hearts", "5")] * 4
-        ctx = JokerContext(before=True, full_hand=hand)
+        ctx = make_ctx(before=True, full_hand=hand)
         calculate_joker(j, ctx)
         assert j.ability["extra"]["chips"] == 4
 
     def test_five_cards_no_effect(self):
         j = self._make()
         hand = [_card("Hearts", "5")] * 5
-        ctx = JokerContext(before=True, full_hand=hand)
+        ctx = make_ctx(before=True, full_hand=hand)
         calculate_joker(j, ctx)
         assert j.ability["extra"]["chips"] == 0
 
@@ -1352,13 +1386,14 @@ class TestIceCream:
 
     def test_hand_twenty_one_self_destructs(self):
         j = self._make()
-        ctx = JokerContext(after=True)
+        ctx = make_ctx(after=True)
         for _ in range(19):
             calculate_joker(j, ctx)
         # chips=5, chip_mod=5 -> 5-5 <= 0 -> remove
         result = calculate_joker(j, ctx)
         assert result is not None
-        assert result.remove is True
+        assert isinstance(result.effects[0], DestroyCard)
+        assert result.effects[0].card is j
 
     def test_in_scoring_pipeline(self):
         """Full pipeline: Ice Cream contributes chips then decays."""
@@ -1398,13 +1433,14 @@ class TestPopcorn:
 
     def test_self_destructs_at_zero(self):
         j = self._make()
-        ctx = JokerContext(end_of_round=True)
+        ctx = make_ctx(end_of_round=True)
         for _ in range(4):
             calculate_joker(j, ctx)
         assert j.ability["mult"] == 4
         result = calculate_joker(j, ctx)
         assert result is not None
-        assert result.remove is True
+        assert isinstance(result.effects[0], DestroyCard)
+        assert result.effects[0].card is j
 
 
 class TestWeeJoker:
@@ -1416,7 +1452,7 @@ class TestWeeJoker:
         j = self._make()
         # Hand 1: 2 twos
         for _ in range(2):
-            ctx = JokerContext(
+            ctx = make_ctx(
                 individual=True,
                 cardarea="play",
                 other_card=_card("Hearts", "2"),
@@ -1425,7 +1461,7 @@ class TestWeeJoker:
         assert j.ability["extra"]["chips"] == 16
 
         # Hand 2: 1 two
-        ctx = JokerContext(
+        ctx = make_ctx(
             individual=True,
             cardarea="play",
             other_card=_card("Spades", "2"),
@@ -1435,7 +1471,7 @@ class TestWeeJoker:
 
     def test_non_two_no_effect(self):
         j = self._make()
-        ctx = JokerContext(
+        ctx = make_ctx(
             individual=True,
             cardarea="play",
             other_card=_card("Hearts", "5"),
@@ -1457,7 +1493,7 @@ class TestLuckyCat:
     def test_lucky_trigger_accumulates(self):
         j = self._make()
         lc = self._lucky_card()
-        ctx = JokerContext(individual=True, cardarea="play", other_card=lc)
+        ctx = make_ctx(individual=True, cardarea="play", other_card=lc)
         calculate_joker(j, ctx)
         assert j.ability["x_mult"] == pytest.approx(1.25)
 
@@ -1465,28 +1501,28 @@ class TestLuckyCat:
         j = self._make()
         for _ in range(4):
             lc = self._lucky_card()
-            ctx = JokerContext(individual=True, cardarea="play", other_card=lc)
+            ctx = make_ctx(individual=True, cardarea="play", other_card=lc)
             calculate_joker(j, ctx)
         assert j.ability["x_mult"] == pytest.approx(2.0)
 
     def test_joker_main_returns_when_above_1(self):
         j = self._make()
         # x_mult = 1, no effect yet
-        assert calculate_joker(j, JokerContext(joker_main=True)) is None
+        assert calculate_joker(j, make_ctx(joker_main=True)) is None
 
         # Trigger once -> x_mult = 1.25
         lc = self._lucky_card()
-        ctx = JokerContext(individual=True, cardarea="play", other_card=lc)
+        ctx = make_ctx(individual=True, cardarea="play", other_card=lc)
         calculate_joker(j, ctx)
 
-        result = calculate_joker(j, JokerContext(joker_main=True))
+        result = calculate_joker(j, make_ctx(joker_main=True))
         assert result is not None
         assert result.Xmult_mod == pytest.approx(1.25)
 
     def test_non_lucky_no_effect(self):
         j = self._make()
         normal = _card("Hearts", "5")
-        ctx = JokerContext(individual=True, cardarea="play", other_card=normal)
+        ctx = make_ctx(individual=True, cardarea="play", other_card=normal)
         calculate_joker(j, ctx)
         assert j.ability["x_mult"] == 1  # unchanged
 
@@ -1502,45 +1538,45 @@ class TestCampfire:
 
     def test_sell_increments(self):
         j = self._make()
-        ctx = JokerContext(selling_card=True)
+        ctx = make_ctx(selling_card=True)
         calculate_joker(j, ctx)
         assert j.ability["x_mult"] == pytest.approx(1.25)
 
     def test_three_sells(self):
         j = self._make()
         for _ in range(3):
-            calculate_joker(j, JokerContext(selling_card=True))
+            calculate_joker(j, make_ctx(selling_card=True))
         assert j.ability["x_mult"] == pytest.approx(1.75)
 
     def test_boss_resets(self):
         j = self._make()
         for _ in range(4):
-            calculate_joker(j, JokerContext(selling_card=True))
+            calculate_joker(j, make_ctx(selling_card=True))
         assert j.ability["x_mult"] == pytest.approx(2.0)
 
         boss = Blind.create("bl_hook", ante=1)
-        calculate_joker(j, JokerContext(end_of_round=True, blind=boss))
+        calculate_joker(j, make_ctx(end_of_round=True, blind=boss))
         assert j.ability["x_mult"] == 1
 
     def test_non_boss_no_reset(self):
         j = self._make()
         for _ in range(2):
-            calculate_joker(j, JokerContext(selling_card=True))
+            calculate_joker(j, make_ctx(selling_card=True))
 
         small = Blind.create("bl_small", ante=1)
-        calculate_joker(j, JokerContext(end_of_round=True, blind=small))
+        calculate_joker(j, make_ctx(end_of_round=True, blind=small))
         assert j.ability["x_mult"] == pytest.approx(1.5)
 
     def test_joker_main_returns(self):
         j = self._make()
-        calculate_joker(j, JokerContext(selling_card=True))
-        result = calculate_joker(j, JokerContext(joker_main=True))
+        calculate_joker(j, make_ctx(selling_card=True))
+        result = calculate_joker(j, make_ctx(joker_main=True))
         assert result is not None
         assert result.Xmult_mod == pytest.approx(1.25)
 
     def test_no_sells_no_effect(self):
         j = self._make()
-        assert calculate_joker(j, JokerContext(joker_main=True)) is None
+        assert calculate_joker(j, make_ctx(joker_main=True)) is None
 
 
 class TestHologram:
@@ -1549,7 +1585,7 @@ class TestHologram:
 
     def test_add_one_card(self):
         j = self._make()
-        ctx = JokerContext(playing_card_added=True, cards=[_card("Hearts", "5")])
+        ctx = make_ctx(playing_card_added=True, cards=[_card("Hearts", "5")])
         calculate_joker(j, ctx)
         assert j.ability["x_mult"] == pytest.approx(1.25)
 
@@ -1570,13 +1606,13 @@ class TestConstellation:
 
     def test_planet_used(self):
         j = self._make()
-        ctx = JokerContext(using_consumeable=True, consumeable=self._planet())
+        ctx = make_ctx(using_consumeable=True, consumeable=self._planet())
         calculate_joker(j, ctx)
         assert j.ability["x_mult"] == pytest.approx(1.1)
 
     def test_tarot_no_effect(self):
         j = self._make()
-        ctx = JokerContext(using_consumeable=True, consumeable=self._tarot())
+        ctx = make_ctx(using_consumeable=True, consumeable=self._tarot())
         calculate_joker(j, ctx)
         assert j.ability["x_mult"] == 1
 
@@ -1589,7 +1625,7 @@ class TestGlassJoker:
         j = self._make()
         glass = _card("Hearts", "5", enhancement="m_glass")
         glass.shattered = True
-        ctx = JokerContext(cards_destroyed=[glass])
+        ctx = make_ctx(cards_destroyed=[glass])
         calculate_joker(j, ctx)
         assert j.ability["x_mult"] == pytest.approx(1.75)
 
@@ -1598,7 +1634,7 @@ class TestGlassJoker:
         glass1 = _card("Hearts", "5", enhancement="m_glass")
         glass2 = _card("Spades", "3", enhancement="m_glass")
         glass1.shattered = glass2.shattered = True
-        ctx = JokerContext(cards_destroyed=[glass1, glass2])
+        ctx = make_ctx(cards_destroyed=[glass1, glass2])
         calculate_joker(j, ctx)
         assert j.ability["x_mult"] == pytest.approx(2.5)
 
@@ -1610,7 +1646,7 @@ class TestCaino:
     def test_face_destroyed(self):
         j = self._make()
         king = _card("Hearts", "King")
-        ctx = JokerContext(cards_destroyed=[king])
+        ctx = make_ctx(cards_destroyed=[king])
         calculate_joker(j, ctx)
         assert j.ability["caino_xmult"] == 2
 
@@ -1618,22 +1654,22 @@ class TestCaino:
         j = self._make()
         king = _card("Hearts", "King")
         queen = _card("Spades", "Queen")
-        ctx = JokerContext(cards_destroyed=[king, queen])
+        ctx = make_ctx(cards_destroyed=[king, queen])
         calculate_joker(j, ctx)
         assert j.ability["caino_xmult"] == 3
 
     def test_non_face_no_effect(self):
         j = self._make()
         five = _card("Hearts", "5")
-        ctx = JokerContext(cards_destroyed=[five])
+        ctx = make_ctx(cards_destroyed=[five])
         calculate_joker(j, ctx)
         assert j.ability["caino_xmult"] == 1
 
     def test_joker_main_returns(self):
         j = self._make()
         king = _card("Hearts", "King")
-        calculate_joker(j, JokerContext(cards_destroyed=[king]))
-        result = calculate_joker(j, JokerContext(joker_main=True))
+        calculate_joker(j, make_ctx(cards_destroyed=[king]))
+        result = calculate_joker(j, make_ctx(joker_main=True))
         assert result is not None
         assert result.Xmult_mod == 2
 
@@ -1643,7 +1679,7 @@ class TestCaino:
         glass_j = _joker("j_glass", x_mult=1, extra=0.75)
         glass_king = _card("Hearts", "King", enhancement="m_glass")
         glass_king.shattered = True
-        ctx = JokerContext(cards_destroyed=[glass_king])
+        ctx = make_ctx(cards_destroyed=[glass_king])
 
         calculate_joker(caino, ctx)
         calculate_joker(glass_j, ctx)
@@ -1659,7 +1695,7 @@ class TestVampire:
     def test_strips_one_enhancement(self):
         j = self._make()
         bonus = _card("Hearts", "5", enhancement="m_bonus")
-        ctx = JokerContext(
+        ctx = make_ctx(
             individual_hand_end=True,
             scoring_hand=[bonus],
         )
@@ -1671,7 +1707,7 @@ class TestVampire:
         j = self._make()
         bonus = _card("Hearts", "5", enhancement="m_bonus")
         bonus.debuff = True
-        ctx = JokerContext(
+        ctx = make_ctx(
             individual_hand_end=True,
             scoring_hand=[bonus],
         )
@@ -1683,7 +1719,7 @@ class TestVampire:
         j = self._make()
         for _ in range(3):
             enhanced = _card("Hearts", "5", enhancement="m_bonus")
-            ctx = JokerContext(
+            ctx = make_ctx(
                 individual_hand_end=True,
                 scoring_hand=[enhanced],
             )
@@ -1702,7 +1738,7 @@ class TestObelisk:
         levels.record_play("Pair")
         levels.record_play("Pair")
         levels.record_play("Flush")  # Flush=1, Pair=3 -> Flush is NOT most
-        ctx = JokerContext(
+        ctx = make_ctx(
             individual_hand_end=True,
             scoring_name="Flush",
             hand_levels=levels,
@@ -1717,7 +1753,7 @@ class TestObelisk:
         levels.record_play("Pair")
         levels.record_play("Pair")
         # Pair is most played (2), playing Pair -> reset
-        ctx = JokerContext(
+        ctx = make_ctx(
             individual_hand_end=True,
             scoring_name="Pair",
             hand_levels=levels,
@@ -1735,7 +1771,7 @@ class TestObelisk:
         # Play Flush twice -> not most played -> +0.2 each
         for _ in range(2):
             levels.record_play("Flush")
-            ctx = JokerContext(
+            ctx = make_ctx(
                 individual_hand_end=True,
                 scoring_name="Flush",
                 hand_levels=levels,
@@ -1745,7 +1781,7 @@ class TestObelisk:
 
         # Play Pair (still most played) -> resets
         levels.record_play("Pair")
-        ctx = JokerContext(
+        ctx = make_ctx(
             individual_hand_end=True,
             scoring_name="Pair",
             hand_levels=levels,
@@ -1761,16 +1797,18 @@ class TestMadness:
     def test_non_boss_increments(self):
         j = self._make()
         small = Blind.create("bl_small", ante=1)
-        ctx = JokerContext(setting_blind=True, blind=small)
+        ctx = make_ctx(setting_blind=True, blind=small)
         result = calculate_joker(j, ctx)
         assert j.ability["x_mult"] == pytest.approx(1.5)
         assert result is not None
-        assert result.extra == {"destroy_random_joker": True}
+        # card.lua:2505-2512: Madness excludes itself, so with no other
+        # eligible joker it scales but emits no destruction effect.
+        assert result.effects == ()
 
     def test_boss_no_effect(self):
         j = self._make()
         boss = Blind.create("bl_hook", ante=1)
-        ctx = JokerContext(setting_blind=True, blind=boss)
+        ctx = make_ctx(setting_blind=True, blind=boss)
         result = calculate_joker(j, ctx)
         assert result is None
         assert j.ability["x_mult"] == 1
@@ -1783,14 +1821,14 @@ class TestHitTheRoad:
     def test_jack_discarded(self):
         j = self._make()
         jack = _card("Hearts", "Jack")
-        ctx = JokerContext(discard=True, other_card=jack)
+        ctx = make_ctx(discard=True, other_card=jack)
         calculate_joker(j, ctx)
         assert j.ability["x_mult"] == pytest.approx(1.5)
 
     def test_non_jack_no_effect(self):
         j = self._make()
         king = _card("Hearts", "King")
-        ctx = JokerContext(discard=True, other_card=king)
+        ctx = make_ctx(discard=True, other_card=king)
         calculate_joker(j, ctx)
         assert j.ability["x_mult"] == 1
 
@@ -1798,30 +1836,30 @@ class TestHitTheRoad:
         j = self._make()
         for _ in range(3):
             jack = _card("Hearts", "Jack")
-            calculate_joker(j, JokerContext(discard=True, other_card=jack))
+            calculate_joker(j, make_ctx(discard=True, other_card=jack))
         assert j.ability["x_mult"] == pytest.approx(2.5)
 
         # End of round resets
-        calculate_joker(j, JokerContext(end_of_round=True))
+        calculate_joker(j, make_ctx(end_of_round=True))
         assert j.ability["x_mult"] == 1
 
 
 class TestThrowback:
     def test_zero_skips(self):
         j = _joker("j_throwback", extra=0.25)
-        ctx = JokerContext(joker_main=True, skips=0)
+        ctx = make_ctx(joker_main=True, skips=0)
         assert calculate_joker(j, ctx) is None
 
     def test_four_skips(self):
         j = _joker("j_throwback", extra=0.25)
-        ctx = JokerContext(joker_main=True, skips=4)
+        ctx = make_ctx(joker_main=True, skips=4)
         result = calculate_joker(j, ctx)
         assert result is not None
         assert result.Xmult_mod == pytest.approx(2.0)
 
     def test_ten_skips(self):
         j = _joker("j_throwback", extra=0.25)
-        ctx = JokerContext(joker_main=True, skips=10)
+        ctx = make_ctx(joker_main=True, skips=10)
         result = calculate_joker(j, ctx)
         assert result is not None
         assert result.Xmult_mod == pytest.approx(3.5)
@@ -1839,28 +1877,28 @@ class TestYorick:
     def test_22_discards_no_trigger(self):
         j = self._make()
         for _ in range(22):
-            calculate_joker(j, JokerContext(discard=True))
+            calculate_joker(j, make_ctx(discard=True))
         assert j.ability["x_mult"] == 1
         assert j.ability["yorick_discards"] == 1
 
     def test_23rd_discard_triggers(self):
         j = self._make()
         for _ in range(23):
-            calculate_joker(j, JokerContext(discard=True))
+            calculate_joker(j, make_ctx(discard=True))
         assert j.ability["x_mult"] == 2
         assert j.ability["yorick_discards"] == 23  # reset
 
     def test_46_discards_triggers_twice(self):
         j = self._make()
         for _ in range(46):
-            calculate_joker(j, JokerContext(discard=True))
+            calculate_joker(j, make_ctx(discard=True))
         assert j.ability["x_mult"] == 3
 
     def test_joker_main_returns(self):
         j = self._make()
         for _ in range(23):
-            calculate_joker(j, JokerContext(discard=True))
-        result = calculate_joker(j, JokerContext(joker_main=True))
+            calculate_joker(j, make_ctx(discard=True))
+        result = calculate_joker(j, make_ctx(joker_main=True))
         assert result is not None
         assert result.Xmult_mod == 2
 
@@ -1874,7 +1912,7 @@ class TestCeremonialDagger:
         target = _joker("j_joker", mult=4)
         target.sell_cost = 3
         jokers = [dagger, target]
-        ctx = JokerContext(
+        ctx = make_ctx(
             setting_blind=True,
             jokers=jokers,
             blind=Blind.create("bl_small", ante=1),
@@ -1882,12 +1920,13 @@ class TestCeremonialDagger:
         result = calculate_joker(dagger, ctx)
         assert dagger.ability["mult"] == 6  # 3 * 2
         assert result is not None
-        assert result.extra["destroy_joker"] is target
+        assert isinstance(result.effects[0], DestroyCard)
+        assert result.effects[0].card is target
 
     def test_no_right_neighbor(self):
         dagger = self._make()
         jokers = [dagger]
-        ctx = JokerContext(
+        ctx = make_ctx(
             setting_blind=True,
             jokers=jokers,
             blind=Blind.create("bl_small", ante=1),
@@ -1900,7 +1939,7 @@ class TestCeremonialDagger:
         target.sell_cost = 3
         target.eternal = True
         jokers = [dagger, target]
-        ctx = JokerContext(
+        ctx = make_ctx(
             setting_blind=True,
             jokers=jokers,
             blind=Blind.create("bl_small", ante=1),
@@ -1912,7 +1951,7 @@ class TestCeremonialDagger:
         t1 = _joker("j_joker", mult=4)
         t1.sell_cost = 2
         jokers = [dagger, t1]
-        ctx = JokerContext(
+        ctx = make_ctx(
             setting_blind=True,
             jokers=jokers,
             blind=Blind.create("bl_small", ante=1),
@@ -1924,7 +1963,7 @@ class TestCeremonialDagger:
         t2 = _joker("j_stuntman")
         t2.sell_cost = 5
         jokers2 = [dagger, t2]
-        ctx2 = JokerContext(
+        ctx2 = make_ctx(
             setting_blind=True,
             jokers=jokers2,
             blind=Blind.create("bl_small", ante=1),
@@ -1935,6 +1974,6 @@ class TestCeremonialDagger:
     def test_joker_main_returns_mult(self):
         dagger = self._make()
         dagger.ability["mult"] = 10
-        result = calculate_joker(dagger, JokerContext(joker_main=True))
+        result = calculate_joker(dagger, make_ctx(joker_main=True))
         assert result is not None
         assert result.mult_mod == 10  # additive, NOT xMult

@@ -79,24 +79,24 @@ class TestFoolNeedsGameState:
         assert can_use_consumable(_card("c_fool"), consumables=[], consumable_limit=2) is False
 
 
-class TestCastleSuitReachesSnapshot:
+class TestCastleSuitReachesStateView:
     """Castle's suit lives on current_round.castle_card (card.lua:2857).
 
     The handler read ``card.ability['castle_card_suit']`` — a field the joker
-    never carries — so Castle could not fire.  The discard snapshot now
-    forwards the real per-round suit.
+    never carries — so Castle could not fire. The shared live StateView
+    forwards the real per-round suit to every context.
     """
 
     def test_discard_snapshot_carries_castle_suit(self):
-        from jackdaw.engine.game import _build_discard_snapshot
+        from jackdaw.engine.read import StateView
 
         gs = {"current_round": {"castle_card": {"suit": "Hearts"}}}
-        assert _build_discard_snapshot(gs, []).castle_card_suit == "Hearts"
+        assert StateView(gs).castle_card_suit == "Hearts"
 
     def test_absent_castle_card_is_none(self):
-        from jackdaw.engine.game import _build_discard_snapshot
+        from jackdaw.engine.read import StateView
 
-        assert _build_discard_snapshot({"current_round": {}}, []).castle_card_suit is None
+        assert StateView({"current_round": {}}).castle_card_suit is None
 
 
 class TestRoundTargetsSeeEveryZone:

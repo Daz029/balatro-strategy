@@ -272,9 +272,8 @@ class Blind:
         # (actual level-down happens in the scoring pipeline)
         if self.name == "The Arm" and not self.disabled:
             self.triggered = False
-            # We can't check hand level here without a HandLevels reference,
-            # so we just set a flag that the scoring pipeline will check
-            self.triggered = True  # conservatively flag; pipeline checks level
+            # The scoring pipeline owns the HandLevels reference and sets
+            # this only when the played hand is actually above level 1.
 
         # The Ox: doesn't block, but sets triggered if most-played hand
         # (actual money drain happens in the scoring pipeline)

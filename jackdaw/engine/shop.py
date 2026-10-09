@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Any
 
 from jackdaw.engine import lifecycle, read
 from jackdaw.engine.data.prototypes import BOOSTERS, CENTER_POOLS
-from jackdaw.engine.read import StateView
+from jackdaw.engine.effects import EffectQueue
 
 if TYPE_CHECKING:
     from jackdaw.engine.card import Card
@@ -716,7 +716,7 @@ def sell_card(
         ``{'ok': True, 'dollars_gained': int}`` on success, or
         ``{'ok': False, 'reason': str}`` on failure.
     """
-    from jackdaw.engine.jokers import JokerContext, calculate_joker
+    from jackdaw.engine.jokers import calculate_joker, context_for
 
     # -- 1. Eligibility --
     if card.eternal:
@@ -726,16 +726,25 @@ def sell_card(
 
     # -- 2. Selling-self notification --
     owned_jokers = game_state.get("jokers", [])
-    game_view = StateView(game_state, jokers=owned_jokers)
-    calculate_joker(card, JokerContext(selling_self=True, game=game_view))
+    queue = EffectQueue(game_state)
+    calculate_joker(card, context_for(game_state, queue=queue, selling_self=True))
 
     # -- 3. Selling-card notification to other jokers --
     for joker in owned_jokers:
         if joker is not card:
             calculate_joker(
                 joker,
-                JokerContext(selling_card=True, other_card=card, game=game_view),
+                context_for(
+                    game_state,
+                    queue=queue,
+                    selling_card=True,
+                    other_card=card,
+                ),
             )
+
+    # Invisible Joker must copy while the sold card is still in the row
+    # (card.lua:1590 calls sell_card before the UI removes the card).
+    queue.apply()
 
     # Remove first so Astronomer repricing sees the post-sale owned set.
     from_area.remove(card)
@@ -809,7 +818,7 @@ def reroll_shop(
         ``{'ok': False, 'reason': str}`` on failure.
     """
     from jackdaw.engine.card_factory import create_card
-    from jackdaw.engine.jokers import JokerContext, calculate_joker
+    from jackdaw.engine.jokers import fire_jokers
 
     cr = game_state.setdefault("current_round", {})
 
@@ -870,9 +879,8 @@ def reroll_shop(
         new_cards.append(new_card)
 
     # -- 7. Notify active jokers --
-    owned_jokers = game_state.get("jokers", [])
-    game_view = StateView(game_state, jokers=owned_jokers)
-    for joker in owned_jokers:
-        calculate_joker(joker, JokerContext(reroll_shop=True, game=game_view))
+    queue = EffectQueue(game_state)
+    fire_jokers(game_state, queue, reroll_shop=True)
+    queue.apply()
 
     return {"ok": True, "cost": cost, "was_free": was_free, "new_cards": new_cards}

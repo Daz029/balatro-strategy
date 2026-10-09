@@ -256,7 +256,8 @@ class CopyCard(Effect):
     * ``into`` set: overwrite an existing card in place (Death).
     * otherwise a fresh card is placed in ``area`` (Ankh, Invisible Joker,
       Perkeo, DNA, Cryptid). With ``card=None`` the source is drawn from
-      ``pick_area`` with ``pick_seed`` when the effect applies. ``edition`` is applied after the copy
+      ``pick_area`` with ``pick_seed`` when the effect applies. ``edition`` is
+      applied after the copy
       (Perkeo's Negative). ``reset_invis`` zeroes ``invis_rounds`` on the
       copy (Ankh / Invisible, ``card.lua:1447``, ``2386``).
     * Playing-card copies join the deck's card list; ``notify`` fires

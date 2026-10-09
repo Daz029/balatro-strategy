@@ -68,7 +68,7 @@ def process_round_end_cards(
 ) -> RoundEndResult:
     """Process card maintenance at end of round.
 
-    Called after :func:`~jackdaw.engine.jokers.on_end_of_round` and before
+    Called after the ``end_of_round`` EffectQueue pass and before
     :func:`~jackdaw.engine.economy.calculate_round_earnings`.
 
     Mirrors the per-joker loop in ``state_events.lua:99-109``::
@@ -79,8 +79,7 @@ def process_round_end_cards(
             G.jokers.cards[i]:calculate_perishable()
         end
 
-    The ``calculate_joker`` call is handled by
-    :func:`~jackdaw.engine.jokers.on_end_of_round`;
+    The ``calculate_joker`` call is handled by the caller's EffectQueue pass;
     this function handles the remaining two steps.
 
     Parameters

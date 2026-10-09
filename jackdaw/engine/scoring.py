@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from jackdaw.engine import read
+from jackdaw.engine.effects import DestroyCard, Effect, EffectQueue
 from jackdaw.engine.read import StateView
 
 if TYPE_CHECKING:
@@ -160,8 +161,8 @@ class ScoreResult:
     breakdown: list[str] = field(default_factory=list)
     """Step-by-step log for debugging."""
 
-    jokers_removed: list[Card] = field(default_factory=list)
-    """Jokers that self-destructed during scoring (Ice Cream, etc.)."""
+    effects: list[Effect] = field(default_factory=list)
+    """State changes emitted while scoring; the caller decides whether to apply them."""
 
     cards_destroyed: list[Card] = field(default_factory=list)
     """Playing cards destroyed during Phase 11 (Glass shatter, etc.)."""
@@ -169,8 +170,10 @@ class ScoreResult:
     saved: bool = False
     """True if Mr. Bones (or similar) prevented a game over."""
 
-    joker_creates: list[dict] = field(default_factory=list)
-    """Card creation descriptors from joker effects (Vagabond, 8-Ball, etc.)."""
+    @property
+    def jokers_removed(self) -> list[Card]:
+        """Cards targeted by queued ``DestroyCard`` effects."""
+        return [effect.card for effect in self.effects if isinstance(effect, DestroyCard)]
 
 
 # ---------------------------------------------------------------------------
@@ -430,6 +433,7 @@ def score_hand(
     from jackdaw.engine.jokers import JokerContext, calculate_joker
 
     gs = game_state or {}
+    queue = EffectQueue(gs)
     dollars = 0
     breakdown: list[str] = []
 
@@ -463,7 +467,11 @@ def score_hand(
             dollars_earned=0,
             debuffed=False,
             breakdown=["No hand"],
+            effects=queue.effects,
         )
+
+    # Lua updates hand history before checking whether the blind blocks it.
+    hand_levels.record_play(hand_type)
 
     # === Phase 3: Boss blind debuff check ===
     # Lua passes G.play.cards (all played cards, not just scoring subset)
@@ -484,6 +492,7 @@ def score_hand(
                 scoring_name=hand_type,
                 poker_hands=poker_hands,
                 game=snapshot,
+                queue=queue,
             )
             result = calculate_joker(joker, ctx)
             if result and result.dollars:
@@ -498,6 +507,7 @@ def score_hand(
             dollars_earned=dollars,
             debuffed=True,
             breakdown=[f"Hand blocked by {blind.name}"],
+            effects=queue.effects,
         )
 
     # === Phase 3b: The Arm — demote played hand type by 1 (min L1) ===
@@ -506,6 +516,7 @@ def score_hand(
         and not getattr(blind, "disabled", False)
         and hand_levels[hand_type].level > 1
     ):
+        blind.triggered = True
         hand_levels.level_up(hand_type, amount=-1)
 
     # === Phase 3c: Splash — all played cards score ===
@@ -533,9 +544,6 @@ def score_hand(
         f" -> {int(hand_chips)} chips, {int(mult)} mult"
     )
 
-    # Record play
-    hand_levels.record_play(hand_type)
-
     # Shared context fields (lightweight — references snapshot, not copies)
     _shared = dict(
         full_hand=played_cards,
@@ -548,6 +556,7 @@ def score_hand(
         blind=blind,
         held_cards=held_cards,
         game=snapshot,
+        queue=queue,
     )
 
     # === Phase 5: "before" joker pass ===
@@ -578,6 +587,7 @@ def score_hand(
     # === Phase 7: Per scored card (with retriggers) ===
     for card in scoring_cards:
         if card.debuff:
+            blind.triggered = True
             continue
 
         # 7a: Collect retriggers (seal + joker)
@@ -723,7 +733,6 @@ def score_hand(
                 mult *= ihe_result.Xmult_mod
 
     # === Phase 9: Joker main effects (left to right) ===
-    joker_creates: list[dict] = []
     for joker in jokers:
         if joker.debuff:
             continue
@@ -746,8 +755,6 @@ def score_hand(
                 mult *= result.Xmult_mod
             if result.dollars:
                 dollars += result.dollars
-            if result.extra and "create" in result.extra:
-                joker_creates.append(result.extra["create"])
 
         # 9c: Joker-on-joker (other_joker context)
         for other in jokers:
@@ -834,14 +841,11 @@ def score_hand(
     breakdown.append(f"Final: {int(hand_chips)} x {mult:.1f} = {total}")
 
     # === Phase 13: "after" joker pass (scaling mutations) ===
-    jokers_removed: list[Card] = []
     for joker in jokers:
         if joker.debuff:
             continue
         after_ctx = JokerContext(after=True, **_shared)
-        after_result = calculate_joker(joker, after_ctx)
-        if after_result and after_result.remove:
-            jokers_removed.append(joker)
+        calculate_joker(joker, after_ctx)
 
     # Mr. Bones save check: if score < blind target and last hand
     saved = False
@@ -849,13 +853,10 @@ def score_hand(
         for joker in jokers:
             if joker.debuff:
                 continue
-            bones_ctx = JokerContext(**_shared)
-            bones_ctx.game_over = True  # type: ignore[attr-defined]
+            bones_ctx = JokerContext(game_over=True, **_shared)
             bones_result = calculate_joker(joker, bones_ctx)
             if bones_result and bones_result.saved:
                 saved = True
-                if bones_result.remove:
-                    jokers_removed.append(joker)
                 break
 
     # === Phase 14: Post-play modifiers (debuff played cards) ===
@@ -871,8 +872,7 @@ def score_hand(
         dollars_earned=dollars,
         debuffed=False,
         breakdown=breakdown,
-        jokers_removed=jokers_removed,
+        effects=queue.effects,
         cards_destroyed=cards_destroyed,
         saved=saved,
-        joker_creates=joker_creates,
     )

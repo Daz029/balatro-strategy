@@ -163,36 +163,24 @@ def emplace(gs: dict[str, Any], card: Card, area: str) -> None:
         # explicitly.
 
 
-def fire_joker_context(gs: dict[str, Any], **context_flags: Any) -> list[dict[str, Any]]:
+def fire_joker_context(gs: dict[str, Any], **context_flags: Any) -> None:
     """Dispatch one live-state context to every active joker.
 
     This is the shared equivalent of Lua's loops over ``G.jokers.cards``.
-    Lifecycle notifications and shop events use the same construction so
-    their state view, debuff gate, RNG, and mutation collection cannot drift.
+    Lifecycle notifications and shop events use the same construction and
+    Effect applier so their state view, debuff gate, RNG, and mutations cannot
+    drift.
     """
-    from jackdaw.engine.jokers import JokerContext, calculate_joker
+    from jackdaw.engine.effects import EffectQueue
+    from jackdaw.engine.jokers import fire_jokers
 
     jokers: list[Card] = gs.get("jokers", [])
     if not jokers:
-        return []
+        return
 
-    game_view = read.StateView(gs, jokers=jokers)
-    mutations: list[dict[str, Any]] = []
-    for joker in list(jokers):
-        if joker.debuff:
-            continue
-        result = calculate_joker(
-            joker,
-            JokerContext(
-                jokers=jokers,
-                game=game_view,
-                rng=gs.get("rng"),
-                **context_flags,
-            ),
-        )
-        if result and result.extra:
-            mutations.append(result.extra)
-    return mutations
+    queue = EffectQueue(gs)
+    fire_jokers(gs, queue, **context_flags)
+    queue.apply()
 
 
 def add_playing_cards(

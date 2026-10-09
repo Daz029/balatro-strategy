@@ -27,8 +27,8 @@ an Erratic deck's duplicate cards must not be conflated (the same bug class as
 
 from __future__ import annotations
 
-from itertools import product
 import random
+from itertools import product
 
 import pytest
 
