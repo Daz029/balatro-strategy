@@ -16,11 +16,28 @@ Source: card.lua:1091-1522 (use_consumeable), card.lua:1523-1579
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import TYPE_CHECKING, Any
 
 from jackdaw.engine import read
 from jackdaw.engine.card_utils import poll_edition
+from jackdaw.engine.effects import (
+    ChangeHandSize,
+    ChangeRank,
+    ChangeSuit,
+    CopyCard,
+    CreateCard,
+    CreatePlayingCards,
+    DestroyCard,
+    DestroyPlayingCards,
+    EaseDollars,
+    Effect,
+    LevelUpHand,
+    SetDollars,
+    SetEdition,
+    SetEnhancement,
+    SetSeal,
+)
 
 if TYPE_CHECKING:
     from jackdaw.engine.card import Card
@@ -122,10 +139,111 @@ class ConsumableResult:
     money_set: int | None = None
     """Wraith sets money to 0."""
 
-    notify_jokers_consumeable: bool = False
-    """When True, the state machine must call calculate_joker with
-    {using_consumeable=True, consumeable=card} on each joker after applying
-    this result.  Set for all Planet uses (Constellation, Glass Joker, etc.)."""
+
+
+_CONSUMABLE_EFFECT_FIELDS = frozenset(
+    {
+        "enhance",
+        "change_suit",
+        "change_rank",
+        "copy_card",
+        "destroy",
+        "add_seal",
+        "destroy_jokers",
+        "create",
+        "dollars",
+        "money_set",
+        "level_up",
+        "add_to_deck",
+        "add_edition",
+        "hand_size_mod",
+    }
+)
+
+
+def consumable_effects(result: ConsumableResult) -> list[Effect]:
+    """Translate every ``ConsumableResult`` field in Lua application order.
+
+    The schema check is intentionally runtime-visible: adding a result field
+    without teaching this producer about it raises instead of silently
+    dropping a state change.
+    """
+    result_fields = {field.name for field in fields(result)}
+    unknown = result_fields - _CONSUMABLE_EFFECT_FIELDS
+    missing = _CONSUMABLE_EFFECT_FIELDS - result_fields
+    if unknown or missing:
+        raise ValueError(
+            "ConsumableResult effect mapping is not exhaustive: "
+            f"unknown={sorted(unknown)}, missing={sorted(missing)}"
+        )
+
+    effects: list[Effect] = []
+    effects.extend(
+        SetEnhancement(card=card, center=center) for card, center in result.enhance or []
+    )
+    effects.extend(ChangeSuit(card=card, suit=suit) for card, suit in result.change_suit or [])
+    effects.extend(ChangeRank(card=card, delta=delta) for card, delta in result.change_rank or [])
+    if result.copy_card is not None:
+        source, target = result.copy_card
+        effects.append(CopyCard(card=source, into=target))
+    if result.destroy:
+        effects.append(DestroyPlayingCards(cards=list(result.destroy)))
+    effects.extend(SetSeal(card=card, seal=seal) for card, seal in result.add_seal or [])
+
+    # Ankh/Hex destruction must land before creation (D35).
+    effects.extend(DestroyCard(card=joker) for joker in result.destroy_jokers or [])
+    for descriptor in result.create or []:
+        if "copy_of" in descriptor:
+            effects.append(
+                CopyCard(
+                    card=descriptor["copy_of"],
+                    area="jokers",
+                    strip_edition=bool(descriptor.get("strip_edition")),
+                    reset_invis=True,
+                )
+            )
+            continue
+        if "type" not in descriptor:
+            raise ValueError(f"unknown consumable create descriptor: {descriptor!r}")
+        effects.append(
+            CreateCard(
+                set=descriptor["type"],
+                count=descriptor.get("count", 1),
+                append=descriptor.get("seed", ""),
+                rarity=descriptor.get("rarity"),
+                forced_key=descriptor.get("forced_key"),
+            )
+        )
+
+    if result.dollars:
+        effects.append(EaseDollars(amount=result.dollars))
+    if result.money_set is not None:
+        effects.append(SetDollars(value=result.money_set))
+    effects.extend(LevelUpHand(hand=hand, amount=amount) for hand, amount in result.level_up or [])
+
+    copies: list[Effect] = []
+    created_specs: list[dict[str, str]] = []
+    for descriptor in result.add_to_deck or []:
+        if "copy_of" in descriptor:
+            copies.append(CopyCard(card=descriptor["copy_of"], area="hand", notify=True))
+        elif "suit" in descriptor and "rank" in descriptor:
+            created_specs.append(descriptor)
+        else:
+            raise ValueError(f"unknown consumable add_to_deck descriptor: {descriptor!r}")
+    effects.extend(copies)
+    if created_specs:
+        effects.append(CreatePlayingCards(cards=created_specs, area="hand", notify=True))
+
+    if result.add_edition is not None:
+        effects.append(
+            SetEdition(
+                card=result.add_edition["target"],
+                edition=result.add_edition["edition"],
+            )
+        )
+    if result.hand_size_mod:
+        effects.append(ChangeHandSize(delta=result.hand_size_mod))
+    return effects
 
 
 # ---------------------------------------------------------------------------
@@ -600,7 +718,7 @@ def record_consumable_usage(gs: dict[str, Any], card: Card) -> None:
     records. Per-key entries are ``{count, order, set}``; totals count by the
     CENTER's set, so Black Hole (a Spectral) is spectral, not planet.
     ``last_tarot_planet`` is not set here: Lua sets it in a queued event after
-    the effect, which ``game._apply_consumable_result`` reproduces.
+    the effect, which ``game._use_consumable_card`` reproduces.
     """
     from jackdaw.engine.card import _resolve_center
 
@@ -651,10 +769,7 @@ def _make_planet_handler(hand_type: str) -> ConsumableHandler:
     """Factory for single-hand-type planet handlers."""
 
     def handler(card: Card, ctx: ConsumableContext) -> ConsumableResult:
-        return ConsumableResult(
-            level_up=[(hand_type, 1)],
-            notify_jokers_consumeable=True,
-        )
+        return ConsumableResult(level_up=[(hand_type, 1)])
 
     return handler
 
@@ -671,7 +786,6 @@ def _black_hole(card: Card, ctx: ConsumableContext) -> ConsumableResult:
     """
     return ConsumableResult(
         level_up=[(ht, 1) for ht in _ALL_HAND_TYPES],
-        notify_jokers_consumeable=True,
     )
 
 
@@ -815,7 +929,7 @@ def _familiar(card: Card, ctx: ConsumableContext) -> ConsumableResult:
         _roll_card_spec(["J", "Q", "K"], "familiar_create", "familiar_create", ctx.rng)
         for _ in range(count)
     ]
-    return ConsumableResult(destroy=[destroyed], create=created)
+    return ConsumableResult(destroy=[destroyed], add_to_deck=created)
 
 
 @register_consumable("c_grim")
@@ -830,7 +944,7 @@ def _grim(card: Card, ctx: ConsumableContext) -> ConsumableResult:
     destroyed, _ = ctx.rng.element(hand, ctx.rng.seed("random_destroy"))
     count = card.ability.get("extra", 2)
     created = [_roll_card_spec(["A"], "grim_create", "grim_create", ctx.rng) for _ in range(count)]
-    return ConsumableResult(destroy=[destroyed], create=created)
+    return ConsumableResult(destroy=[destroyed], add_to_deck=created)
 
 
 @register_consumable("c_incantation")
@@ -849,7 +963,7 @@ def _incantation(card: Card, ctx: ConsumableContext) -> ConsumableResult:
         _roll_card_spec(number_ranks, "incantation_create", "incantation_create", ctx.rng)
         for _ in range(count)
     ]
-    return ConsumableResult(destroy=[destroyed], create=created)
+    return ConsumableResult(destroy=[destroyed], add_to_deck=created)
 
 
 # ---------------------------------------------------------------------------

@@ -45,7 +45,14 @@ from jackdaw.engine.actions import (
     SwapJokersRight,
     UseConsumable,
 )
-from jackdaw.engine.effects import CreateCard, EaseDollars, EffectQueue, apply_effects
+from jackdaw.engine.effects import (
+    AddTag,
+    CreateCard,
+    EaseDollars,
+    EffectQueue,
+    LevelUpHand,
+    apply_effects,
+)
 
 
 class IllegalActionError(Exception):
@@ -203,6 +210,8 @@ def _handle_select_blind(gs: dict[str, Any], *, allow_forced_boss: bool = False)
         no_blind_reward=bool(no_reward.get(blind_on_deck)),
     )
     gs["blind"] = blind
+    # Lua sets this as soon as select_blind begins (button_callbacks.lua:2516).
+    gs["facing_blind"] = True
     gs["chips"] = 0
     rr["blind_states"][blind_on_deck] = "Current"
     rr["blind"] = blind
@@ -261,6 +270,20 @@ def _handle_select_blind(gs: dict[str, Any], *, allow_forced_boss: bool = False)
     # Debuff hand cards too (they were drawn from the deck)
     for card in gs.get("hand", []):
         blind.debuff_card(card, active_rules, gs)
+
+    # game.lua:3226-3231: the first-hand pass fires after the draw and card
+    # debuffs, while facing the blind, before Blind:drawn_to_hand.
+    cr = gs.get("current_round", {})
+    if (
+        cr.get("hands_played", 0) == 0
+        and cr.get("discards_used", 0) == 0
+        and gs.get("facing_blind")
+    ):
+        from jackdaw.engine.jokers import fire_jokers
+
+        queue = EffectQueue(gs)
+        fire_jokers(gs, queue, first_hand_drawn=True)
+        queue.apply()
 
     # ------------------------------------------------------------------
     # 7b. Boss drawn_to_hand effects (Cerulean Bell, Crimson Heart)
@@ -359,6 +382,13 @@ def _open_tag_pack(gs: dict[str, Any], pack_key: str) -> None:
     pack_kind = proto.kind if proto else ""
     gs["pack_type"] = pack_kind
 
+    # Tag-awarded packs still run through Card:open in Lua (card.lua:1797).
+    from jackdaw.engine.jokers import fire_jokers
+
+    queue = EffectQueue(gs)
+    fire_jokers(gs, queue, open_booster=True)
+    queue.apply()
+
     # Save current phase and switch to pack opening
     gs["shop_return_phase"] = gs.get("phase", GamePhase.BLIND_SELECT)
 
@@ -387,39 +417,27 @@ def _apply_tag_result(gs: dict[str, Any], result: Any) -> None:
 
     Handles all TagResult fields that produce immediate side-effects.
     """
+    queue = EffectQueue(gs)
     if result.dollars:
-        gs["dollars"] = gs.get("dollars", 0) + result.dollars
-
+        queue.add(EaseDollars(amount=result.dollars))
     if result.create_jokers:
-        from jackdaw.engine.card_factory import create_card
-
-        jokers = gs.setdefault("jokers", [])
-        joker_slots = gs.get("joker_slots", 5)
-        rng = gs.get("rng")
-        ante = gs.get("round_resets", {}).get("ante", 1)
-        for _ in range(result.create_jokers):
-            if len(jokers) >= joker_slots:
-                break
-            # Top-up Tag: create_card('Joker', G.jokers, nil, 0, nil, nil,
-            # nil, 'top') — forced Common, append 'top' (tag.lua:138)
-            card = create_card(
-                "Joker",
-                rng,
-                ante,
-                area="",
-                soulable=False,
-                forced_rarity=1,
+        queue.add(
+            CreateCard(
+                set="Joker",
+                count=result.create_jokers,
+                rarity="Common",
                 append="top",
-                game_state=gs,
             )
-            _gain_joker(gs, card)
-
+        )
     if result.level_up is not None:
         hand_type, levels = result.level_up
-        hand_levels = gs.get("hand_levels")
-        if hand_levels is not None:
-            for _ in range(levels):
-                hand_levels.level_up(hand_type)
+        queue.add(LevelUpHand(hand=hand_type, amount=levels))
+    queue.apply()
+
+    # Context-owned fields: create_pack/reroll_boss are consumed by
+    # _fire_new_blind_choice_tags; force_rarity/force_edition by shop card
+    # creation; temp_reroll_cost/coupon/create_voucher by shop setup;
+    # hand_size_delta by _handle_select_blind; double by _check_double_tag.
 
 
 def _handle_skip_blind(gs: dict[str, Any]) -> dict[str, Any]:
@@ -539,6 +557,11 @@ def _handle_play_hand(gs: dict[str, Any], indices: tuple[int, ...]) -> dict[str,
     """
     _require_phase(gs, GamePhase.SELECTING_HAND)
 
+    # state_events.lua:455 clears this before each play. Without the reset,
+    # Matador would keep paying after one debuffed scoring card triggers it.
+    blind = gs["blind"]
+    blind.triggered = False
+
     cr = gs["current_round"]
     if cr["hands_left"] <= 0:
         raise IllegalActionError("No hands remaining")
@@ -582,7 +605,6 @@ def _handle_play_hand(gs: dict[str, Any], indices: tuple[int, ...]) -> dict[str,
     # ------------------------------------------------------------------
     # 5. Blind:press_play (blind.lua:464)
     # ------------------------------------------------------------------
-    blind = gs["blind"]
     rng = gs.get("rng")
     _press_play(gs, blind, played, rng)
 
@@ -1037,30 +1059,17 @@ def _handle_buy_card(gs: dict[str, Any], idx: int) -> dict[str, Any]:
 
 
 def _handle_sell_card(gs: dict[str, Any], area: str, idx: int) -> dict[str, Any]:
-    """Sell a card for its sell value.
-
-    After selling:
-    - Fire ``selling_card`` on all jokers (Campfire +xMult)
-    - If joker sold itself: fire ``selling_self``
-    """
+    """Sell through the single queued implementation in :mod:`shop`."""
     _require_phase(gs, GamePhase.SHOP)
 
-    cards: list = gs.get(area, [])
-    if idx < 0 or idx >= len(cards):
-        raise IllegalActionError(f"Invalid {area} index {idx}")
+    from jackdaw.engine.shop import sell_card
 
-    card = cards[idx]
-    if getattr(card, "eternal", False):
-        raise IllegalActionError("Cannot sell eternal card")
-
-    gs["dollars"] = gs.get("dollars", 0) + card.sell_cost
-    if area == "jokers":
-        _lose_joker(gs, card)
-    else:
-        lifecycle.remove(gs, card)
-
-    # Fire selling_card joker context (Campfire +xMult per card sold)
-    _fire_shop_joker_context(gs, selling_card=True)
+    result = sell_card(gs, area, idx)
+    if not result["ok"]:
+        reason = result["reason"]
+        if reason == "eternal":
+            raise IllegalActionError("Cannot sell eternal card")
+        raise IllegalActionError(f"Cannot sell card: {reason}")
 
     return gs
 
@@ -1077,10 +1086,9 @@ def _handle_use_consumable(
     1. Validate phase and index
     2. Pop card from consumables
     3. Use via ``_use_consumable_card`` (builds ConsumableContext,
-       calls handler, applies ConsumableResult mutations)
-    4. Fire ``using_consumeable`` joker context if the result
-       requests it (Constellation +xMult when Planet used)
-    5. Track usage stats (last_tarot_planet)
+       applies ConsumableResult effects, and fires the one
+       ``using_consumeable`` joker pass)
+    4. Track usage stats (last_tarot_planet)
     """
     _require_phase(
         gs, GamePhase.BLIND_SELECT, GamePhase.SELECTING_HAND, GamePhase.ROUND_EVAL, GamePhase.SHOP
@@ -1215,8 +1223,9 @@ def _handle_open_booster(gs: dict[str, Any], idx: int) -> dict[str, Any]:
         _sort_hand_desc(combined_hand)
         gs["hand"] = combined_hand
 
-    # Fire open_booster joker context (Hallucination creates Tarot)
-    _fire_shop_joker_context(gs, open_booster=True)
+    # Fire after pack generation (card.lua:1797), retaining the pack object
+    # in context even though it has already left the shop area.
+    _fire_shop_joker_context(gs, open_booster=True, booster=pack)
 
     gs["phase"] = GamePhase.PACK_OPENING
     return gs
@@ -1262,9 +1271,6 @@ def _handle_pick_pack_card(
     if card_set in ("Tarot", "Planet", "Spectral"):
         # Consumable: use immediately (Arcana/Spectral/Celestial pack)
         _use_consumable_card(gs, card, targets)
-
-        # Fire using_consumeable joker context
-        _fire_shop_joker_context(gs, using_consumeable=True)
         lifecycle.remove(gs, card)
 
     elif card_set == "Joker":
@@ -1628,6 +1634,19 @@ def _round_won(gs: dict[str, Any]) -> None:
     rr["blind_states"][blind_on_deck] = "Defeated"
     gs["round"] = gs.get("round", 0) + 1
 
+    # Back:trigger_effect({context='eval'}) runs here, after Blind:defeat and
+    # before round earnings (state_events.lua:1163). Anaglyph awards one
+    # Double Tag only for a defeated boss.
+    from jackdaw.engine.back import Back
+
+    back_result = Back(gs.get("selected_back_key", "b_red")).trigger_effect(
+        "eval", boss_defeated=bool(getattr(blind, "boss", False))
+    )
+    if back_result and back_result.get("create_tag"):
+        back_queue = EffectQueue(gs)
+        back_queue.add(AddTag(key=back_result["create_tag"]))
+        back_queue.apply()
+
     # On boss defeat Lua snapshots the run-wide most-played hand. Ties go
     # to the stronger hand (the lower display-order value).
     if getattr(blind, "boss", False) and hand_levels is not None:
@@ -1690,6 +1709,8 @@ def _round_won(gs: dict[str, Any]) -> None:
     # 11. Phase → ROUND_EVAL
     # ------------------------------------------------------------------
     gs["phase"] = GamePhase.ROUND_EVAL
+    # Lua clears this on entry to round evaluation (game.lua:3312).
+    gs["facing_blind"] = False
 
 
 def _advance_ante(gs: dict[str, Any]) -> None:
@@ -1793,12 +1814,13 @@ def _use_consumable_card(
 
     1. Build ConsumableContext from game_state + target_indices
     2. Call handler → ConsumableResult
-    3. Apply all result mutations
-    4. Fire ``using_consumeable`` joker context if result requests it
+    3. Translate and apply every result field through an EffectQueue
+    4. Fire ``using_consumeable`` on every joker for every consumable
     5. Track usage (last_tarot_planet)
     """
     from jackdaw.engine.consumables import (
         ConsumableContext,
+        consumable_effects,
         record_consumable_usage,
         use_consumable,
     )
@@ -1824,198 +1846,30 @@ def _use_consumable_card(
     )
     result = use_consumable(card, ctx)
 
-    if result is None:
-        return
-
-    # Apply all mutations
-    _apply_consumable_result(gs, result, card)
-
-    # Fire using_consumeable joker context (Constellation, etc.)
-    if getattr(result, "notify_jokers_consumeable", False):
-        from jackdaw.engine.jokers import fire_jokers
+    if result is not None:
+        # Track last_tarot_planet for The Fool
+        card_key = getattr(card, "center_key", None)
+        if card_key:
+            card_set = _get_card_set(card) if card else ""
+            if card_set in ("Tarot", "Planet"):
+                gs["last_tarot_planet"] = card_key
 
         queue = EffectQueue(gs)
-        fire_jokers(gs, queue, using_consumeable=True, consumeable=card)
+        queue.add(consumable_effects(result))
         queue.apply()
 
+    # button_callbacks.lua:2209-2220 dispatches this for every consumable.
+    from jackdaw.engine.jokers import fire_jokers
 
-def _apply_consumable_result(
-    gs: dict[str, Any],
-    result: Any,
-    card: Any = None,
-) -> None:
-    """Apply a ConsumableResult's mutations to game_state.
-
-    Handles all 14+ mutation types from ConsumableResult.
-    """
-    # Track last_tarot_planet for The Fool
-    card_key = getattr(card, "center_key", None)
-    if card_key:
-        card_set = _get_card_set(card) if card else ""
-        if card_set in ("Tarot", "Planet"):
-            gs["last_tarot_planet"] = card_key
-
-    # ---- Card modifications ----
-
-    # a. Enhancement
-    if getattr(result, "enhance", None):
-        for target, enh_key in result.enhance:
-            if hasattr(target, "set_ability"):
-                target.set_ability(enh_key, gs=gs)
-
-    # b. Suit changes
-    if getattr(result, "change_suit", None):
-        for target, suit in result.change_suit:
-            if hasattr(target, "change_suit"):
-                target.change_suit(suit, gs=gs)
-
-    # c. Rank changes
-    if getattr(result, "change_rank", None):
-        for target, delta in result.change_rank:
-            if hasattr(target, "change_rank"):
-                target.change_rank(delta, gs=gs)
-
-    # d. Copy card (Death)
-    if getattr(result, "copy_card", None):
-        source, target = result.copy_card
-        lifecycle.copy_card(gs, source, into=target)
-
-    # e. Destroy playing cards
-    if getattr(result, "destroy", None):
-        lifecycle.destroy_playing_cards(gs, result.destroy)
-
-    # f. Add seal
-    if getattr(result, "add_seal", None):
-        for target, seal_type in result.add_seal:
-            target.set_seal(gs, seal_type)
-
-    # g. Destroy jokers before creation. Ankh's room for its copy comes from
-    # removing the other non-eternal jokers first (card.lua:1426-1450).
-    if getattr(result, "destroy_jokers", None):
-        for j in result.destroy_jokers:
-            _lose_joker(gs, j)
-
-    # h. Create cards (High Priestess, Emperor, Judgement, Ankh, etc.)
-    if getattr(result, "create", None):
-        _resolve_create_descriptors(gs, result.create)
-
-    # ---- Economy ----
-
-    # i. Dollars
-    if getattr(result, "dollars", 0):
-        gs["dollars"] = gs.get("dollars", 0) + result.dollars
-
-    # j. Money set (Wraith → set to 0)
-    if getattr(result, "money_set", None) is not None:
-        gs["dollars"] = result.money_set
-
-    # ---- Hand levels ----
-
-    # k. Level up (Planet cards)
-    if getattr(result, "level_up", None):
-        hand_levels = gs.get("hand_levels")
-        if hand_levels:
-            for ht, amount in result.level_up:
-                hand_levels.level_up(ht, amount)
-
-    # ---- Deck mutation ----
-
-    # l. Add playing cards to deck
-    if getattr(result, "add_to_deck", None):
-        from jackdaw.engine.card_factory import create_playing_card
-        from jackdaw.engine.data.enums import Rank, Suit
-
-        created_cards: list = []
-        for card_spec in result.add_to_deck:
-            # Cryptid: copy an existing card — copies are emplaced into the
-            # HAND, not the draw pile (card.lua:1206-1213: copy_card +
-            # G.hand:emplace), with a fresh sort_id like any new Card.
-            copy_source = card_spec.get("copy_of")
-            if copy_source is not None:
-                new_card = lifecycle.copy_card(gs, copy_source)
-                created_cards.append(new_card)
-                continue
-            if "suit" in card_spec and "rank" in card_spec:
-                new_card = create_playing_card(
-                    Suit(card_spec["suit"]),
-                    Rank(card_spec["rank"]),
-                    enhancement=card_spec.get("enhancement", "c_base"),
-                    game_state=gs,
-                )
-                created_cards.append(new_card)
-        lifecycle.add_playing_cards(gs, created_cards, "hand")
-        _sort_hand_desc(gs.get("hand", []))
-
-    # ---- Joker effects ----
-
-    # m. Add edition (Wheel of Fortune, Aura)
-    if getattr(result, "add_edition", None):
-        ae = result.add_edition
-        target = ae.get("target")
-        edition = ae.get("edition")
-        if target and edition:
-            target.set_edition(gs, edition)
-
-    # ---- Game state ----
-
-    # n. Hand size modification (Ectoplasm -1, Ouija -1)
-    if getattr(result, "hand_size_mod", 0):
-        gs["hand_size"] = gs.get("hand_size", 8) + result.hand_size_mod
-
-
-def _resolve_create_descriptors(gs: dict[str, Any], descriptors: list[dict[str, Any]]) -> None:
-    """Resolve card creation descriptors from ConsumableResult.create.
-
-    Each descriptor is ``{'type': ..., 'count': ..., 'seed': ...,
-    'forced_key': ...}``.  Creates the actual Card objects and adds
-    them to the appropriate area.
-
-    Delegates to :func:`~jackdaw.engine.card_factory.resolve_create_descriptor`
-    for actual card creation.
-    """
-    from jackdaw.engine.card_factory import resolve_create_descriptor
-
-    rng = gs.get("rng")
-    ante = gs.get("round_resets", {}).get("ante", 1)
-    # Planet pool softlock filtering needs current played-hand counts
-    # (High Priestess / Blue Seal create Planets mid-round).
-    consumables: list = gs.setdefault("consumables", [])
-    consumable_limit = gs.get("consumable_slots", 2)
-    jokers: list = gs.setdefault("jokers", [])
-    joker_slots = gs.get("joker_slots", 5)
-    playing_by_area: dict[str, list] = {}
-    for desc in descriptors:
-        count = desc.get("count", 1)
-
-        for _ in range(count):
-            card = resolve_create_descriptor(desc, rng, ante, gs)
-            if card is None:
-                continue
-
-            card_set = card.ability.get("set", "")
-            if card_set == "Joker":
-                negative = card.edition and card.edition.get("negative")
-                if len(jokers) < joker_slots + (1 if negative else 0):
-                    _gain_joker(gs, card)
-                else:
-                    lifecycle.remove(gs, card)
-            elif card_set in ("Tarot", "Planet", "Spectral"):
-                if len(consumables) < consumable_limit:
-                    lifecycle.emplace(gs, card, "consumables")
-                else:
-                    lifecycle.remove(gs, card)
-            elif card_set in ("Default", "Enhanced", ""):
-                destination = desc.get("area", "deck")
-                playing_by_area.setdefault(destination, []).append(card)
-
-    created_playing: list = []
-    for area, cards in playing_by_area.items():
-        lifecycle.add_playing_cards(gs, cards, area, notify=False)
-        created_playing.extend(cards)
-    if created_playing:
-        lifecycle.fire_joker_context(gs, playing_card_added=True, cards=created_playing)
-    if "hand" in playing_by_area:
-        _sort_hand_desc(gs.get("hand", []))
+    notify_queue = EffectQueue(gs)
+    fire_jokers(
+        gs,
+        notify_queue,
+        using_consumeable=True,
+        consumeable=card,
+        highlighted=highlighted,
+    )
+    notify_queue.apply()
 
 
 # ---------------------------------------------------------------------------

@@ -7,7 +7,8 @@ from typing import Any
 
 from jackdaw.engine.actions import BuyCard, GamePhase, PickPackCard, SellCard
 from jackdaw.engine.card_factory import create_joker
-from jackdaw.engine.game import _gain_joker, _lose_joker, _resolve_create_descriptors, step
+from jackdaw.engine.effects import CreateCard, EffectQueue
+from jackdaw.engine.game import _gain_joker, _lose_joker, step
 from jackdaw.engine.run_init import initialize_run
 
 
@@ -116,10 +117,9 @@ def test_removal_uses_identity_when_duplicate_jokers_compare_equal() -> None:
 def test_consumable_created_juggler_applies_passive_and_registers_key() -> None:
     gs = _state(GamePhase.SHOP)
 
-    _resolve_create_descriptors(
-        gs,
-        [{"type": "Joker", "forced_key": "j_juggler"}],
-    )
+    queue = EffectQueue(gs)
+    queue.add(CreateCard(set="Joker", forced_key="j_juggler"))
+    queue.apply()
 
     assert [joker.center_key for joker in gs["jokers"]] == ["j_juggler"]
     assert gs["hand_size"] == 9

@@ -250,6 +250,45 @@ class CreatePlayingCard(Effect):
 
 
 @dataclass(kw_only=True)
+class CreatePlayingCards(Effect):
+    """Create a batch of explicit playing cards and notify jokers once.
+
+    Familiar, Grim and Incantation create several cards in one Lua event and
+    then call ``playing_card_joker_effects(cards)`` once (``card.lua:1250-1290``).
+    Keeping the specs together preserves that batching contract for Hologram
+    and any later ``playing_card_added`` listener.
+    """
+
+    cards: list[dict[str, str]]
+    area: str = "hand"
+    notify: bool = True
+
+    def apply(self, gs: dict[str, Any]) -> None:
+        from jackdaw.engine.card_factory import create_playing_card
+        from jackdaw.engine.data.enums import Rank, Suit
+
+        created = [
+            create_playing_card(
+                Suit(spec["suit"]),
+                Rank(spec["rank"]),
+                enhancement=spec.get("enhancement", "c_base"),
+                game_state=gs,
+            )
+            for spec in self.cards
+        ]
+        lifecycle.add_playing_cards(gs, created, self.area, notify=self.notify)
+        if self.area == "hand":
+            blind = gs.get("blind")
+            if blind is not None:
+                from jackdaw.engine import read
+
+                rules = read.rules(gs)
+                for card in created:
+                    blind.debuff_card(card, rules, gs)
+            _sort_hand(gs)
+
+
+@dataclass(kw_only=True)
 class CopyCard(Effect):
     """``copy_card(source, into?, ..., strip_edition)`` and placement.
 
@@ -489,6 +528,7 @@ EFFECT_TYPES: tuple[type[Effect], ...] = (
     SetDollars,
     CreateCard,
     CreatePlayingCard,
+    CreatePlayingCards,
     CopyCard,
     AddTag,
     DestroyCard,

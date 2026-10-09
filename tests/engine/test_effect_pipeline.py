@@ -5,7 +5,18 @@ from __future__ import annotations
 import pytest
 
 from jackdaw.engine import lifecycle, read
-from jackdaw.engine.actions import CashOut, NextRound, PlayHand, SelectBlind
+from jackdaw.engine.actions import (
+    CashOut,
+    GamePhase,
+    NextRound,
+    OpenBooster,
+    PickPackCard,
+    PlayHand,
+    SelectBlind,
+    SellCard,
+    SkipBlind,
+    UseConsumable,
+)
 from jackdaw.engine.blind import Blind
 from jackdaw.engine.card import Card
 from jackdaw.engine.card_factory import create_consumable, create_joker
@@ -228,3 +239,288 @@ class TestRunWideAndBlindTiming:
             isinstance(effect, effects.ChangeHandSize) and effect.source is turtle
             for effect in applied
         )
+
+
+class TestMissingDispatches:
+    def test_certificate_creates_one_sealed_hand_card_only_on_first_draw(self):
+        gs = initialize_run("b_red", 1, "P43_CERTIFICATE")
+        _owned_joker(gs, "j_certificate")
+        # This seed creates a Diamond; The Window must debuff the new card
+        # before its drawn_to_hand hook runs.
+        gs["round_resets"]["blind_choices"]["Small"] = "bl_window"
+        before = _playing_count(gs)
+
+        step(gs, SelectBlind())
+
+        assert _playing_count(gs) == before + 1
+        certificate_cards = [card for card in gs["hand"] if card.seal is not None]
+        assert len(certificate_cards) == 1
+        assert certificate_cards[0].base.suit.value == "Diamonds"
+        assert certificate_cards[0].debuff is True
+
+        gs["blind"].chips = 10**9
+        step(gs, PlayHand(card_indices=(0,)))
+        assert _playing_count(gs) == before + 1
+
+    def test_hallucination_opens_shop_and_tag_packs_but_skips_rng_when_full(self):
+        def shop_state(seed: str) -> dict:
+            state = initialize_run("b_red", 1, seed)
+            state["phase"] = GamePhase.SHOP
+            state["dollars"] = 20
+            _owned_joker(state, "j_hallucination")
+            state["rng"] = PseudoRandom("HALU3")
+            pack = Card(center_key="p_arcana_normal_1", cost=4)
+            pack.ability = {"set": "Booster", "name": "Arcana Pack"}
+            state["shop_boosters"] = [pack]
+            return state
+
+        gs = shop_state("P43_HALLUCINATION")
+        step(gs, OpenBooster(card_index=0))
+        assert [card.ability["set"] for card in gs["consumables"]] == ["Tarot"]
+
+        full = shop_state("P43_HALLUCINATION_FULL")
+        for key in ("c_fool", "c_magician"):
+            lifecycle.emplace(full, create_consumable(key, game_state=full), "consumables")
+        assert "halu1" not in full["rng"].get_state()
+        step(full, OpenBooster(card_index=0))
+        assert "halu1" not in full["rng"].get_state()
+
+        tagged = initialize_run("b_red", 1, "P43_HALLUCINATION_TAG")
+        _owned_joker(tagged, "j_hallucination")
+        tagged["rng"] = PseudoRandom("HALU3")
+        tagged["round_resets"]["blind_tags"]["Small"] = "tag_charm"
+        step(tagged, SkipBlind())
+        assert [card.ability["set"] for card in tagged["consumables"]] == ["Tarot"]
+
+    def test_anaglyph_awards_double_tag_only_for_boss(self):
+        outcomes = {}
+        for blind_on_deck in ("Small", "Boss"):
+            gs = initialize_run("b_anaglyph", 1, f"P43_ANAGLYPH_{blind_on_deck}")
+            gs["blind_on_deck"] = blind_on_deck
+            if blind_on_deck == "Boss":
+                gs["round_resets"]["blind_choices"]["Boss"] = "bl_arm"
+            step(gs, SelectBlind(allow_forced_boss=True))
+            gs["blind"].chips = 1
+
+            step(gs, PlayHand(card_indices=(0,)))
+
+            outcomes[blind_on_deck] = [entry["key"] for entry in gs.get("awarded_tags", [])]
+        assert "tag_double" not in outcomes["Small"]
+        assert "tag_double" in outcomes["Boss"]
+
+
+class TestQueuedSales:
+    @staticmethod
+    def _shop_state(seed: str) -> dict:
+        gs = initialize_run("b_red", 1, seed)
+        gs["phase"] = GamePhase.SHOP
+        return gs
+
+    def test_diet_cola_sale_awards_double_tag(self):
+        gs = self._shop_state("P43_DIET_COLA")
+        _owned_joker(gs, "j_diet_cola")
+
+        step(gs, SellCard(area="jokers", card_index=0))
+
+        assert [entry["key"] for entry in gs["awarded_tags"]] == ["tag_double"]
+
+    def test_luchador_sale_disables_boss(self):
+        gs = self._shop_state("P43_LUCHADOR")
+        gs["blind"] = Blind.create("bl_arm", ante=1)
+        _owned_joker(gs, "j_luchador")
+
+        step(gs, SellCard(area="jokers", card_index=0))
+
+        assert gs["blind"].disabled is True
+
+    def test_invisible_sale_copies_other_joker_and_strips_negative(self):
+        gs = self._shop_state("P43_INVISIBLE")
+        invisible = _owned_joker(gs, "j_invisible")
+        invisible.ability["invis_rounds"] = invisible.ability.get("extra", 2)
+        source = create_joker("j_joker", edition={"negative": True}, game_state=gs)
+        lifecycle.emplace(gs, source, "jokers")
+
+        step(gs, SellCard(area="jokers", card_index=0))
+
+        assert len(gs["jokers"]) == 2
+        copy = next(joker for joker in gs["jokers"] if joker is not source)
+        assert copy.center_key == source.center_key
+        assert not copy.edition or not copy.edition.get("negative")
+
+    def test_verdant_leaf_disables_when_a_joker_is_sold(self):
+        gs = self._shop_state("P43_VERDANT")
+        gs["blind"] = Blind.create("bl_final_leaf", ante=8)
+        _owned_joker(gs, "j_joker")
+
+        step(gs, SellCard(area="jokers", card_index=0))
+
+        assert gs["blind"].disabled is True
+
+
+class TestConsumableEffects:
+    @staticmethod
+    def _shop_state(seed: str) -> dict:
+        gs = initialize_run("b_red", 1, seed)
+        gs["phase"] = GamePhase.SHOP
+        return gs
+
+    def test_ankh_with_full_ordinary_row_leaves_survivor_and_copy(self, monkeypatch):
+        from jackdaw.engine import effects
+
+        gs = self._shop_state("P43_ANKH_FULL")
+        for key in (
+            "j_joker",
+            "j_greedy_joker",
+            "j_lusty_joker",
+            "j_wrathful_joker",
+            "j_gluttenous_joker",
+        ):
+            _owned_joker(gs, key)
+        lifecycle.emplace(gs, create_consumable("c_ankh", game_state=gs), "consumables")
+        applied = []
+        original = effects.apply_effects
+
+        def capture(state, pending):
+            applied.extend(pending)
+            original(state, pending)
+
+        monkeypatch.setattr(effects, "apply_effects", capture)
+
+        step(gs, UseConsumable(card_index=0))
+
+        assert len(gs["jokers"]) == 2
+        assert gs["jokers"][0].center_key == gs["jokers"][1].center_key
+        assert sum(isinstance(effect, effects.DestroyCard) for effect in applied) == 4
+        assert sum(isinstance(effect, effects.CopyCard) for effect in applied) == 1
+
+    def test_ankh_strips_negative_from_copy(self, monkeypatch):
+        from jackdaw.engine import effects
+
+        gs = self._shop_state("P43_ANKH_NEGATIVE")
+        chosen = create_joker("j_joker", edition={"negative": True}, game_state=gs)
+        lifecycle.emplace(gs, chosen, "jokers")
+        lifecycle.emplace(gs, create_consumable("c_ankh", game_state=gs), "consumables")
+        applied = []
+        original = effects.apply_effects
+
+        def capture(state, pending):
+            applied.extend(pending)
+            original(state, pending)
+
+        monkeypatch.setattr(effects, "apply_effects", capture)
+
+        step(gs, UseConsumable(card_index=0))
+
+        assert len(gs["jokers"]) == 2
+        copy = next(joker for joker in gs["jokers"] if joker is not chosen)
+        assert chosen.edition and chosen.edition.get("negative")
+        assert not copy.edition or not copy.edition.get("negative")
+        copy_effect = next(effect for effect in applied if isinstance(effect, effects.CopyCard))
+        assert copy_effect.strip_edition is True
+
+    def test_high_priestess_with_one_slot_draws_exactly_one_planet(self, monkeypatch):
+        from jackdaw.engine import card_factory
+
+        gs = self._shop_state("P43_PRIESTESS")
+        filler = create_consumable("c_fool", game_state=gs)
+        priestess = create_consumable("c_high_priestess", game_state=gs)
+        lifecycle.emplace(gs, filler, "consumables")
+        lifecycle.emplace(gs, priestess, "consumables")
+        calls = []
+        original = card_factory.resolve_create_descriptor
+
+        def counted(*args, **kwargs):
+            calls.append(args[0])
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(card_factory, "resolve_create_descriptor", counted)
+        step(gs, UseConsumable(card_index=1))
+
+        assert len(calls) == 1
+        assert len(gs["consumables"]) == 2
+        assert sum(card.ability["set"] == "Planet" for card in gs["consumables"]) == 1
+
+    def test_glass_joker_hanged_man_counts_each_glass_card_once(self):
+        gs = initialize_run("b_red", 1, "P43_GLASS_HANGED")
+        glass_joker = _owned_joker(gs, "j_glass")
+        step(gs, SelectBlind())
+        for card in gs["hand"][:2]:
+            card.set_ability("m_glass", gs=gs)
+        hanged = create_consumable("c_hanged_man", game_state=gs)
+        lifecycle.emplace(gs, hanged, "consumables")
+        before = glass_joker.ability["x_mult"]
+
+        step(gs, UseConsumable(card_index=0, target_indices=(0, 1)))
+
+        assert glass_joker.ability["x_mult"] == before + 2 * glass_joker.ability["extra"]
+
+    def test_pack_consumable_dispatches_with_card_and_highlighted_context(self):
+        gs = initialize_run("b_red", 1, "P43_PACK_CONSUMABLE")
+        glass_joker = _owned_joker(gs, "j_glass")
+        targets = [gs["deck"].pop(), gs["deck"].pop()]
+        for card in targets:
+            card.set_ability("m_glass", gs=gs)
+        gs["hand"] = targets
+        hanged = create_consumable("c_hanged_man", game_state=gs)
+        lifecycle.emplace(gs, hanged, "pack_cards")
+        gs["pack_choices_remaining"] = 1
+        gs["pack_type"] = "Arcana"
+        gs["pack_hand"] = []
+        gs["shop_return_phase"] = GamePhase.SHOP
+        gs["phase"] = GamePhase.PACK_OPENING
+        before = glass_joker.ability["x_mult"]
+
+        step(gs, PickPackCard(card_index=0, target_indices=(0, 1)))
+
+        assert glass_joker.ability["x_mult"] == before + 2 * glass_joker.ability["extra"]
+
+    @pytest.mark.parametrize(
+        "consumable_key,created_count",
+        [("c_familiar", 3), ("c_grim", 2), ("c_incantation", 4)],
+    )
+    def test_spectral_playing_cards_send_one_batch_notification(
+        self, consumable_key: str, created_count: int, monkeypatch
+    ):
+        from jackdaw.engine import effects
+
+        gs = initialize_run("b_red", 1, f"P43_BATCH_{consumable_key}")
+        step(gs, SelectBlind())
+        consumable = create_consumable(consumable_key, game_state=gs)
+        lifecycle.emplace(gs, consumable, "consumables")
+        notifications = []
+        applied = []
+        original_fire = lifecycle.fire_joker_context
+        original_apply = effects.apply_effects
+
+        def capture(state, **fields):
+            if fields.get("playing_card_added"):
+                notifications.append(list(fields["cards"]))
+            return original_fire(state, **fields)
+
+        def capture_applied(state, pending):
+            applied.extend(pending)
+            original_apply(state, pending)
+
+        monkeypatch.setattr(lifecycle, "fire_joker_context", capture)
+        monkeypatch.setattr(effects, "apply_effects", capture_applied)
+        step(gs, UseConsumable(card_index=0))
+
+        assert [len(cards) for cards in notifications] == [created_count]
+        assert sum(isinstance(effect, effects.CreatePlayingCards) for effect in applied) == 1
+
+
+def test_blind_triggered_is_reset_before_each_play_for_matador() -> None:
+    gs = initialize_run("b_red", 1, "P43_MATADOR_RESET")
+    _owned_joker(gs, "j_matador")
+    step(gs, SelectBlind())
+    gs["blind"].chips = 10**9
+    gs["hand"][0].debuff = True
+    before = gs["dollars"]
+
+    step(gs, PlayHand(card_indices=(0,)))
+    after_trigger = gs["dollars"]
+    assert after_trigger == before + 8
+
+    clean_index = next(i for i, card in enumerate(gs["hand"]) if not card.debuff)
+    step(gs, PlayHand(card_indices=(clean_index,)))
+    assert gs["dollars"] == after_trigger

@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Any
 
 from jackdaw.engine import lifecycle, read
 from jackdaw.engine.data.prototypes import BOOSTERS, CENTER_POOLS
-from jackdaw.engine.effects import EffectQueue
+from jackdaw.engine.effects import DestroyCard, DisableBlind, EaseDollars, EffectQueue
 
 if TYPE_CHECKING:
     from jackdaw.engine.card import Card
@@ -675,9 +675,9 @@ def buy_card(
 
 
 def sell_card(
-    card: Card,
-    from_area: CardArea,
     game_state: dict,
+    area: str,
+    index: int,
 ) -> dict[str, Any]:
     """Execute a card sale.
 
@@ -686,24 +686,19 @@ def sell_card(
 
     Flow
     ~~~~
-    1. **Eligibility check** — eternal cards and cards not in a joker/
-       consumable area cannot be sold.  Returns
+    1. **Eligibility check** — eternal cards and cards not in the joker/
+       consumable rows cannot be sold.  Returns
        ``{'ok': False, 'reason': 'eternal'}`` or ``'not_sellable'``.
     2. **Selling-self notification** — call
        ``calculate_joker(card, {selling_self=True})``.
     3. **Selling-card notification** — call
        ``calculate_joker(j, {selling_card=True, card=card})`` for every
        other joker in ``game_state['jokers']``.
-    4. **Reverse passive effects** — canonical ``lifecycle.remove`` teardown.
-    5. **Award sell value** — ``game_state['dollars'] += card.sell_cost``.
-    6. **Remove** card from *from_area*.
+    4. **Event half** — award sell value, remove the card, and disable
+       Verdant Leaf for a sold Joker. One queue preserves Lua event order.
 
     Parameters
     ----------
-    card:
-        The card being sold (still in *from_area* at call time).
-    from_area:
-        The area the card currently occupies.
     game_state:
         Mutable game-state dict.  Relevant keys:
 
@@ -719,10 +714,14 @@ def sell_card(
     from jackdaw.engine.jokers import calculate_joker, context_for
 
     # -- 1. Eligibility --
+    if area not in ("jokers", "consumables"):
+        return {"ok": False, "reason": "not_sellable"}
+    cards = game_state.get(area, [])
+    if index < 0 or index >= len(cards):
+        return {"ok": False, "reason": "invalid_index"}
+    card = cards[index]
     if card.eternal:
         return {"ok": False, "reason": "eternal"}
-    if from_area.type not in ("joker", "consumeable"):
-        return {"ok": False, "reason": "not_sellable"}
 
     # -- 2. Selling-self notification --
     owned_jokers = game_state.get("jokers", [])
@@ -742,17 +741,21 @@ def sell_card(
                 ),
             )
 
-    # Invisible Joker must copy while the sold card is still in the row
-    # (card.lua:1590 calls sell_card before the UI removes the card).
-    queue.apply()
-
-    # Remove first so Astronomer repricing sees the post-sale owned set.
-    from_area.remove(card)
-    lifecycle.remove(game_state, card)
-
-    # -- 5. Award money --
     dollars_gained = card.sell_cost
-    game_state["dollars"] = game_state.get("dollars", 0) + dollars_gained
+    queue.add(EaseDollars(amount=dollars_gained))
+    queue.add(DestroyCard(card=card))
+    blind = game_state.get("blind")
+    if (
+        card.ability.get("set") == "Joker"
+        and blind is not None
+        and getattr(blind, "name", "") == "Verdant Leaf"
+    ):
+        # Nested immediate event in card.lua:1616-1620, after removal.
+        queue.add(DisableBlind(order=1))
+
+    # Invisible Joker copies while the sold card is still in the row because
+    # its effect was emitted before the queued removal (card.lua:1590).
+    queue.apply()
 
     return {"ok": True, "dollars_gained": dollars_gained}
 

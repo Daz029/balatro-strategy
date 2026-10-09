@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from jackdaw.engine.card import Card, reset_sort_id_counter
+from jackdaw.engine.card import reset_sort_id_counter
 from jackdaw.engine.card_factory import (
     card_from_control,
     create_card,
@@ -17,7 +17,6 @@ from jackdaw.engine.card_factory import (
     create_playing_card,
     create_voucher,
     resolve_create_descriptor,
-    resolve_destroy_descriptor,
 )
 from jackdaw.engine.data.enums import Rank, Suit
 from jackdaw.engine.data.prototypes import JOKER_RARITY_POOLS, JOKERS, JokerProto
@@ -291,35 +290,6 @@ class TestResolveCreateUnknown:
     def test_empty_descriptor_returns_none(self):
         card = resolve_create_descriptor({}, _rng(), 1, {})
         assert card is None
-
-
-# ============================================================================
-# resolve_destroy_descriptor
-# ============================================================================
-
-
-class TestResolveDestroyRandomJoker:
-    def _make_joker(self, key: str = "j_joker") -> Card:
-        return create_joker(key)
-
-    def test_eternal_joker_never_selected(self):
-        """With 3 jokers (1 eternal), only the 2 non-eternal are eligible."""
-        j_eternal = create_joker("j_joker", eternal=True)
-        j1 = self._make_joker("j_greedy_joker")
-        j2 = self._make_joker("j_lusty_joker")
-        jokers = [j_eternal, j1, j2]
-
-        selected = set()
-        for i in range(20):
-            result = resolve_destroy_descriptor(
-                {"destroy_random_joker": True},
-                jokers,
-                PseudoRandom(f"MADNESS{i}"),
-            )
-            assert result is not None
-            selected.add(id(result))
-
-        assert id(j_eternal) not in selected, "Eternal joker must never be selected"
 
 
 # ============================================================================

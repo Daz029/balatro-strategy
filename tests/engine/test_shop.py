@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from jackdaw.engine import lifecycle
 from jackdaw.engine.card import Card, reset_sort_id_counter
 from jackdaw.engine.card_area import CardArea
 from jackdaw.engine.card_factory import create_joker
@@ -265,20 +266,18 @@ class TestSellCard:
     def test_successful_sale_awards_dollars(self):
         card = _joker()
         card.set_cost({})
-        area = _joker_area()
-        area.add(card)
         gs = _base_gs(dollars=0)
-        result = sell_card(card, area, gs)
+        lifecycle.emplace(gs, card, "jokers")
+        result = sell_card(gs, "jokers", 0)
         assert result["ok"] is True
         assert gs["dollars"] == card.sell_cost
 
     def test_eternal_joker_rejected(self):
         card = _joker(eternal=True)
         card.set_cost({})
-        area = _joker_area()
-        area.add(card)
         gs = _base_gs(dollars=0)
-        result = sell_card(card, area, gs)
+        lifecycle.emplace(gs, card, "jokers")
+        result = sell_card(gs, "jokers", 0)
         assert result["ok"] is False
         assert result["reason"] == "eternal"
 

@@ -147,6 +147,7 @@ class JokerContext:
     hand_levels: HandLevels | None = None
     held_cards: list[Card] | None = None
     consumeable: Card | None = None
+    highlighted: list[Card] | None = None
     cards: list[Card] | None = None
     booster: Card | None = None
 
@@ -1683,6 +1684,24 @@ def _constellation(card: Card, ctx: JokerContext) -> JokerResult | None:
 @register("j_glass")
 def _glass_joker(card: Card, ctx: JokerContext) -> JokerResult | None:
     """Glass Joker: +0.75 xMult per Glass Card destroyed. Source: card.lua:2647."""
+    if (
+        ctx.using_consumeable
+        and not ctx.blueprint
+        and ctx.consumeable is not None
+        and ctx.consumeable.center_key == "c_hanged_man"
+    ):
+        # card.lua:2709-2716 counts highlighted Glass Cards here. Hanged Man
+        # dissolves rather than shatters, so cards_destroyed must not count it.
+        glass_count = sum(
+            1
+            for highlighted in ctx.highlighted or []
+            if highlighted.ability.get("name") == "Glass Card"
+        )
+        if glass_count:
+            card.ability["x_mult"] = (
+                card.ability.get("x_mult", 1) + card.ability.get("extra", 0.75) * glass_count
+            )
+            return JokerResult()
     if ctx.cards_destroyed and not ctx.blueprint:
         glass_count = sum(1 for c in ctx.cards_destroyed if c.shattered)
         if glass_count > 0:

@@ -6,6 +6,8 @@ and representative consumable effects with integration scoring chains.
 
 from __future__ import annotations
 
+from dataclasses import fields
+
 import pytest
 
 from jackdaw.engine.blind import Blind
@@ -15,6 +17,7 @@ from jackdaw.engine.consumables import (
     ConsumableContext,
     ConsumableResult,
     can_use_consumable,
+    consumable_effects,
     register_consumable,
     use_consumable,
 )
@@ -67,6 +70,33 @@ def _joker(key: str, **ability_kw) -> Card:
     c.center_key = key
     c.ability = {"name": key, "set": "Joker", **ability_kw}
     return c
+
+
+def test_every_consumable_result_field_translates_to_an_effect() -> None:
+    """A newly-added producer field must fail until its effect mapping exists."""
+    card = _card("Hearts", "Ace")
+    joker = _joker("j_joker")
+    values = {
+        "enhance": [(card, "m_bonus")],
+        "change_suit": [(card, "Spades")],
+        "change_rank": [(card, 1)],
+        "copy_card": (card, _card("Clubs", "2")),
+        "destroy": [card],
+        "add_seal": [(card, "Gold")],
+        "create": [{"type": "Tarot", "count": 1, "seed": "test"}],
+        "dollars": 1,
+        "level_up": [("High Card", 1)],
+        "add_to_deck": [{"copy_of": card}],
+        "add_edition": {"target": card, "edition": {"foil": True}},
+        "destroy_jokers": [joker],
+        "hand_size_mod": -1,
+        "money_set": 0,
+    }
+
+    assert {field.name for field in fields(ConsumableResult)} == set(values)
+    for field in fields(ConsumableResult):
+        effects = consumable_effects(ConsumableResult(**{field.name: values[field.name]}))
+        assert effects, field.name
 
 
 # --- Integration helpers (from consumables_integration) ---

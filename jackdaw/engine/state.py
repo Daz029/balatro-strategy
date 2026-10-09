@@ -330,7 +330,7 @@ encoder read them as constant 0 until Phase 2.
     consumeable_usage  dict              Per-consumable type usage.  Set by init ({}).
     hand_usage         dict              Per-hand-type play counts.  Set by init ({}).
     last_tarot_planet  str | None        Center key of last Tarot/Planet used (for The Fool).
-                                         Set by init (None), game (_apply_consumable_result).
+                                         Set by init (None), game (_use_consumable_card).
 
 
 .. rubric:: Deck metadata
@@ -575,7 +575,7 @@ STATE_KEYS: dict[str, str] = {
     "current_round": "per-round counters; init, run_init.start_round, game",
     "round_resets": "per-ante values; init, run_init, game, tags",
     "round_bonus": "next-round hand/discard bonuses; init, tags",
-    "facing_blind": "Lua facing_blind; init (writer: Phase 5, C02 Certificate)",
+    "facing_blind": "Lua facing_blind; init, game select/evaluate round (C02 Certificate)",
     "last_score_result": "last ScoreResult; game",
     "skips": "blinds skipped; game",
     "bosses_used": "boss appearance counts; init, tags/blind",

@@ -118,7 +118,7 @@ GAME_PATHS: dict[str, Entry] = {
     "dollars": Stored("dollars"),
     "ecto_minus": Stored("ecto_minus", note="writer: Ectoplasm (D34)"),
     "edition_rate": Stored("edition_rate"),
-    "facing_blind": Stored("facing_blind", note="writer: Phase 5 (Certificate, C02)"),
+    "facing_blind": Stored("facing_blind", note="game select/evaluate round (Certificate, C02)"),
     "first_shop_buffoon": Stored("first_shop_buffoon", lazy=True),
     "first_used_hand_level": _STATS,
     "hand_usage": _STATS,

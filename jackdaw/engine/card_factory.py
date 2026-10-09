@@ -6,7 +6,6 @@ vouchers, plus:
 * ``card_from_control`` — deck-builder helper (misc_functions.lua:1625)
 * ``create_card`` — the unified shop/pack factory (common_events.lua:2082)
 * ``resolve_create_descriptor`` — side-effect descriptor → Card bridge (M10)
-* ``resolve_destroy_descriptor`` — destruction descriptor → Card bridge (M10)
 
 Source references:
   - card_from_control: misc_functions.lua:1625
@@ -245,7 +244,6 @@ def card_from_control(
         hands_played=hands_played,
         game_state=game_state,
     )
-
 
 # ---------------------------------------------------------------------------
 # create_card — common_events.lua:2082
@@ -603,47 +601,3 @@ def resolve_create_descriptor(
         append=append,
         game_state=game_state,
     )
-
-
-def resolve_destroy_descriptor(
-    descriptor: dict[str, Any],
-    jokers: list[Card],
-    rng: PseudoRandom,
-) -> Card | None:
-    """Resolve a destruction descriptor, returning the card to destroy (if any).
-
-    Descriptor shapes
-    -----------------
-    ``{'destroy_random_joker': True}``
-        Select a random non-eternal joker from *jokers* via RNG stream
-        ``'madness'`` (matching ``pseudoseed('madness')`` in
-        ``card.lua:2509``).  Returns the selected card, or ``None`` if there
-        are no eligible (non-eternal) jokers.
-
-    ``{'disable_blind': True}``
-        No card is destroyed.  Returns ``None``; the caller is responsible
-        for calling ``blind.disable()``.
-
-    Parameters
-    ----------
-    descriptor:
-        Destruction descriptor dict.
-    jokers:
-        The current list of joker cards.
-    rng:
-        Live :class:`~jackdaw.engine.rng.PseudoRandom` instance.
-
-    Returns
-    -------
-    Card | None
-        The card that should be destroyed, or ``None``.
-    """
-    if descriptor.get("destroy_random_joker"):
-        eligible = [j for j in jokers if not j.eternal]
-        if not eligible:
-            return None
-        selected, _ = rng.element(eligible, rng.seed("madness"))
-        return selected
-
-    # disable_blind and any other unknown descriptors: no card to destroy
-    return None

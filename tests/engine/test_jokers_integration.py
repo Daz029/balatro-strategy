@@ -238,7 +238,7 @@ class TestRiffRaff:
         """
         jokers = [_joker("j_joker") for _ in range(4)]  # 1 slot free
         # gs must alias gs["jokers"] to the passed list and carry an rng:
-        # Riff-raff now rolls the real Common pool via _resolve_create_descriptors
+        # Riff-raff now rolls the real Common pool through its CreateCard effect.
         # (which appends to gs["jokers"]) instead of hardcoding j_joker.
         gs = {"joker_slots": 5, "jokers": jokers, "rng": PseudoRandom("RIFFRAFF")}
         queue = EffectQueue(gs)

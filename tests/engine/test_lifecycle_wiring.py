@@ -95,7 +95,7 @@ class TestD17Notifications:
         assert caino.ability["caino_xmult"] == 2
         assert target.removed is True
 
-    def test_glass_joker_counts_scoring_shatter_not_hanged_man(self) -> None:
+    def test_glass_joker_counts_scoring_shatter_and_hanged_man_context(self) -> None:
         gs = initialize_run("b_red", 1, "D17_GLASS_SCORE")
         glass_joker = _owned_joker(gs, "j_glass")
         step(gs, SelectBlind())
@@ -117,7 +117,9 @@ class TestD17Notifications:
         hanged_target.set_ability("m_glass", gs=gs2)
         _owned_consumable(gs2, "c_hanged_man")
         step(gs2, UseConsumable(card_index=0, target_indices=(0,)))
-        assert glass_joker2.ability["x_mult"] == 1
+        # Hanged Man dissolves instead of shattering, but Glass Joker has a
+        # separate using_consumeable path (card.lua:2709-2716).
+        assert glass_joker2.ability["x_mult"] == 1.75
 
     def test_trading_card_destruction_notifies(self) -> None:
         gs = initialize_run("b_red", 1, "D17_TRADING")
