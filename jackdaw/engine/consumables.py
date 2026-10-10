@@ -98,8 +98,8 @@ class ConsumableResult:
     change_suit: list[tuple[Card, str]] | None = None
     """[(card, suit)] — change card's base suit."""
 
-    change_rank: list[tuple[Card, int]] | None = None
-    """[(card, rank_delta)] — shift rank by delta (Strength=+1)."""
+    change_rank: list[tuple[Card, str]] | None = None
+    """[(card, new_rank)] — set the rank (Strength computes rank+1 itself)."""
 
     copy_card: tuple[Card, Card] | None = None
     """(source, target) — copy source onto target (Death)."""
@@ -182,7 +182,7 @@ def consumable_effects(result: ConsumableResult) -> list[Effect]:
         SetEnhancement(card=card, center=center) for card, center in result.enhance or []
     )
     effects.extend(ChangeSuit(card=card, suit=suit) for card, suit in result.change_suit or [])
-    effects.extend(ChangeRank(card=card, delta=delta) for card, delta in result.change_rank or [])
+    effects.extend(ChangeRank(card=card, rank=rank) for card, rank in result.change_rank or [])
     if result.copy_card is not None:
         source, target = result.copy_card
         effects.append(CopyCard(card=source, into=target))

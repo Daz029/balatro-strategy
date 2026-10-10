@@ -34,7 +34,15 @@ analysis and potential overhaul.
   last-played) C12 C13(Magic Trick/Illusion) D16 D17 D20 D24 D25 D33 D35 D36 D37 D41 D42 D47
   D53. Pool exclusion = Lua release-unless-owned (bounded, not equality). Status block under
   Phase 3 in the plan doc.
-  NEXT: Phase 4 effect pipeline (+ Phase 0 instrument / Q quick wins in parallel).
+  PHASE 4 (effect pipeline) EXIT MET 2026-10-09, same branch: `jackdaw/engine/effects.py`
+  (Effect + 19 subclasses, EffectQueue with pass-local room reservations so solver probes never
+  leak, apply_effects = the only applier); JokerResult.extra gone, JokerContext.game required,
+  calculate_joker raises without a queue, context_for/fire_jokers builders;
+  consumable_effects() exhaustive translation. Fixed C02 D07 D11 D15 D23(selling_self/Verdant)
+  D35 D46 C14(Anaglyph); pulled forward C01 counters, D14 Burglar order, D48 Hallucination key.
+  Structural gate `tests/engine/test_effect_structure.py`; solver +4% (gate 10%). P4-2..P4-4 via
+  codex exec (tickets in docs/implementation-tickets/). Status block under Phase 4 in the plan doc.
+  NEXT: Phase 5 sequencing (+ Phase 0 instrument / Q quick wins in parallel).
 - descriptors: in progress
 - winrate-scaled reward: less importnat right now
 

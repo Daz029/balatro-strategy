@@ -65,12 +65,12 @@ import numpy as np
 
 from jackdaw.engine.card import Card
 from jackdaw.engine.jokers import (
-    JokerContext,
     _find_leftmost,
     _find_right_neighbor,
     blueprint_compatible,
+    context_for,
 )
-from jackdaw.engine.read import Rules, StateView, rules_for
+from jackdaw.engine.read import Rules, rules_for
 from jackdaw.env.observation import center_key_id, center_key_vocabulary
 
 _COPY_JOKERS = frozenset({"j_blueprint", "j_brainstorm"})
@@ -517,7 +517,7 @@ def resolve_copy_targets(gs: dict[str, Any]) -> list[CopyResolution]:
     never call it).
     """
     jokers: list[Card] = gs.get("jokers", [])
-    ctx = JokerContext(jokers=jokers, game=StateView(gs, jokers=jokers))
+    ctx = context_for(gs, queue=None)
     index_by_id = {id(j): i for i, j in enumerate(jokers)}
 
     out: list[CopyResolution] = []

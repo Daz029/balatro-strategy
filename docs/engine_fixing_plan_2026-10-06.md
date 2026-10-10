@@ -913,6 +913,89 @@ goes green.* Performance gate: the solver's per-decision wall time is within
 about 10% of today's. Measure it with the existing validation harnesses' timing
 output.
 
+**STATUS 2026-10-09: EXIT MET** (branch `engine-phase1-state`, P4-1 `b5a2cea`,
+P4-2 `c75178a`, P4-3 `977d263`, P4-4 after it). P4-1 was written here; P4-2
+to P4-4 ran through `codex exec` from the tickets in
+`docs/implementation-tickets/engine-p4-*.md` and were reviewed here. Every
+listed finding has an integration regression (`tests/engine/test_effect_pipeline.py`,
+through `step()` / `score_hand`) seen failing on `576ff28`.
+
+- **`jackdaw/engine/effects.py`**: `Effect` (``reserve`` = Lua's
+  emission-time half, ``apply`` = the event half), 19 subclasses,
+  `EffectQueue`, and `apply_effects`, the only applier. Effects run in
+  emission order; `order=1` models Lua's nested events (Chicot, Cartomancer,
+  Verdant Leaf).
+- **Room before RNG (D46)**: reservations live on the pass's `EffectQueue`,
+  NOT in `gs`. Lua's `joker_buffer` / `consumeable_buffer` are zero at every
+  stable decision point, so the values are identical, and the solver (which
+  scores clones against the live `gs` and never applies) cannot leak a
+  reservation. `CreateCard.reserve` clamps the count to the room left;
+  handlers that roll before creating (8 Ball, Hallucination, Vagabond,
+  Superposition, Séance) check `ctx.room()` before the roll, as Lua does.
+- **Handlers**: `JokerResult.extra` is gone (`effects: list[Effect]`);
+  `JokerContext.game` is required (InitVar path deleted); `calculate_joker`
+  queues and raises `UnappliedEffectError` without a queue; `context_for`
+  / `fire_jokers` are the live-state builders (`score_hand` builds its own
+  from its explicit, possibly cloned, arguments). `remove=True` now means only
+  Lua's "destroy the card this pass looks at"; every self-destruct is a
+  `DestroyCard(self)`. `GameSnapshot` survives only as a test fixture
+  (`tests/engine/_joker_ctx.py`).
+- **Consumables / tags**: `consumable_effects()` translates every
+  `ConsumableResult` field and raises on an unmapped one; tag dollars,
+  top-up jokers and orbital level-ups go through the queue. Handlers
+  still return `ConsumableResult` (typed, exhaustively translated in one
+  place) rather than effects directly: same guarantee, far less churn.
+- **Fixed**: C02 (DNA, Sixth Sense, Certificate on `first_hand_drawn`,
+  8 Ball, Hallucination on shop AND tag packs), D07 (Loyalty: run-wide
+  counter; creation stamps `hands_played_at_create` from live state), D11
+  (Matador main pass; The Arm triggers only above level 1; a debuffed
+  scoring card triggers; `triggered` cleared per play), D15 (Dagger
+  destroys and frees the slot; Madness never picks itself, an Eternal or a
+  sliced joker), D23 (one sell implementation: `selling_self` dispatched in
+  `step()`, Verdant Leaf disable; sell PHASES stay Phase 6), D35 (Ankh copy
+  resets `invis_rounds`), D46, C14 (Anaglyph's Double Tag).
+- **Pulled forward** (each needed to verify a Phase 4 fix):
+  - C01, counter half: hand history is recorded once, before the blind
+    debuff branch; `hands_played` advances after scoring. The rest of
+    `evaluate_play`'s order is still Phase 5.
+  - D14: setting_blind runs after `start_round` and the boss set-time
+    effects, as in Lua `new_round`. Burglar sticks; Chicot reverses
+    Water/Needle/Manacle.
+  - D48, Hallucination key only (`'halu'..ante`). The rental-stream half
+    stays on the Q track.
+- **New findings, fixed**:
+  - Familiar, Grim and Incantation created their cards in the DECK (Lua:
+    hand), with one notification per batch.
+  - `using_consumeable` fired only for Planets. Lua fires it for every
+    consumable, and Glass Joker needs it for The Hanged Man.
+  - The economy fallback fired the end_of_round handlers, so Gros Michel's
+    extinction was rolled a second time.
+- **Structural gate** (`tests/engine/test_effect_structure.py`, 28 tests,
+  each seen failing under a deliberate mutation):
+  - every Effect applies;
+  - a handler with no queue raises;
+  - static producer/consumer: every context an effect-producing handler
+    guards on is dispatched by production code (empty allowlist);
+  - one production context-construction path;
+  - no untyped `extra` channel;
+  - solver isolation: `score_hand` with creators leaves the live `gs`
+    untouched.
+- **Performance**: 20 fixed seeds per stage, `576ff28` vs `977d263`, run
+  back to back. stage2 63.4 s -> 66.0 s (+4.0%), stage3 56.6 s -> 59.0 s
+  (+4.2%), inside the 10% gate.
+- **Residuals, owned by Phase 5**:
+  - DNA's copy lands after scoring. In Lua it is emplaced in `G.hand`
+    during the before pass, so the held-card loop can score it.
+  - The Ox still drains after scoring (D29), so Matador's main pass cannot
+    see an Ox trigger yet.
+  - Mr. Bones' `saved`, and the scoring pass's own level-ups (Space,
+    Burnt), stay pipeline fields, not effects (C11).
+  - `JokerResult`'s numbers are not yet the `Contribution` record of
+    design section 8.
+- **Data impact (Part 6)**: label semantics changed again (counters,
+  Loyalty, Matador, D46 RNG draws, creation routing). Re-harvest and regen
+  as planned.
+
 ### Phase 5. Sequencing (S4)
 
 Line-faithful ports of `evaluate_play`, `play_cards_from_highlighted`, discard

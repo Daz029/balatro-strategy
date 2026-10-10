@@ -1357,7 +1357,11 @@ def _handle_next_round(gs: dict[str, Any]) -> dict[str, Any]:
     _require_phase(gs, GamePhase.SHOP)
 
     # Fire ending_shop joker context (Perkeo)
-    _fire_shop_joker_context(gs, ending_shop=True)
+    from jackdaw.engine.jokers import fire_jokers
+
+    ending_shop_queue = EffectQueue(gs)
+    fire_jokers(gs, ending_shop_queue, ending_shop=True)
+    ending_shop_queue.apply()
 
     # G.shop:remove() removes each remaining card before the CardArea dies.
     for area in ("shop_cards", "shop_vouchers", "shop_boosters"):

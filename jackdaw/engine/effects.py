@@ -94,9 +94,10 @@ def apply_effects(gs: dict[str, Any], effects: list[Effect]) -> None:
     after the rest of the pass's first-level events (``card.lua:2493``,
     ``2547``).
     """
-    for effect in sorted(effects, key=lambda e: e.order):
+    for effect in effects:
         if not isinstance(effect, Effect):
             raise TypeError(f"not an Effect: {effect!r}")
+    for effect in sorted(effects, key=lambda e: e.order):
         effect.apply(gs)
 
 
@@ -419,11 +420,13 @@ class ChangeSuit(Effect):
 
 @dataclass(kw_only=True)
 class ChangeRank(Effect):
+    """Set the card's rank to ``rank`` (Strength, Familiar...), suit kept."""
+
     card: Card
-    delta: int
+    rank: str
 
     def apply(self, gs: dict[str, Any]) -> None:
-        self.card.change_rank(self.delta, gs=gs)
+        self.card.change_rank(self.rank, gs=gs)
 
 
 @dataclass(kw_only=True)

@@ -415,122 +415,26 @@ Scoring numbers (chips, mult, x_mult, retriggers) are **not** effects. They
 are values the scoring pipeline folds into the running total itself, in Lua's
 order (section 8).
 
-```mermaid
-classDiagram
-  class Effect {
-    <<abstract, new>>
-    +source
-    +reserve(ctx)
-    +apply(ctx)*
-  }
-  class EaseDollars {
-    +amount
-    +instant
-    +buffered
-  }
-  class CreateCard {
-    +spec : CardSpec
-    +area
-    +reserve(ctx) takes a slot first
-  }
-  class CopyCard {
-    +source
-    +area
-    +strip_edition
-  }
-  class DestroyCard {
-    +card
-  }
-  class ModifyCard {
-    <<abstract>>
-    +card
-  }
-  class SetEnhancement {
-    +center
-  }
-  class ChangeSuit {
-    +suit
-  }
-  class ChangeRank {
-    +delta
-  }
-  class SetSeal {
-    +seal
-  }
-  class SetEdition {
-    +edition
-  }
-  class LevelUpHand {
-    +hand
-    +amount
-  }
-  class ChangeRoundResource {
-    +hands
-    +discards
-    +hand_size
-  }
-  class DiscardCards {
-    +cards
-    +hook
-  }
-  class DisableBlind
-  class SetPoolFlag {
-    +flag
-  }
-  class AddTag {
-    +key
-  }
-  class SaveRun
-  Effect <|-- EaseDollars
-  Effect <|-- CreateCard
-  Effect <|-- CopyCard
-  Effect <|-- DestroyCard
-  Effect <|-- ModifyCard
-  ModifyCard <|-- SetEnhancement
-  ModifyCard <|-- ChangeSuit
-  ModifyCard <|-- ChangeRank
-  ModifyCard <|-- SetSeal
-  ModifyCard <|-- SetEdition
-  Effect <|-- LevelUpHand
-  Effect <|-- ChangeRoundResource
-  Effect <|-- DiscardCards
-  Effect <|-- DisableBlind
-  Effect <|-- SetPoolFlag
-  Effect <|-- AddTag
-  Effect <|-- SaveRun
-```
+The built API uses one pass-local `EffectQueue`. It owns the pending effects
+and Joker/Consumable slot reservations; reservations do not live in `gs`, so
+a solver can score cloned objects against a live state without leaking buffer
+changes. `apply_effects` (called by `EffectQueue.apply`) is the only applier.
 
-```mermaid
-classDiagram
-  class EffectApplier {
-    <<new>>
-    +apply_all(effects, ctx)
-  }
-  class ApplyContext {
-    <<new>>
-    +gs
-    +phase
-    +applier
-  }
-  class CardSpec {
-    <<new>>
-    +set
-    +key
-    +rarity
-    +edition
-    +seal
-    +enhancement
-    +append
-    +soulable
-  }
-  EffectApplier ..> ApplyContext
-  EffectApplier ..> Lifecycle : card changes
-  EffectApplier ..> MoneyLedger : money
-  EffectApplier ..> SlotReservations : room
-```
+The concrete vocabulary is `EaseDollars`, `SetDollars`, `CreateCard`,
+`CreatePlayingCard`, `CreatePlayingCards`, `CopyCard`, `AddTag`, `DestroyCard`,
+`DestroyPlayingCards`, `SetEnhancement`, `ChangeSuit`, `ChangeRank`, `SetSeal`,
+`SetEdition`, `LevelUpHand`, `ChangeRoundResource`, `ChangeHandSize`,
+`DisableBlind`, and `SetPoolFlag`. Card lifetime effects delegate to
+`lifecycle.py`, including the follow-up joker notifications created by adding
+or destroying playing cards.
+
+`SaveRun` is deliberately not an effect. Mr. Bones' `saved` value remains a
+scoring-pipeline result until Phase 5 C11 defines the surrounding game-over
+event. There are likewise no draft-only `EffectApplier`, `ApplyContext`,
+`CardSpec`, `ModifyCard`, or `DiscardCards` types in the Phase 4 build.
 
 Card effects create follow-up triggers (a created playing card fires
-`playing_card_added`, a destroyed one `remove_playing_cards`). The applier
+`playing_card_added`, a destroyed batch fires `cards_destroyed`). The applier
 runs those through the same path, so they cannot be skipped (fixes D17).
 
 ---
