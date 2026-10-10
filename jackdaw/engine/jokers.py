@@ -69,6 +69,7 @@ class GameSnapshot:
     planets_used: int = 0
     enhanced_card_count: int = 0
     hands_left: int = 0
+    chips: int = 0
     hands_played: int = 0
     hands_played_total: int = 0
     discards_left: int = 0
@@ -2174,7 +2175,7 @@ def _gros_michel(card: Card, ctx: JokerContext) -> JokerResult | None:
                         SetPoolFlag(flag="gros_michel_extinct", source=card),
                     ],
                 )
-        return JokerResult(saved=True)
+        return JokerResult()
     if ctx.joker_main:
         extra = card.ability.get("extra", {})
         m = extra.get("mult", 15)
@@ -2195,7 +2196,7 @@ def _cavendish(card: Card, ctx: JokerContext) -> JokerResult | None:
         if ctx.rng is not None:
             if ctx.rng.random("cavendish") < ctx.game.probabilities_normal / odds:
                 return JokerResult(effects=[DestroyCard(card=card, source=card)])
-        return JokerResult(saved=True)
+        return JokerResult()
     if ctx.joker_main:
         extra = card.ability.get("extra", {})
         x = extra.get("Xmult", 3)
@@ -2540,7 +2541,14 @@ def _mr_bones(card: Card, ctx: JokerContext) -> JokerResult | None:
 
     Returns saved=True and destroys itself (self-destructs after saving).
     """
-    if ctx.game_over:
+    # L: card.lua:3047-3062 — the handler receives game_over but saves only
+    # after committed accumulated chips reach one quarter of the blind target.
+    if (
+        ctx.game_over
+        and ctx.blind is not None
+        and ctx.blind.chips > 0
+        and ctx.game.chips / ctx.blind.chips >= 0.25
+    ):
         return JokerResult(saved=True, effects=[DestroyCard(card=card, source=card)])
     return None
 

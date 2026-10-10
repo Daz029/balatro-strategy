@@ -175,6 +175,11 @@ def hands_left(gs: dict[str, Any]) -> int:
     return gs.get("current_round", {}).get("hands_left", 0)
 
 
+def accumulated_chips(gs: dict[str, Any]) -> int:
+    """Return committed ``G.GAME.chips`` (Mr. Bones, ``card.lua:3048``)."""
+    return gs.get("chips", 0)
+
+
 def hands_played_this_round(gs: dict[str, Any]) -> int:
     """Return ``G.GAME.current_round.hands_played``."""
     return gs.get("current_round", {}).get("hands_played", 0)
@@ -439,6 +444,10 @@ class StateView:
     @cached_property
     def hands_left(self) -> int:
         return hands_left(self._gs)
+
+    @cached_property
+    def chips(self) -> int:
+        return accumulated_chips(self._gs)
 
     @cached_property
     def hands_played(self) -> int:

@@ -114,18 +114,31 @@ def process_round_end_cards(
         # ---------------------------------------------------------------
         # calculate_perishable — card.lua:2278-2289
         # ---------------------------------------------------------------
-        if _is_perishable(joker):
-            tally = _get_perish_tally(joker)
-            if tally > 0:
-                if tally == 1:
-                    # Hits zero — permanently debuff
-                    _set_perish_tally(joker, 0)
-                    joker.set_debuff(game_state, True)
-                    result.perished.append(joker)
-                else:
-                    _set_perish_tally(joker, tally - 1)
+        if process_perishable(joker, game_state):
+            result.perished.append(joker)
 
     return result
+
+
+def process_perishable(joker: Card, game_state: dict[str, Any]) -> bool:
+    """Run one Joker's synchronous ``calculate_perishable`` step.
+
+    ``end_round`` calls this immediately after that same Joker's EOR dispatch
+    and rental emission, preserving the per-Joker interleave at
+    ``state_events.lua:99-110``. Returns whether the Joker perished now.
+    """
+    if not _is_perishable(joker):
+        return False
+    tally = _get_perish_tally(joker)
+    if tally <= 0:
+        return False
+    if tally == 1:
+        # L: card.lua:2278-2288 — zero is a permanent perishable debuff.
+        _set_perish_tally(joker, 0)
+        joker.set_debuff(game_state, True)
+        return True
+    _set_perish_tally(joker, tally - 1)
+    return False
 
 
 # ---------------------------------------------------------------------------

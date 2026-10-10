@@ -583,14 +583,10 @@ def _handle_play_hand(gs: dict[str, Any], indices: tuple[int, ...]) -> dict[str,
 
     # L: game.lua:3187-3204 — only after F2 does HAND_PLAYED choose the
     # win, redraw, or game-over branch.
-    if gs["chips"] >= blind.chips:
-        _round_won(gs)
-    elif cr["hands_left"] <= 0:
-        if not result.saved:
-            gs["phase"] = GamePhase.GAME_OVER
-            gs["won"] = False
-        else:
-            _round_won(gs)
+    if gs["chips"] >= blind.chips or cr["hands_left"] <= 0:
+        # L: game.lua:3187-3204; state_events.lua:87-287 — every terminal
+        # play enters the same accumulated-chip end_round controller.
+        end_round(gs)
     else:
         # L: game.lua:3187-3244 — the DRAW_TO_HAND controller owns every
         # post-play redraw, including Serpent and drawn_to_hand effects.
@@ -759,53 +755,44 @@ def discard_cards_from_highlighted(
 
 
 def _handle_cash_out(gs: dict[str, Any]) -> dict[str, Any]:
-    """Accept round earnings and proceed to the shop.
-
-    1. Shuffle deck (button_callbacks.lua:2918)
-    2. Apply round earnings to dollars
-    3. Track previous_round.dollars
-    4. Populate shop (jokers, voucher, boosters)
-    5. Phase → SHOP
-    """
+    """Synchronous F8 port of ``G.FUNCS.cash_out``."""
     _require_phase(gs, GamePhase.ROUND_EVAL)
 
-    # End-of-round targeting-card re-roll (state_events.lua:273-276):
-    # idol / mail / ancient / castle streams advance once per round END
-    # (they are NOT re-rolled at round start; see start_round).
     rng = gs.get("rng")
-    if rng:
-        from jackdaw.engine.round_lifecycle import reset_round_targets
+    rr = gs["round_resets"]
+    cr = gs["current_round"]
 
-        ante = gs.get("round_resets", {}).get("ante", 1)
-        reset_round_targets(rng, ante, gs)
-
-    # Shuffle deck at cash-out (button_callbacks.lua:2918)
-    # G.deck:shuffle('cashout'..G.GAME.round_resets.ante)
+    # L: button_callbacks.lua:2918-2919 — preserve the verified cashout deck
+    # order by retaining the same stream and in-place shuffle implementation.
     if rng:
         deck: list = gs.get("deck", [])
-        ante = gs.get("round_resets", {}).get("ante", 1)
+        ante = rr.get("ante", 1)
         cashout_seed = rng.seed("cashout" + str(ante))
         rng.shuffle(deck, cashout_seed)
 
-    earnings = gs.get("round_earnings")
-    if earnings:
-        gs["dollars"] = gs.get("dollars", 0) + earnings.total
+    # L: button_callbacks.lua:2921-2937 — these values are visible in SHOP,
+    # so reset them before changing phase or populating shop observations.
+    cr["jokers_purchased"] = 0
+    cr["discards_left"] = max(0, rr["discards"] + gs["round_bonus"]["discards"])
+    cr["hands_left"] = max(1, rr["hands"] + gs["round_bonus"]["next_hands"])
+    gs["phase"] = GamePhase.SHOP
+    gs["shop_free"] = False
+    gs["shop_d6ed"] = False
 
-    from jackdaw.engine.tags import fire_tag_context
-
-    # Investment Tag (eval context): pays out at cash-out, but ONLY after a
-    # Boss blind — the handler returns None otherwise, leaving the tag
-    # un-consumed for the next boss.
-    last_blind_is_boss = bool(getattr(gs.get("blind"), "boss", False))
-    for _entry, tag_res in fire_tag_context(gs, "eval", last_blind_is_boss=last_blind_is_boss):
-        _apply_tag_result(gs, tag_res)
-
+    # L: button_callbacks.lua:2938-2944 — commit the bottom-row total through
+    # the one ledger path, then snapshot the resulting committed balance.
+    cashout_queue = EffectQueue(gs)
+    cashout_queue.add(EaseDollars(amount=cr.get("dollars", 0)))
+    cashout_queue.apply()
     gs["previous_round"] = {"dollars": gs.get("dollars", 0)}
 
-    # D6/Coupon are limited to one trigger per shop. Lua clears these just
-    # before the new shop's tag contexts fire (button_callbacks.lua:2932).
-    gs["shop_d6ed"] = False
-    gs["shop_free"] = False
+    # L: button_callbacks.lua:2948-2954 — chips clear before post-Boss tags
+    # and blind choices are generated.
+    gs["chips"] = 0
+    if rr["blind_states"].get("Boss") == "Defeated":
+        _cashout_reset_boss_choices(gs)
+
+    from jackdaw.engine.tags import fire_tag_context
 
     # D6 Tag (shop_start context): rerolls start at $0 this shop. The temp
     # base is cleared by the NEXT round's start_round, so it covers exactly
@@ -821,9 +808,39 @@ def _handle_cash_out(gs: dict[str, Any]) -> dict[str, Any]:
 
     # Populate shop
     _populate_shop(gs)
-
-    gs["phase"] = GamePhase.SHOP
     return gs
+
+
+def _cashout_reset_boss_choices(gs: dict[str, Any]) -> None:
+    """Generate post-Boss tags and the next boss at Lua's F8 point."""
+    from jackdaw.engine.blind import get_new_boss
+    from jackdaw.engine.pools import pick_card_from_pool
+
+    rr = gs["round_resets"]
+    rng = gs.get("rng")
+    rr["blind_ante"] = rr["ante"]
+    if rng is not None:
+        used_vouchers = {key for key, owned in gs.get("used_vouchers", {}).items() if owned}
+        # L: button_callbacks.lua:2949-2952 — Small then Big tag.
+        rr["blind_tags"] = {
+            "Small": pick_card_from_pool(
+                "Tag", rng, rr["ante"], used_vouchers=used_vouchers
+            ),
+            "Big": pick_card_from_pool(
+                "Tag", rng, rr["ante"], used_vouchers=used_vouchers
+            ),
+        }
+        # L: common_events.lua:2326-2335 — reset_blinds chooses the boss last.
+        rr["blind_choices"]["Boss"] = get_new_boss(
+            rr["ante"],
+            gs.setdefault("bosses_used", {}),
+            rng,
+            win_ante=gs.get("win_ante", 8),
+            banned_keys=gs.get("banned_keys"),
+        )
+    rr["blind_states"] = {"Small": "Upcoming", "Big": "Upcoming", "Boss": "Upcoming"}
+    rr["boss_rerolled"] = False
+    gs["blind_on_deck"] = "Small"
 
 
 def _handle_buy_card(gs: dict[str, Any], idx: int) -> dict[str, Any]:
@@ -1322,8 +1339,7 @@ def _draw_from_deck_to_hand(gs: dict[str, Any]) -> bool:
 
     # L: state_events.lua:355-360 — this is Lua's sole empty-draw loss guard.
     if hand_size <= 0 and not hand:
-        gs["phase"] = GamePhase.GAME_OVER
-        gs["won"] = False
+        end_round(gs)
         return False
 
     deck: list = gs.get("deck", [])
@@ -1377,215 +1393,258 @@ def _draw_from_deck_to_hand(gs: dict[str, Any]) -> bool:
     # hand, deck, and play are all empty. At this stable port point play has
     # already settled to discard, so an uncleared blind is a terminal loss.
     if not hand and not deck and not gs.get("played_cards_area"):
-        gs["phase"] = GamePhase.GAME_OVER
-        gs["won"] = False
+        # L: game.lua:3056-3065 — exhausted areas use the ordinary end_round
+        # path, including losing-round Joker maintenance and Mr. Bones.
+        end_round(gs)
         return False
     return True
 
 
-def _round_won(gs: dict[str, Any]) -> None:
-    """Handle winning a round — transition to ROUND_EVAL.
-
-    Full sequence matching ``state_events.lua:87-120``:
-
-    1. Fire joker ``end_of_round`` context (economy + scaling)
-    2. Process perishable/rental (round_lifecycle)
-    3. Gold Seal: +$3 per held card with Gold Seal
-    4. Return all cards to deck (hand + played + discard)
-    5. Un-debuff all playing cards (blind debuffs don't persist)
-    6. Track unused discards (for Garbage Tag)
-    7. Mark blind as Defeated
-    8. Advance blind progression (Small→Big, Big→Boss)
-    9. Boss beaten: check win condition, advance ante
-    10. Calculate round earnings
-    11. Phase → ROUND_EVAL
-    """
-    from jackdaw.engine.economy import calculate_round_earnings
-    from jackdaw.engine.round_lifecycle import process_round_end_cards
+def end_round(gs: dict[str, Any]) -> None:
+    """Synchronous F6 port of Lua ``end_round`` for wins, saves, and losses."""
+    from jackdaw.engine.jokers import calculate_joker, context_for
+    from jackdaw.engine.round_lifecycle import is_rental, process_perishable
 
     cr = gs["current_round"]
     blind = gs["blind"]
+    blind_type = blind.get_type()
+    was_boss = blind_type == "Boss"
+    blind_target = blind.chips
+    blind_reward = blind.dollars
     jokers = gs.get("jokers", [])
-    rng = gs.get("rng")
-
-    # ------------------------------------------------------------------
-    # 1. Fire joker end_of_round context
-    # ------------------------------------------------------------------
-    from jackdaw.engine.jokers import fire_jokers, round_dollar_bonus
-    from jackdaw.engine.read import StateView
-
-    joker_dollars = round_dollar_bonus(jokers, StateView(gs, jokers=jokers))
     queue = EffectQueue(gs)
-    fire_jokers(gs, queue, end_of_round=True)
-    queue.apply()
-    # joker_dollars (Golden Joker, Rocket, Cloud 9, Satellite,
-    # Delayed Gratification) is deliberately NOT applied here: it flows once
-    # through calculate_round_earnings(joker_dollars=...) into
-    # earnings.total, applied at CashOut — vanilla pays these as cash-out
-    # rows AFTER interest is computed on the pre-payout balance
-    # (state_events.lua:1175 vs :1191). Applying it here as well
-    # double-counted the payout and leaked it into interest (inherited
-    # upstream bug; pinned in tests/engine/test_cashout_ordering.py).
-    # ------------------------------------------------------------------
-    # 2. Process perishable/rental
-    # ------------------------------------------------------------------
-    process_round_end_cards(jokers, gs)
 
-    # ------------------------------------------------------------------
-    # 3. Gold Card enhancement: +h_dollars ($3) per held gold card
-    #    (card.lua:1093). Keyed on ability["h_dollars"], NOT the Gold
-    #    Seal — the seal pays on play via get_p_dollars, never when held.
-    #    Lands before calculate_round_earnings, so it counts toward
-    #    interest (in-blind money class).
-    # ------------------------------------------------------------------
-    hand: list = gs.get("hand", [])
-    held_gold_dollars = sum(
-        c.ability.get("h_dollars", 0)
-        for c in hand
-        if isinstance(getattr(c, "ability", None), dict) and not getattr(c, "debuff", False)
-    )
-    seal_queue = EffectQueue(gs)
-    if held_gold_dollars:
-        seal_queue.add(EaseDollars(amount=held_gold_dollars))
+    # L: state_events.lua:92-110 — game_over reads committed accumulated
+    # chips, then each Joker's EOR, saved flag, rent, and perish step interleave.
+    game_over = gs.get("chips", 0) < blind_target
+    rental_cost = 0
+    for joker in list(jokers):
+        result = calculate_joker(
+            joker,
+            context_for(gs, queue=queue, end_of_round=True, game_over=game_over),
+        )
+        if result is not None and result.saved:
+            game_over = False
+        if is_rental(joker):
+            rental_cost += gs.get("rental_rate", 3)
+            queue.add(
+                EaseDollars(
+                    amount=-gs.get("rental_rate", 3),
+                    source=joker,
+                )
+            )
+        process_perishable(joker, gs)
 
-    # ------------------------------------------------------------------
-    # 3b. Blue Seal: create Planet for the last played hand type
-    # ------------------------------------------------------------------
+    # L: state_events.lua:111-123 — even an ordinary loss flushes the EOR
+    # maintenance above before entering GAME_OVER.
+    if was_boss and gs["round_resets"]["ante"] == gs.get("win_ante", 8):
+        gs["won"] = True
+    if game_over:
+        queue.apply()
+        gs["phase"] = GamePhase.GAME_OVER
+        gs["won"] = bool(gs.get("won", False))
+        gs["facing_blind"] = False
+        return
+
+    # L: state_events.lua:124-170 — saved rounds share the won-round branch.
+    gs["unused_discards"] = gs.get("unused_discards", 0) + cr.get("discards_left", 0)
     hand_levels = gs.get("hand_levels")
-    for c in hand:
-        if getattr(c, "seal", None) == "Blue" and not getattr(c, "debuff", False):
-            if gs.get("last_hand_played"):
-                last_played = gs["last_hand_played"]
-                # Find the planet key for this hand type
-                from jackdaw.engine.consumables import _PLANET_HAND
+    if was_boss and hand_levels is not None:
+        from jackdaw.engine.data.hands import HAND_BASE, HandType
 
-                planet_key = None
-                for pk, ht in _PLANET_HAND.items():
-                    if ht == last_played:
-                        planet_key = pk
-                        break
-                if planet_key:
-                    seal_queue.add(
-                        CreateCard(
-                            set="Planet",
-                            forced_key=planet_key,
-                            append="blusl",
-                        )
-                    )
-    seal_queue.apply()
+        hand_name = HandType.HIGH_CARD
+        played_count = -1
+        stale_order = 100
+        for candidate, base in HAND_BASE.items():
+            candidate_played = hand_levels.get_state(candidate).played
+            if candidate_played > played_count or (
+                candidate_played == played_count and stale_order > base.order
+            ):
+                hand_name = candidate
+                played_count = candidate_played
+                # L: state_events.lua:129-137 — NEW-P5-1-03: Lua never updates
+                # `_order`. Preserve that apparent bug instead of fixing ties.
+        cr["most_played_poker_hand"] = hand_name.value
 
-    # ------------------------------------------------------------------
-    # 4. Return all cards to deck
-    #
-    # Lua sequence (state_events.lua:237-250):
-    #   a) draw_from_hand_to_discard — hand cards removed first-first,
-    #      appended at end of discard
-    #   b) draw_from_discard_to_deck — discard cards popped LAST-first
-    #      (remove_card on discard type takes #cards), then INSERTED AT
-    #      FRONT of deck (emplace on deck type does table.insert(1))
-    #
-    # Net effect: [old_discard, hand] is prepended to deck front in
-    # original order (pop-last + insert-at-front cancel out).
-    # ------------------------------------------------------------------
+    # L: state_events.lua:171-233 — each held card recomputes its own EOR
+    # effect and individual Joker effects for the base pass and every repeat.
+    _held_cards_end_of_round(gs, queue)
+
+    # L: state_events.lua:237-250 — hand -> discard, then discard -> deck.
+    hand: list = gs.get("hand", [])
     deck: list = gs.setdefault("deck", [])
-    played: list = gs.get("played_cards_area", [])
     discarded: list = gs.get("discard_pile", [])
-
-    # Step a: hand → discard end (forward order)
     discarded.extend(hand)
-    # Any leftover played cards (shouldn't normally exist post-scoring)
-    discarded.extend(played)
-    # Step b: discard → deck FRONT (pop-last + insert-at-front = original order at front)
+    discarded.extend(gs.get("played_cards_area", []))
     deck[:0] = discarded
-
     gs["hand"] = []
     gs["played_cards_area"] = []
     gs["discard_pile"] = []
 
-    # ------------------------------------------------------------------
-    # 5. Un-debuff all playing cards (blind debuffs don't persist)
-    # ------------------------------------------------------------------
-    for card in deck:
-        # Only clear blind-applied debuffs; perishable debuffs are permanent
-        if getattr(card, "debuff", False):
-            if not (getattr(card, "perishable", False) and getattr(card, "perish_tally", 1) <= 0):
-                card.set_debuff(gs, False)
-
-    # ------------------------------------------------------------------
-    # 6. Track unused discards / hands played (for Garbage/Handy Tags)
-    #    These are run-level cumulative totals matching Lua:
-    #    - G.GAME.unused_discards += current_round.discards_left  (state_events.lua:124)
-    #    - G.GAME.hands_played += 1 per hand  (state_events.lua:523, tracked at line 522)
-    # ------------------------------------------------------------------
-    gs["unused_discards"] = gs.get("unused_discards", 0) + cr.get("discards_left", 0)
-
-    # ------------------------------------------------------------------
-    # 7. Mark blind as Defeated
-    # ------------------------------------------------------------------
     rr = gs["round_resets"]
-    blind_on_deck = gs.get("blind_on_deck", "Small")
-    rr["blind_states"][blind_on_deck] = "Defeated"
+    if was_boss:
+        _advance_ante(gs)
+
+    # L: state_events.lua:251-283 — the final F6 transition owns all reset
+    # state, including Pillar markers and target-card rolls (not cash-out).
+    rr["blind_states"][blind_type] = "Defeated"
+    if blind_type == "Small":
+        gs["blind_on_deck"] = "Big"
+    elif blind_type == "Big":
+        gs["blind_on_deck"] = "Boss"
+    for card in read.playing_cards(gs):
+        if was_boss:
+            card.ability.pop("played_this_ante", None)
+        card.ability.pop("discarded", None)
+        card.ability.pop("forced_selection", None)
+
+    temp_hs = cr.get("temp_handsize_applied", 0)
+    if temp_hs:
+        gs["hand_size"] = gs.get("hand_size", 8) - temp_hs
+        cr["temp_handsize_applied"] = 0
+
+    rng = gs.get("rng")
+    if rng is not None:
+        from jackdaw.engine.round_lifecycle import reset_round_targets
+
+        reset_round_targets(rng, rr["ante"], gs)
+
     gs["round"] = gs.get("round", 0) + 1
+    gs["phase"] = GamePhase.ROUND_EVAL
+    gs["facing_blind"] = False
 
-    # Back:trigger_effect({context='eval'}) runs here, after Blind:defeat and
-    # before round earnings (state_events.lua:1163). Anaglyph awards one
-    # Double Tag only for a defeated boss.
+    # F6: commit Joker effects, rent, held repeats, creations, and removals
+    # before round evaluation starts (state_events.lua:87-287).
+    queue.apply()
+    evaluate_round(
+        gs,
+        blind_target=blind_target,
+        blind_reward=blind_reward,
+        was_boss=was_boss,
+        rental_cost=rental_cost,
+    )
+
+
+def _held_cards_end_of_round(gs: dict[str, Any], queue: EffectQueue) -> None:
+    """Emit held-card EOR effects and first-pass repetitions into *queue*."""
+    from jackdaw.engine.consumables import _PLANET_HAND
+    from jackdaw.engine.jokers import calculate_joker, context_for
+
+    hand = list(gs.get("hand", []))
+    jokers = list(gs.get("jokers", []))
+    planet_for_hand = {hand_type: key for key, hand_type in _PLANET_HAND.items()}
+
+    for held in hand:
+        reps = 1
+        repeat_index = 0
+        while repeat_index < reps:
+            has_card_effect = False
+            if not held.debuff:
+                h_dollars = held.ability.get("h_dollars", 0)
+                if h_dollars:
+                    queue.add(EaseDollars(amount=h_dollars, source=held))
+                    has_card_effect = True
+                planet_key = planet_for_hand.get(gs.get("last_hand_played"))
+                if held.seal == "Blue" and planet_key and queue.room("consumables") > 0:
+                    queue.add(
+                        CreateCard(
+                            set="Planet",
+                            forced_key=planet_key,
+                            append="blusl",
+                            source=held,
+                        )
+                    )
+                    has_card_effect = True
+
+            individual_effect = False
+            for joker in jokers:
+                result = calculate_joker(
+                    joker,
+                    context_for(
+                        gs,
+                        queue=queue,
+                        individual=True,
+                        end_of_round=True,
+                        cardarea="hand",
+                        other_card=held,
+                        held_cards=hand,
+                    ),
+                )
+                individual_effect = individual_effect or result is not None
+
+            # L: state_events.lua:189-209 — Red seal and Joker repetitions are
+            # collected only on the first pass and only when the card/Joker has
+            # an EOR effect to repeat.
+            if repeat_index == 0 and (has_card_effect or individual_effect):
+                seal_result = held.calculate_seal(repetition=True)
+                if seal_result:
+                    reps += seal_result.get("repetitions", 0)
+                for joker in jokers:
+                    result = calculate_joker(
+                        joker,
+                        context_for(
+                            gs,
+                            queue=queue,
+                            repetition=True,
+                            end_of_round=True,
+                            cardarea="hand",
+                            other_card=held,
+                            held_cards=hand,
+                        ),
+                    )
+                    if result is not None:
+                        reps += result.repetitions
+            repeat_index += 1
+
+
+def evaluate_round(
+    gs: dict[str, Any],
+    *,
+    blind_target: int | None = None,
+    blind_reward: int | None = None,
+    was_boss: bool | None = None,
+    rental_cost: int = 0,
+) -> None:
+    """Synchronous F7 port of ``G.FUNCS.evaluate_round``."""
     from jackdaw.engine.back import Back
+    from jackdaw.engine.economy import calculate_round_earnings
+    from jackdaw.engine.jokers import round_dollar_bonus
+    from jackdaw.engine.read import StateView
+    from jackdaw.engine.tags import fire_tag_context
 
+    blind = gs["blind"]
+    target = blind.chips if blind_target is None else blind_target
+    reward = blind.dollars if blind_reward is None else blind_reward
+    boss_defeated = bool(blind.boss) if was_boss is None else was_boss
+
+    # L: state_events.lua:1139-1155 — the blind row is based on committed
+    # chips, so a Mr. Bones save below target records $0 before defeat cleanup.
+    earned_blind_reward = reward if gs.get("chips", 0) >= target else 0
+    blind.defeat(gs)
+
+    # L: state_events.lua:1157-1163 — Back eval follows the queued defeat
+    # point. Preserve the defeated-boss fact after the blind setter clears it.
     back_result = Back(gs.get("selected_back_key", "b_red")).trigger_effect(
-        "eval", boss_defeated=bool(getattr(blind, "boss", False))
+        "eval", boss_defeated=boss_defeated
     )
     if back_result and back_result.get("create_tag"):
         back_queue = EffectQueue(gs)
         back_queue.add(AddTag(key=back_result["create_tag"]))
         back_queue.apply()
 
-    # On boss defeat Lua snapshots the run-wide most-played hand. Ties go
-    # to the stronger hand (the lower display-order value).
-    if getattr(blind, "boss", False) and hand_levels is not None:
-        from jackdaw.engine.data.hands import HAND_BASE, HandType
-
-        hand_name = HandType.HIGH_CARD
-        played_count = -1
-        order = 100
-        for candidate, base in HAND_BASE.items():
-            candidate_played = hand_levels.get_state(candidate).played
-            if candidate_played > played_count or (
-                candidate_played == played_count and order > base.order
-            ):
-                hand_name = candidate
-                played_count = candidate_played
-                order = base.order
-        cr["most_played_poker_hand"] = hand_name.value
-
-    # ------------------------------------------------------------------
-    # 8-9. Advance blind progression
-    # ------------------------------------------------------------------
-    if blind_on_deck == "Small":
-        gs["blind_on_deck"] = "Big"
-    elif blind_on_deck == "Big":
-        gs["blind_on_deck"] = "Boss"
-    elif blind_on_deck == "Boss":
-        # Boss beaten — check win, advance ante
-        if rr["ante"] >= gs.get("win_ante", 8):
-            gs["won"] = True
-        _advance_ante(gs)
-        gs["blind_on_deck"] = "Small"
-
-    # The Manacle: restore hand size after boss defeat
-    if blind_on_deck == "Boss" and getattr(blind, "name", "") == "The Manacle":
-        if not getattr(blind, "disabled", False):
-            gs["hand_size"] = gs.get("hand_size", 7) + 1
-
-    # Juggle Tag: revert the one-round hand-size bonus applied by start_round
-    temp_hs = cr.get("temp_handsize_applied", 0)
-    if temp_hs:
-        gs["hand_size"] = gs.get("hand_size", 8) - temp_hs
-        cr["temp_handsize_applied"] = 0
-
-    # ------------------------------------------------------------------
-    # 10. Calculate round earnings (for cash-out screen)
-    # ------------------------------------------------------------------
+    # L: state_events.lua:1165-1203 — dollar bonuses are calculated NOW,
+    # after F6 mutation/perishing; eval tags are rows, not immediate money.
+    jokers = gs.get("jokers", [])
+    joker_dollars = round_dollar_bonus(jokers, StateView(gs, jokers=jokers))
+    tag_dollars = sum(
+        result.dollars
+        for _entry, result in fire_tag_context(
+            gs,
+            "eval",
+            last_blind_is_boss=boss_defeated,
+        )
+    )
+    cr = gs["current_round"]
     earnings = calculate_round_earnings(
         blind=blind,
         hands_left=cr.get("hands_left", 0),
@@ -1593,35 +1652,34 @@ def _round_won(gs: dict[str, Any]) -> None:
         money=gs.get("dollars", 0),
         jokers=jokers,
         game_state=gs,
-        rng=rng,
+        rng=gs.get("rng"),
         joker_dollars=joker_dollars,
+        blind_reward=earned_blind_reward,
+        tag_dollars=tag_dollars,
+        rental_cost=rental_cost,
     )
     gs["round_earnings"] = earnings
-
-    # ------------------------------------------------------------------
-    # 11. Phase → ROUND_EVAL
-    # ------------------------------------------------------------------
-    gs["phase"] = GamePhase.ROUND_EVAL
-    # Lua clears this on entry to round evaluation (game.lua:3312).
-    gs["facing_blind"] = False
+    # L: state_events.lua:1205-1208; common_events.lua:1064-1088 — bottom row.
+    cr["dollars"] = earnings.total
 
 
 def _advance_ante(gs: dict[str, Any]) -> None:
-    """Advance to the next ante after boss is defeated."""
+    """Run the boss-only ante/voucher part of F6."""
     rr = gs["round_resets"]
     rr["ante"] += 1
-    rr["blind_ante"] = rr["ante"]
-    rr["blind_states"] = {"Small": "Select", "Big": "Upcoming", "Boss": "Upcoming"}
-    rr["boss_rerolled"] = False
-
-    # Generate new boss, tags, voucher for next ante
-    from jackdaw.engine.tags import assign_ante_blinds
 
     rng = gs.get("rng")
     if rng:
-        ante_result = assign_ante_blinds(rr["ante"], rng, gs)
-        rr["blind_choices"]["Boss"] = ante_result["blind_choices"]["Boss"]
-        gs["current_round"]["voucher"] = ante_result["voucher"]
+        from jackdaw.engine.vouchers import get_next_voucher_key
+
+        # L: state_events.lua:238-264 — ante changes and next voucher happen
+        # at F6. Tags, boss choice, and blind-state reset wait for cash-out.
+        gs["current_round"]["voucher"] = get_next_voucher_key(
+            rng,
+            gs.get("used_vouchers", {}),
+            in_shop=None,
+            ante=rr["ante"],
+        )
 
 
 # ---------------------------------------------------------------------------

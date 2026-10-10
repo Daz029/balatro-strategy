@@ -271,10 +271,6 @@ def test_c09_face_down_boss_draw(blind_key: str) -> None:
     assert_matches(scenario, ("areas.hand",))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="C10: held-card Red seal and Mime repetitions run at end of round",
-)
 def test_c10_held_gold_card_retriggers() -> None:
     scenario = Scenario(
         chips=1_000,
@@ -285,10 +281,6 @@ def test_c10_held_gold_card_retriggers() -> None:
     assert_matches(scenario, ("dollars",))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="C11: Mr. Bones requires 25 percent of accumulated blind chips",
-)
 def test_c11_mr_bones_below_threshold_does_not_save() -> None:
     scenario = Scenario(
         chips=7,
@@ -310,7 +302,6 @@ def test_d12_blocked_hand_decays_ice_cream() -> None:
     assert_matches(scenario, ("areas.jokers",))
 
 
-@pytest.mark.xfail(strict=True, reason="D18: Rocket scales before its cash-out bonus is calculated")
 def test_d18_rocket_boss_payout_uses_new_value() -> None:
     scenario = Scenario(
         chips=1_000,
@@ -321,10 +312,6 @@ def test_d18_rocket_boss_payout_uses_new_value() -> None:
     assert_matches(scenario, ("current_round.dollars",))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="D22: rental is charged during end-of-round maintenance, including losses",
-)
 def test_d22_losing_round_charges_rental_immediately() -> None:
     scenario = Scenario(
         dollars=10,
@@ -362,7 +349,6 @@ def test_d29_ox_does_not_wipe_gold_seal_payout() -> None:
     assert_traces_match(lua_trace, run_engine(scenario), ("dollars",))
 
 
-@pytest.mark.xfail(strict=True, reason="D30: boss defeat clears played_this_ante on playing cards")
 def test_d30_pillar_marker_resets_at_new_ante() -> None:
     scenario = Scenario(
         chips=1_000,
@@ -406,10 +392,6 @@ def test_d32_amber_acorn_shuffle_count() -> None:
     assert_traces_match(lua_trace, run_engine(scenario), ("pseudorandom.aajk",))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="D32: boss defeat flips Jokers face-up and clears blind debuffs",
-)
 def test_d32_boss_defeat_restores_cards_and_jokers() -> None:
     scenario = Scenario(
         chips=1_000,

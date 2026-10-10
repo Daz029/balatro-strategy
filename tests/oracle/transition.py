@@ -507,9 +507,9 @@ def run_engine(scenario: Scenario, *, probe: EngineProbe | None = None) -> Oracl
     elif action.type == "end_round":
         # Round completion has no public player Action: it is an automatic
         # consequence of play.  Use the engine's canonical transition body.
-        from jackdaw.engine.game import _round_won  # noqa: PLC0415
+        from jackdaw.engine.game import end_round  # noqa: PLC0415
 
-        _round_won(gs)
+        end_round(gs)
     else:  # pragma: no cover - ActionName makes this unreachable
         raise ValueError(action.type)
     if probe is not None:
