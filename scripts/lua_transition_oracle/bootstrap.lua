@@ -6,8 +6,6 @@
 -- real classes from the source tree.
 
 local SOURCE = assert(BALATRO_SOURCE, "BALATRO_SOURCE was not supplied")
-loadstring = loadstring or load
-unpack = unpack or table.unpack
 if oracle_randomseed and oracle_random then
     math.randomseed = oracle_randomseed
     math.random = oracle_random
@@ -155,14 +153,17 @@ function check_for_unlock() end
 function check_and_set_high_score() end
 function inc_career_stat() end
 function inc_steam_stat() end
-function discover_card(card) if card then card.discovered = true end end
-function unlock_card(card) if card then card.unlocked = true end end
+function discover_card() end
+function unlock_card() end
 function set_joker_usage() end
 function save_run() end
 function ease_background_colour_blind() end
 function localize(value)
     if value == '$' then return '$' end
     if type(value) == 'string' then return value end
+    if type(value) == 'table' and value.type == 'raw_descriptions' then
+        return {value.key or 'loc'}
+    end
     return (type(value) == 'table' and (value.key or value.type)) or 'loc'
 end
 function number_format(value) return tostring(value or 0) end
@@ -201,6 +202,7 @@ function CardArea:init(config)
     self.config.card_limit = self.config.card_limit or 52
     self.config.highlighted_limit = self.config.highlighted_limit or 5
     self.config.type = self.config.type or 'deck'
+    self.config.sort = self.config.sort or 'desc'
     self.T = {x = 0, y = 0, w = 6, h = 1}
 end
 function CardArea:set_ranks()
@@ -275,8 +277,21 @@ function CardArea:unhighlight_all()
     self.highlighted = {}
 end
 function CardArea:shuffle(seed) pseudoshuffle(self.cards, pseudoseed(seed)); self:set_ranks() end
-function CardArea:sort()
-    table.sort(self.cards, function(a, b) return a:get_nominal('suit') > b:get_nominal('suit') end)
+function CardArea:sort(method)
+    self.config.sort = method or self.config.sort
+    if self.config.sort == 'desc' then
+        table.sort(self.cards, function(a, b) return a:get_nominal() > b:get_nominal() end)
+    elseif self.config.sort == 'asc' then
+        table.sort(self.cards, function(a, b) return a:get_nominal() < b:get_nominal() end)
+    elseif self.config.sort == 'suit desc' then
+        table.sort(self.cards, function(a, b) return a:get_nominal('suit') > b:get_nominal('suit') end)
+    elseif self.config.sort == 'suit asc' then
+        table.sort(self.cards, function(a, b) return a:get_nominal('suit') < b:get_nominal('suit') end)
+    elseif self.config.sort == 'order' then
+        table.sort(self.cards, function(a, b)
+            return (a.config.card.order or a.config.center.order) < (b.config.card.order or b.config.center.order)
+        end)
+    end
     self:set_ranks()
 end
 
@@ -290,6 +305,17 @@ end
 
 local observations = nil
 local tracing = false
+local round_eval_rows = nil
+
+local source_add_round_eval_row = add_round_eval_row
+function add_round_eval_row(config)
+    config = config or {}
+    round_eval_rows[#round_eval_rows + 1] = {
+        type = config.name,
+        amount = config.dollars or 1,
+    }
+    return source_add_round_eval_row(config)
+end
 
 local function snapshot_card(card)
     local ability = {}
@@ -330,6 +356,7 @@ local function snapshot(label, kind)
             prepped = game.blind and not not game.blind.prepped,
         },
         areas = {}, pseudorandom = {}, events_pending = 0,
+        round_eval_rows = copy_table(round_eval_rows),
     }
     for key, hand in pairs(game.hands) do
         result.hands[key] = {played = hand.played, played_this_round = hand.played_this_round, level = hand.level}
@@ -398,7 +425,10 @@ end
 
 local function reset(scenario)
     G.TIMERS.REAL, G.TIMERS.TOTAL = 0, 0
+    G.STATE, G.STATE_COMPLETE = G.STATES.SELECTING_HAND, true
     G.E_MANAGER = EventManager()
+    G.round_eval = null_ui()
+    round_eval_rows = {}
     G.GAME = Game.init_game_object(G)
     G.GAME.selected_back = {pos = G.P_CENTERS.b_red.pos}
     G.GAME.viewed_back = G.GAME.selected_back

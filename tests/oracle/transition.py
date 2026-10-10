@@ -6,7 +6,8 @@ import copy
 import dataclasses
 import json
 import os
-from collections.abc import Iterable, Mapping
+import re
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -156,9 +157,9 @@ def lua_oracle_unavailable_reason() -> str | None:
     if not source.joinpath("functions/state_events.lua").is_file():
         return f"Balatro 1.0.1o source not found at {source}"
     try:
-        import lupa  # noqa: F401, PLC0415
+        import lupa.lua51  # noqa: F401, PLC0415
     except ImportError:
-        return "lupa is not installed"
+        return "lupa.lua51 is not installed"
     return None
 
 
@@ -181,7 +182,7 @@ def _to_lua(runtime: Any, value: Any) -> Any:
 
 @lru_cache(maxsize=4)
 def _lua_runtime(source: str) -> Any:
-    from lupa import LuaRuntime  # type: ignore[import-untyped]  # noqa: PLC0415
+    from lupa.lua51 import LuaRuntime  # type: ignore[import-untyped]  # noqa: PLC0415
 
     from jackdaw.engine.rng import (  # noqa: PLC0415
         _luajit_random,
@@ -380,8 +381,7 @@ def build_engine_state(scenario: Scenario) -> dict[str, Any]:
 def _json_safe(value: Any) -> Any:
     if dataclasses.is_dataclass(value):
         return {
-            item.name: _json_safe(getattr(value, item.name))
-            for item in dataclasses.fields(value)
+            item.name: _json_safe(getattr(value, item.name)) for item in dataclasses.fields(value)
         }
     if isinstance(value, Mapping):
         return {str(key): _json_safe(item) for key, item in value.items()}
@@ -437,9 +437,7 @@ def snapshot_engine_state(gs: dict[str, Any]) -> dict[str, Any]:
     rng = gs.get("rng")
     rng_state = rng.get_state() if rng else {}
     rng_state = {
-        key: value
-        for key, value in rng_state.items()
-        if key not in {"seed", "hashed_seed"}
+        key: value for key, value in rng_state.items() if key not in {"seed", "hashed_seed"}
     }
     cr = gs["current_round"]
     round_dollars = cr.get("dollars", 0)
@@ -483,10 +481,20 @@ def snapshot_engine_state(gs: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def run_engine(scenario: Scenario) -> OracleTrace:
-    """Apply the scenario action to Jackdaw and return its final observation."""
+EngineProbe = Callable[[str, dict[str, Any]], None]
+
+
+def run_engine(scenario: Scenario, *, probe: EngineProbe | None = None) -> OracleTrace:
+    """Apply one Jackdaw action and return its final observation.
+
+    ``probe`` is an intentionally small seam for Phase 5 to wire to internal
+    transition points.  It currently receives the public transition boundary
+    states only; no engine instrumentation is required by the oracle.
+    """
 
     gs = build_engine_state(scenario)
+    if probe is not None:
+        probe("before_action", gs)
     action = scenario.action
     if action.type == "play":
         step(gs, PlayHand(action.indices))
@@ -504,6 +512,8 @@ def run_engine(scenario: Scenario) -> OracleTrace:
         _round_won(gs)
     else:  # pragma: no cover - ActionName makes this unreachable
         raise ValueError(action.type)
+    if probe is not None:
+        probe("after_action", gs)
     state = snapshot_engine_state(gs)
     return OracleTrace(
         observations=[Observation(label="final", kind="drained", state=state)],
@@ -511,7 +521,23 @@ def run_engine(scenario: Scenario) -> OracleTrace:
     )
 
 
+_COSMETIC = {
+    # CardArea:align_cards flips these piles for rendering only
+    # (Balatro 1.0.1o cardarea.lua:410-428). No gameplay branch reads their
+    # facing while the cards remain in either pile.
+    "areas.deck[*].facing": "cardarea.lua:410-428",
+    "areas.discard[*].facing": "cardarea.lua:410-428",
+}
+
+
+def _cosmetic_path(path: str) -> bool:
+    normalized = re.sub(r"\[\d+\]", "[*]", path)
+    return normalized in _COSMETIC
+
+
 def _walk_diffs(lua: Any, engine: Any, path: str, out: list[Diff]) -> None:
+    if _cosmetic_path(path):
+        return
     if isinstance(lua, dict) and isinstance(engine, dict):
         for key in sorted(set(lua) | set(engine)):
             _walk_diffs(lua.get(key), engine.get(key), f"{path}.{key}" if path else key, out)
@@ -537,5 +563,10 @@ def compare(
     selected = tuple(fields) if fields is not None else tuple(sorted(set(lua) | set(engine)))
     diffs: list[Diff] = []
     for field_name in selected:
-        _walk_diffs(lua.get(field_name), engine.get(field_name), field_name, diffs)
+        lua_value: Any = lua
+        engine_value: Any = engine
+        for part in field_name.split("."):
+            lua_value = lua_value.get(part) if isinstance(lua_value, dict) else None
+            engine_value = engine_value.get(part) if isinstance(engine_value, dict) else None
+        _walk_diffs(lua_value, engine_value, field_name, diffs)
     return diffs
