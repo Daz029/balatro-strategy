@@ -34,11 +34,23 @@ Do the same for money:
   during the pass (The Ox's `ease_dollars(-dollars, true)`). Two reads:
   `committed()` = live `gs["dollars"]` with this pass's INSTANT changes;
   `with_buffer()` = `committed() + gs["dollar_buffer"] + pending_dollars`.
-  `EaseDollars` gains `instant: bool = False`; its `reserve` updates the
-  queue's view at EMISSION time (Lua's `dollar_buffer += x` at the call
-  site), its `apply` commits. Instant effects change the committed view at
-  emission. Follow the sweep's ledger spec for anything else it found
-  (e.g. other buffered quantities).
+  Follow the sweep's section 6 "Ledger specification" exactly — in
+  particular: an ordinary `ease` does NOT imply a buffer; only the producers
+  that call `G.GAME.dollar_buffer = ... + ret` in Lua (Gold seal / Lucky /
+  Golden Ticket / Business / Rough Gem / Reserved Parking — `get_p_dollars`
+  and friends; To Do List / Matador per their lines) reserve; Mail, Trading,
+  Faceless, Tooth, discard cost, rental and held Gold do not. `EaseDollars`
+  gains `instant: bool = False` and `buffered: bool = False` (or two effect
+  classes — your call, documented); a buffered effect updates the queue's
+  view at EMISSION, its `apply` commits; an instant one changes the
+  committed view at emission. Preserve the FIFO order rules in section 6
+  (clear-before-commit for `get_p_dollars`, commit-before-clear for To Do
+  List / Matador); coalescing is allowed only where you show no money
+  observer runs in between.
+- Flush points: implement F1 and F2 from the sweep's section 1 table for
+  the play path (the `EffectQueue.apply()` calls sit exactly there, with
+  F2's internal order: play cards to discard, hand counters, then the
+  events emitted inside scoring).
 - `read.money_committed` / `read.money_with_buffer` / `StateView.money` /
   `StateView.money_with_buffer` read THROUGH the pass's queue when there is
   one (the context carries `queue`). Every money consumer in scope reads
@@ -96,6 +108,15 @@ Port the step list from the sweep. At minimum:
   unless the sweep shows a deviation — the scoring oracle
   (`tests/engine/test_scoring_oracle.py`) must stay green.
 
+### Explicitly NOT in this ticket (await a user decision)
+
+- NEW-P5-1-05: Lua sorts the played cards by hand position before scoring
+  (`state_events.lua:459-483`); our engine keeps SELECTION order on
+  purpose (`best_play_order` / the solver choose scoring order through it).
+  Do not change it; leave a `# NEW-P5-1-05` comment at the site.
+- NEW-P5-1-06 (HAND_PLAYED phase): no new observable phase is needed in a
+  synchronous engine; do not add one.
+
 ## 3. `play_cards_from_highlighted` order
 
 Port the sweep's step list: `hands_left` decrement point, per-card stats
@@ -146,7 +167,9 @@ read).
 - Update `docs/engine_class_design_2026-10-06.md` section 5 / 8 only where
   the built code differs from the draft (pass-local money view instead of
   `MoneyLedger` in gs, etc.). Short.
-- Do not commit. Final message: files changed, each finding fixed with the
+- Do not commit. Write the report to
+  `docs/implementation-tickets/engine-p5-2-REPORT.md` (inside the repo) as
+  your last step, and repeat it as your final message: files changed, each finding fixed with the
   test that proves it (and that it failed on the parent), every changed
   pre-existing expectation with its Lua citation, perf numbers, and any NEW
   divergence found (do not fix out-of-scope ones; list them).
