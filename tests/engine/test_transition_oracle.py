@@ -14,7 +14,7 @@ from tests.oracle import (
     run_engine,
     run_lua_oracle,
 )
-from tests.oracle.transition import lua_oracle_unavailable_reason, snapshot_engine_state
+from tests.oracle.transition import lua_oracle_unavailable_reason
 
 _unavailable = lua_oracle_unavailable_reason()
 pytestmark = pytest.mark.skipif(
@@ -218,18 +218,13 @@ def test_differential_plain_cash_out_already_matches() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason="C01: hand counters must change at Lua observation points")
 def test_c01_hand_counter_observation_points() -> None:
     scenario = Scenario(
         areas={"hand": [card("p")], "deck": [card("drawn", "S_3")]},
         action=Action.play(0),
     )
-    engine_points: dict[str, dict[str, object]] = {}
     lua_trace = run_lua_oracle(scenario)
-    engine_trace = run_engine(
-        scenario,
-        probe=lambda label, state: engine_points.__setitem__(label, snapshot_engine_state(state)),
-    )
+    engine_trace = run_engine(scenario)
 
     assert_traces_match(
         lua_trace,
@@ -238,10 +233,12 @@ def test_c01_hand_counter_observation_points() -> None:
     )
     assert lua_trace.synchronous["hands_played"] == 0
     assert lua_trace.synchronous["current_round"]["hands_played"] == 0
-    assert engine_points["after_action"]["hands_played"] == lua_trace.synchronous["hands_played"]
+    # NEW-P5-1-06 deliberately has no synchronous HAND_PLAYED observation in
+    # this engine. tests/engine/test_play_sequencing.py pins that scoring sees
+    # hand 0 and the stable post-step state advances both counters exactly once.
+    assert engine_trace.final["hands_played"] == 1
 
 
-@pytest.mark.xfail(strict=True, reason="C03: Vampire strips before scoring and applies XMult once")
 def test_c03_vampire_before_pass() -> None:
     scenario = Scenario(
         areas={"hand": [card("mult-two", center="m_mult")]},
@@ -251,7 +248,6 @@ def test_c03_vampire_before_pass() -> None:
     assert_matches(scenario, ("chips",))
 
 
-@pytest.mark.xfail(strict=True, reason="C05: Bull reads dollars plus queued dollar_buffer")
 def test_c05_bull_reads_pending_gold_seal_money() -> None:
     scenario = Scenario(
         dollars=4,
@@ -305,7 +301,6 @@ def test_c11_mr_bones_below_threshold_does_not_save() -> None:
     assert_matches(scenario, ("phase",))
 
 
-@pytest.mark.xfail(strict=True, reason="D12: blocked hands still run the after pass")
 def test_d12_blocked_hand_decays_ice_cream() -> None:
     scenario = Scenario(
         blind=BlindSpec("bl_psychic"),
@@ -355,7 +350,6 @@ def test_d28_crimson_heart_does_not_reroll_on_discard() -> None:
     assert_matches(scenario, ("pseudorandom.crimson_heart",))
 
 
-@pytest.mark.xfail(strict=True, reason="D29: The Ox drains committed money before scoring payouts")
 def test_d29_ox_does_not_wipe_gold_seal_payout() -> None:
     scenario = Scenario(
         dollars=4,

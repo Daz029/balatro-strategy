@@ -46,6 +46,9 @@ def _effect_case(
         return gs, effects.EaseDollars(amount=3), lambda: _assert_equal(gs["dollars"], before + 3)
     if effect_type is effects.SetDollars:
         return gs, effects.SetDollars(value=17), lambda: _assert_equal(gs["dollars"], 17)
+    if effect_type is effects.AddChips:
+        before = gs["chips"]
+        return gs, effects.AddChips(amount=7), lambda: _assert_equal(gs["chips"], before + 7)
     if effect_type is effects.CreateCard:
         before = len(gs["consumables"])
         effect = effects.CreateCard(set="Tarot", forced_key="c_fool")
@@ -218,7 +221,6 @@ _EFFECT_PHASE_FIELDS = frozenset(
         "first_hand_drawn",
         "game_over",
         "individual",
-        "individual_hand_end",
         "joker_main",
         "open_booster",
         "other_joker",
@@ -244,7 +246,6 @@ _EXPECTED_EFFECT_PRODUCER_CONTEXTS = {
     "j_certificate": {"first_hand_drawn"},
     "j_chicot": {"setting_blind"},
     "j_diet_cola": {"selling_self"},
-    "j_dna": {"before"},
     "j_gros_michel": {"end_of_round"},
     "j_hallucination": {"open_booster"},
     "j_ice_cream": {"after"},
@@ -522,7 +523,9 @@ def test_solver_scoring_never_mutates_live_state(monkeypatch: pytest.MonkeyPatch
 
     assert eight_result.effects
     assert six_result.effects
-    assert any(isinstance(effect, effects.CopyCard) for effect in eight_result.effects)
+    # DNA is synchronous in Lua's before pass (card.lua:3501-3511), so its
+    # hypothetical copy is consumed by the held-card loop rather than left as
+    # an F2 CopyCard effect. The live-state snapshot below is the isolation pin.
     assert sum(isinstance(effect, effects.CreateCard) for effect in eight_result.effects) >= 2
     assert any(isinstance(effect, effects.CreateCard) for effect in six_result.effects)
     assert _solver_snapshot(gs) == before

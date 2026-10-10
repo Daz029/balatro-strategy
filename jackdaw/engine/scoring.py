@@ -13,8 +13,15 @@ import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from jackdaw.engine import read
-from jackdaw.engine.effects import DestroyCard, Effect, EffectQueue
+from jackdaw.engine import lifecycle, read
+from jackdaw.engine.effects import (
+    AddChips,
+    DestroyCard,
+    DestroyPlayingCards,
+    EaseDollars,
+    Effect,
+    EffectQueue,
+)
 from jackdaw.engine.read import StateView
 
 if TYPE_CHECKING:
@@ -152,9 +159,6 @@ class ScoreResult:
     total: int
     """``floor(chips * mult)`` — the score added to G.GAME.chips."""
 
-    dollars_earned: int
-    """Dollars earned from scoring (Gold Seal, Lucky Card, etc.)."""
-
     debuffed: bool
     """True if the hand was blocked by a boss blind."""
 
@@ -163,6 +167,12 @@ class ScoreResult:
 
     effects: list[Effect] = field(default_factory=list)
     """State changes emitted while scoring; the caller decides whether to apply them."""
+
+    effect_queue: EffectQueue | None = field(default=None, repr=False)
+    """The pass-local queue whose money view produced ``effects``."""
+
+    legacy_dollars_earned: int = 0
+    """Jokerless scorer compatibility; full scoring derives money from effects."""
 
     cards_destroyed: list[Card] = field(default_factory=list)
     """Playing cards destroyed during Phase 11 (Glass shatter, etc.)."""
@@ -174,6 +184,16 @@ class ScoreResult:
     def jokers_removed(self) -> list[Card]:
         """Cards targeted by queued ``DestroyCard`` effects."""
         return [effect.card for effect in self.effects if isinstance(effect, DestroyCard)]
+
+    @property
+    def dollars_earned(self) -> int:
+        """Non-instant scoring payouts represented by this result's ledger effects."""
+        payouts = [
+            effect.amount
+            for effect in self.effects
+            if isinstance(effect, EaseDollars) and not effect.instant
+        ]
+        return sum(payouts) if payouts else self.legacy_dollars_earned
 
 
 # ---------------------------------------------------------------------------
@@ -212,7 +232,7 @@ def score_hand_base(
     dollars = 0
     breakdown: list[str] = []
 
-    # === Phase 1-2: Hand detection ===
+    # L: state_events.lua:571-612 — detect the hand and form its scoring set.
     eval_result = evaluate_hand(played_cards, jokers=None, flags=joker_flags)
     hand_type = eval_result.detected_hand
     scoring_cards = eval_result.scoring_cards
@@ -225,7 +245,6 @@ def score_hand_base(
             chips=0,
             mult=0,
             total=0,
-            dollars_earned=0,
             debuffed=False,
             breakdown=["No hand"],
         )
@@ -242,7 +261,6 @@ def score_hand_base(
             chips=0,
             mult=0,
             total=0,
-            dollars_earned=0,
             debuffed=True,
             breakdown=[f"Hand blocked by {blind.name}"],
         )
@@ -344,9 +362,9 @@ def score_hand_base(
         chips=hand_chips,
         mult=mult,
         total=total,
-        dollars_earned=dollars,
         debuffed=False,
         breakdown=breakdown,
+        legacy_dollars_earned=dollars,
     )
 
 
@@ -434,16 +452,15 @@ def score_hand(
 
     gs = game_state or {}
     queue = EffectQueue(gs)
-    dollars = 0
     breakdown: list[str] = []
 
     overrides = (
         None if probabilities_normal is None else {"probabilities_normal": probabilities_normal}
     )
-    snapshot = StateView(gs, jokers=jokers, overrides=overrides)
+    snapshot = StateView(gs, jokers=jokers, overrides=overrides, queue=queue)
     probabilities_normal = snapshot.probabilities_normal
 
-    # === Phase 1-2: Hand detection ===
+    # L: state_events.lua:571-612 — detect the hand and form its scoring set.
     # `jokers`, NOT None: evaluate_hand derives every hand-DETECTION flag
     # (four_fingers / shortcut / smeared / splash) from this list. Passing
     # None here -- a copy-paste carryover from score_hand_base, which is
@@ -464,22 +481,34 @@ def score_hand(
             chips=0,
             mult=0,
             total=0,
-            dollars_earned=0,
             debuffed=False,
             breakdown=["No hand"],
             effects=queue.effects,
+            effect_queue=queue,
         )
 
-    # Lua updates hand history before checking whether the blind blocks it.
+    # L: state_events.lua:574-578 — update every hand statistic once before
+    # the blind branch, including visibility and last_hand_played.
     hand_levels.record_play(hand_type)
+    hand_levels[hand_type].visible = True
+    # Solver probes pass cloned areas against the live gs. Only the actual
+    # play-area/hand objects authorize this synchronous Lua state write.
+    if played_cards is gs.get("played_cards_area") and held_cards is gs.get("hand"):
+        gs["last_hand_played"] = hand_type
 
     # === Phase 3: Boss blind debuff check ===
     # Lua passes G.play.cards (all played cards, not just scoring subset)
     # to debuff_hand (state_events.lua:614).  Matters for The Psychic
     # which checks #cards >= h_size_ge against the full played hand.
-    debuffed = blind.debuff_hand(played_cards, poker_hands, hand_type)
+    debuffed = blind.debuff_hand(
+        played_cards,
+        poker_hands,
+        hand_type,
+        gs=gs,
+        queue=queue,
+    )
     if debuffed:
-        # Phase 3a: Matador check on debuffed hands
+        # L: state_events.lua:997-1028 — blocked-hand Joker pass.
         for joker in jokers:
             if joker.debuff:
                 continue
@@ -496,21 +525,38 @@ def score_hand(
             )
             result = calculate_joker(joker, ctx)
             if result and result.dollars:
-                dollars += result.dollars
+                queue.add(EaseDollars(amount=result.dollars, buffered=True, source=joker))
 
+        # L: state_events.lua:1068-1075 — after runs outside both scoring
+        # branches, so blocked hands still decay Ice Cream/Seltzer.
+        for joker in jokers:
+            if joker.debuff:
+                continue
+            after_ctx = JokerContext(
+                after=True,
+                blind=blind,
+                jokers=jokers,
+                full_hand=played_cards,
+                scoring_hand=scoring_cards,
+                scoring_name=hand_type,
+                poker_hands=poker_hands,
+                game=snapshot,
+                queue=queue,
+            )
+            calculate_joker(joker, after_ctx)
         return ScoreResult(
             hand_type=hand_type,
             scoring_cards=scoring_cards,
             chips=0,
             mult=0,
             total=0,
-            dollars_earned=dollars,
             debuffed=True,
             breakdown=[f"Hand blocked by {blind.name}"],
             effects=queue.effects,
+            effect_queue=queue,
         )
 
-    # === Phase 3b: The Arm — demote played hand type by 1 (min L1) ===
+    # L: blind.lua:550-559 — The Arm mutates before base values are read.
     if (
         getattr(blind, "name", "") == "The Arm"
         and not getattr(blind, "disabled", False)
@@ -519,7 +565,8 @@ def score_hand(
         blind.triggered = True
         hand_levels.level_up(hand_type, amount=-1)
 
-    # === Phase 3c: Splash — all played cards score ===
+    # L: state_events.lua:580-612 — augment the scoring hand. The engine's
+    # intentional NEW-P5-1-05 divergence keeps selection order here.
     # REDUNDANT since Phase 1-2 started passing `jokers` to evaluate_hand
     # (which applies the same augmentation from the same flag), but kept:
     # both produce exactly `played_cards` in played order, so this is an
@@ -535,7 +582,7 @@ def score_hand(
     if splash_active:
         scoring_cards = list(played_cards)
 
-    # === Phase 4: Base chips/mult from hand level ===
+    # L: state_events.lua:615-642 — base values, before pass, then reread.
     base_chips, base_mult = hand_levels.get(hand_type)
     hand_chips = float(base_chips)
     mult = float(base_mult)
@@ -570,21 +617,38 @@ def score_hand(
         result = calculate_joker(joker, ctx)
         if result:
             if result.dollars:
-                dollars += result.dollars
+                queue.add(EaseDollars(amount=result.dollars, buffered=True, source=joker))
+            if result.copy_held_card is not None:
+                # L: card.lua:3501-3511 — DNA emplaces synchronously in hand,
+                # before state_events.lua:782 begins the held-card loop.
+                live_hand = gs.get("hand")
+                if held_cards is live_hand:
+                    copied = lifecycle.copy_card(gs, result.copy_held_card)
+                    lifecycle.add_playing_cards(gs, [copied], "hand", notify=False)
+                else:
+                    copied = lifecycle.copy_card({}, result.copy_held_card)
+                    held_cards.append(copied)
             if result.level_up:
                 hand_levels.level_up(hand_type)
                 base_chips, base_mult = hand_levels.get(hand_type)
                 hand_chips = float(base_chips)
                 mult = float(base_mult)
 
-    # === Phase 6: Blind modify_hand (The Flint) ===
+    # Vampire's queued cosmetic event clears this guard after every Vampire
+    # has visited the before pass (card.lua:3472-3477). No later scoring
+    # observer reads it, so the synchronous port coalesces that event here.
+    for card in scoring_cards:
+        if getattr(card, "vampired", False):
+            del card.vampired
+
+    # L: state_events.lua:643-647 — blind modification precedes card scoring.
     new_mult, new_chips, modified = blind.modify_hand(mult, int(hand_chips))
     if modified:
         mult = float(new_mult)
         hand_chips = float(new_chips)
         breakdown.append(f"Blind modify: {int(hand_chips)} chips, {int(mult)} mult")
 
-    # === Phase 7: Per scored card (with retriggers) ===
+    # L: state_events.lua:648-778 — scored cards and their repetitions.
     for card in scoring_cards:
         if card.debuff:
             blind.triggered = True
@@ -651,14 +715,19 @@ def score_hand(
             # the scored card's individual context (state_events.lua:700).
             card.lucky_trigger = False
 
-            hand_chips, mult, dollars = _apply_individual_joker_effects(
+            for effect in effects:
+                amount = effect.get("p_dollars", 0) + effect.get("dollars", 0)
+                if amount:
+                    queue.add(EaseDollars(amount=amount, buffered=True))
+
+            hand_chips, mult, _ = _apply_individual_joker_effects(
                 effects,
                 hand_chips,
                 mult,
-                dollars,
+                0,
             )
 
-    # === Phase 8: Per held card (with retriggers) ===
+    # L: state_events.lua:782-872 — held cards include synchronous DNA copies.
     for card in held_cards:
         if card.debuff:
             continue
@@ -716,23 +785,18 @@ def score_hand(
                     if eff_h:
                         effects_h.append(eff_h)
 
-            mult, dollars = _apply_held_joker_effects(
+            for effect in effects_h:
+                amount = effect.get("dollars", 0)
+                if amount:
+                    queue.add(EaseDollars(amount=amount, buffered=True))
+
+            mult, _ = _apply_held_joker_effects(
                 effects_h,
                 mult,
-                dollars,
+                0,
             )
 
-    # === Phase 8d: individual_hand_end (Vampire strip, Obelisk check) ===
-    for joker in jokers:
-        if joker.debuff:
-            continue
-        ihe_ctx = JokerContext(individual_hand_end=True, **_shared)
-        ihe_result = calculate_joker(joker, ihe_ctx)
-        if ihe_result:
-            if ihe_result.Xmult_mod:
-                mult *= ihe_result.Xmult_mod
-
-    # === Phase 9: Joker main effects (left to right) ===
+    # L: state_events.lua:873-944 — Joker main pass, left to right.
     for joker in jokers:
         if joker.debuff:
             continue
@@ -754,7 +818,7 @@ def score_hand(
             if result.Xmult_mod:
                 mult *= result.Xmult_mod
             if result.dollars:
-                dollars += result.dollars
+                queue.add(EaseDollars(amount=result.dollars, buffered=True, source=joker))
 
         # 9c: Joker-on-joker (other_joker context)
         for other in jokers:
@@ -774,7 +838,7 @@ def score_hand(
         if edition and "x_mult_mod" in edition:
             mult *= edition["x_mult_mod"]
 
-    # === Phase 10: Back trigger (final_scoring_step) ===
+    # L: state_events.lua:946-948 — deck-back final scoring.
     if back_key:
         from jackdaw.engine.back import Back as _Back
 
@@ -790,7 +854,7 @@ def score_hand(
                 f" -> {int(hand_chips)} chips, {int(mult)} mult"
             )
 
-    # === Phase 11: Card destruction ===
+    # L: state_events.lua:950-996 — destruction decisions and notifications.
     cards_destroyed: list[Card] = []
     for sc in scoring_cards:
         if sc.debuff:
@@ -831,16 +895,17 @@ def score_hand(
             )
             calculate_joker(joker, dest_notify_ctx)
 
-    # Removal itself happens in the play handler (game.py), never here: the
-    # solver calls score_hand on cloned cards with the LIVE game_state, so
-    # lifecycle teardown inside the scorer would be one call away from
-    # deleting real cards during hypothetical scoring.
+        queue.add(DestroyPlayingCards(cards=cards_destroyed, notify=False))
 
-    # === Phase 12: Final score ===
+    # Removal is an F2 effect, never applied here: the solver calls score_hand
+    # on cloned cards with live gs and must not delete real cards.
+
+    # L: state_events.lua:1029-1066 — calculate the queued score delta.
     total = math.floor(hand_chips * mult)
     breakdown.append(f"Final: {int(hand_chips)} x {mult:.1f} = {total}")
+    queue.add(AddChips(amount=total))
 
-    # === Phase 13: "after" joker pass (scaling mutations) ===
+    # L: state_events.lua:1068-1075 — after pass always runs.
     for joker in jokers:
         if joker.debuff:
             continue
@@ -859,7 +924,7 @@ def score_hand(
                 saved = True
                 break
 
-    # === Phase 14: Post-play modifiers (debuff played cards) ===
+    # L: state_events.lua:1077-1084 — queued permanent-debuff modifier.
     # Challenge mode: debuff all played cards after scoring.
     # Implemented as a flag check — no joker interaction.
 
@@ -869,10 +934,10 @@ def score_hand(
         chips=hand_chips,
         mult=mult,
         total=total,
-        dollars_earned=dollars,
         debuffed=False,
         breakdown=breakdown,
         effects=queue.effects,
+        effect_queue=queue,
         cards_destroyed=cards_destroyed,
         saved=saved,
     )

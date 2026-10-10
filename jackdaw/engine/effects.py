@@ -52,12 +52,33 @@ class UnappliedEffectError(RuntimeError):
 
 
 class EffectQueue:
-    """The effects emitted during one pass, plus that pass's room reservations."""
+    """Effects and emission-time views owned by one dispatch/scoring pass.
+
+    Money mirrors the slot-buffer precedent: ``pending_dollars`` is Lua's
+    pass-local ``dollar_buffer`` contribution, while ``instant_dollars`` is
+    the committed-view delta from calls such as The Ox's
+    ``ease_dollars(..., true)``. Neither value is written into ``gs`` before
+    :meth:`apply`, which keeps solver probes isolated from their live state.
+    """
 
     def __init__(self, gs: dict[str, Any]) -> None:
         self.gs = gs
         self.effects: list[Effect] = []
         self.reserved: dict[str, int] = {"jokers": 0, "consumables": 0}
+        self.pending_dollars = 0
+        self.instant_dollars = 0
+
+    def committed(self) -> int:
+        """Live dollars plus this pass's instant changes (no allocation)."""
+        return self.gs.get("dollars", 0) + self.instant_dollars
+
+    def with_buffer(self) -> int:
+        """Committed dollars plus Lua's stable and pass-local buffers."""
+        return (
+            self.committed()
+            + self.gs.get("dollar_buffer", 0)
+            + self.pending_dollars
+        )
 
     def room(self, area: str) -> int:
         """Free slots in *area*: ``card_limit - #cards - buffer`` (Lua)."""
@@ -82,6 +103,8 @@ class EffectQueue:
         """Apply and clear everything queued so far."""
         pending, self.effects = self.effects, []
         self.reserved = {"jokers": 0, "consumables": 0}
+        self.pending_dollars = 0
+        self.instant_dollars = 0
         apply_effects(self.gs, pending)
 
 
@@ -124,9 +147,25 @@ class Effect(ABC):
 
 @dataclass(kw_only=True)
 class EaseDollars(Effect):
-    """``ease_dollars(amount)``. Phase 5 adds the buffered/instant split."""
+    """One ``ease_dollars`` call and its explicit producer-side timing.
+
+    ``buffered`` means the producer also increments ``dollar_buffer`` at
+    emission. It is deliberately independent of ordinary ``ease_dollars``:
+    Tooth, discard costs, rentals, and held Gold are deferred but unbuffered.
+    ``instant`` changes the pass's committed view at emission. Application
+    commits either kind exactly once.
+    """
 
     amount: int
+    instant: bool = False
+    buffered: bool = False
+
+    def reserve(self, queue: EffectQueue) -> bool:
+        if self.instant:
+            queue.instant_dollars += self.amount
+        elif self.buffered:
+            queue.pending_dollars += self.amount
+        return True
 
     def apply(self, gs: dict[str, Any]) -> None:
         gs["dollars"] = gs.get("dollars", 0) + self.amount
@@ -140,6 +179,16 @@ class SetDollars(Effect):
 
     def apply(self, gs: dict[str, Any]) -> None:
         gs["dollars"] = self.value
+
+
+@dataclass(kw_only=True)
+class AddChips(Effect):
+    """Queued ``G.GAME.chips`` ease endpoint (animation collapsed)."""
+
+    amount: int
+
+    def apply(self, gs: dict[str, Any]) -> None:
+        gs["chips"] = gs.get("chips", 0) + self.amount
 
 
 # ---------------------------------------------------------------------------
@@ -529,6 +578,7 @@ def _sort_hand(gs: dict[str, Any]) -> None:
 EFFECT_TYPES: tuple[type[Effect], ...] = (
     EaseDollars,
     SetDollars,
+    AddChips,
     CreateCard,
     CreatePlayingCard,
     CreatePlayingCards,

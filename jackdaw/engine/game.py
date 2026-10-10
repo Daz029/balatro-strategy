@@ -51,7 +51,6 @@ from jackdaw.engine.effects import (
     EaseDollars,
     EffectQueue,
     LevelUpHand,
-    apply_effects,
 )
 
 
@@ -537,28 +536,10 @@ def _handle_skip_blind(gs: dict[str, Any]) -> dict[str, Any]:
 
 
 def _handle_play_hand(gs: dict[str, Any], indices: tuple[int, ...]) -> dict[str, Any]:
-    """Play cards from the hand, score them, and check if blind is beaten.
-
-    Full sequence matching ``state_events.lua`` play_cards_from_highlighted
-    → evaluate_play:
-
-    1. Validate indices
-    2. Move cards from hand to play area (preserve index order)
-    3. Decrement hands_left, increment hands_played
-    4. Update per-card stats (times_played, played_this_ante)
-    5. Fire ``Blind:press_play`` (The Hook, The Tooth)
-    6. Call ``score_hand`` (full 14-phase pipeline)
-    7. Process scoring side-effects (dollars, card destruction,
-       joker removal)
-    8. Move surviving played cards to discard pile
-    9. Record hand type in hand_levels
-    10. Determine next phase: won / continue / game over
-    11. If continuing: draw cards, re-debuff for boss
-    """
+    """Synchronous port of ``play_cards_from_highlighted`` (Lua 450-537)."""
     _require_phase(gs, GamePhase.SELECTING_HAND)
 
-    # state_events.lua:455 clears this before each play. Without the reset,
-    # Matador would keep paying after one debuffed scoring card triggers it.
+    # L: state_events.lua:450-463 — validate, stop input, and clear the blind.
     blind = gs["blind"]
     blind.triggered = False
 
@@ -574,26 +555,21 @@ def _handle_play_hand(gs: dict[str, Any], indices: tuple[int, ...]) -> dict[str,
     if any(i < 0 or i >= len(hand) for i in indices):
         raise IllegalActionError("Card index out of range")
 
-    # ------------------------------------------------------------------
-    # 2. Move cards from hand to play area
-    # ------------------------------------------------------------------
+    # L: state_events.lua:459-483 — move the selected cards into play.
     # Preserve SELECTION ORDER (not hand position order).
-    # In Balatro, cards are placed left-to-right in click order.
-    # The first index in card_indices is the leftmost scored card.
+    # NEW-P5-1-05: unlike Lua's physical-x sort, solver-selected scoring order
+    # is an intentional engine behavior pending the explicit user decision.
     idx_set = set(indices)
     played = [hand[i] for i in indices]
     held = [c for i, c in enumerate(hand) if i not in idx_set]
     gs["hand"] = held
     gs["played_cards_area"] = played
 
-    # ------------------------------------------------------------------
-    # 3. Decrement hands_left
-    # ------------------------------------------------------------------
+    # L: state_events.lua:465-476 — HAND_PLAYED is intentionally collapsed
+    # (NEW-P5-1-06); the queued hand decrement settles at F1.
     cr["hands_left"] -= 1
 
-    # ------------------------------------------------------------------
-    # 4. Per-card stats
-    # ------------------------------------------------------------------
+    # L: state_events.lua:478-484 — per-card play statistics precede press_play.
     for card in played:
         base = getattr(card, "base", None)
         if base is not None:
@@ -602,25 +578,18 @@ def _handle_play_hand(gs: dict[str, Any], indices: tuple[int, ...]) -> dict[str,
         if isinstance(ability, dict):
             ability["played_this_ante"] = True
 
-    # ------------------------------------------------------------------
-    # 5. Blind:press_play (blind.lua:464)
-    # ------------------------------------------------------------------
+    # L: state_events.lua:488-502 — Blind:press_play, then F1. Hook remains
+    # on its current mechanics until P5-3, but this dispatch point is exact.
     rng = gs.get("rng")
-    _press_play(gs, blind, played, rng)
+    press_queue = EffectQueue(gs)
+    _press_play(gs, blind, played, rng, press_queue)
+    press_queue.apply()
 
-    # ------------------------------------------------------------------
-    # 6. Score the hand (full 14-phase pipeline)
-    # ------------------------------------------------------------------
+    # L: state_events.lua:504-515 — evaluate_play is the first child event.
     from jackdaw.engine.scoring import score_hand
 
     jokers = gs.get("jokers", [])
     hand_levels = gs.get("hand_levels")
-
-    # Lua writes this at the start of evaluate_play, once the played hand
-    # type is known and before any scoring effects run (state_events.lua:576).
-    from jackdaw.engine.hand_eval import evaluate_hand
-
-    gs["last_hand_played"] = evaluate_hand(played, jokers=jokers).detected_hand
 
     result = score_hand(
         played_cards=played,
@@ -635,62 +604,23 @@ def _handle_play_hand(gs: dict[str, Any], indices: tuple[int, ...]) -> dict[str,
         blind_chips=blind.chips,
     )
 
-    # Lua increments these after evaluate_play has returned, so the joker
-    # contexts during scoring still observe the pre-hand counts.
-    cr["hands_played"] += 1
-    gs["hands_played"] = gs.get("hands_played", 0) + 1
-
-    # ------------------------------------------------------------------
-    # 7. Process scoring side-effects
-    # ------------------------------------------------------------------
-    # Accumulate chips
-    gs["chips"] = gs.get("chips", 0) + result.total
-    gs["last_score_result"] = result
-
-    # Dollars from scoring (Gold Seal, Lucky Card, joker economy)
-    if result.dollars_earned:
-        gs["dollars"] = gs.get("dollars", 0) + result.dollars_earned
-
-    # score_hand marks the destroyed cards (shattered/destroyed) and fires the
-    # destruction notification at Lua's scoring-time observation point; the
-    # canonical removal happens here, on the live state only.
-    lifecycle.destroy_playing_cards(gs, result.cards_destroyed, notify=False)
-    destroyed_set = set(id(c) for c in result.cards_destroyed)
-    played = [c for c in played if id(c) not in destroyed_set]
-
-    apply_effects(gs, result.effects)
-
-    # The Ox: set money to $0 if most-played hand type is played
-    # (blind.lua:debuff_hand fires during scoring in Lua)
-    if (
-        getattr(blind, "name", "") == "The Ox"
-        and not getattr(blind, "disabled", False)
-        and hand_levels is not None
-        and result.hand_type != "NULL"
-    ):
-        from jackdaw.engine.data.hands import HandType as _HT
-
-        try:
-            played_ht = _HT(result.hand_type)
-            if played_ht == hand_levels.most_played():
-                blind.triggered = True
-                gs["dollars"] = 0
-        except ValueError:
-            pass
-
-    # ------------------------------------------------------------------
-    # 8. Move surviving played cards to discard pile
-    #
-    # In Lua, draw_from_play_to_discard (state_events.lua:522, 1088-1096)
-    # moves played cards to the discard area after scoring.
-    # ------------------------------------------------------------------
+    # L: state_events.lua:517-527 — the caller's already queued event moves
+    # every played card first, then advances both hand counters at F2.
     discard_pile: list = gs.setdefault("discard_pile", [])
     discard_pile.extend(played)
     gs["played_cards_area"] = []
+    cr["hands_played"] += 1
+    gs["hands_played"] = gs.get("hands_played", 0) + 1
 
-    # ------------------------------------------------------------------
-    # 10. Determine next phase
-    # ------------------------------------------------------------------
+    # L: state_events.lua:657-662,719-730,836-839,985-995,1029-1084 —
+    # scoring's queued gameplay events follow the move/counter event at F2.
+    gs["last_score_result"] = result
+
+    if result.effect_queue is not None:
+        result.effect_queue.apply()
+
+    # L: game.lua:3187-3204 — only after F2 does HAND_PLAYED choose the
+    # win, redraw, or game-over branch.
     if gs["chips"] >= blind.chips:
         _round_won(gs)
     elif cr["hands_left"] <= 0:
@@ -2051,6 +1981,7 @@ def _press_play(
     blind: Any,
     played: list,
     rng: Any,
+    queue: EffectQueue,
 ) -> None:
     """Fire boss blind press_play effects before scoring.
 
@@ -2062,6 +1993,8 @@ def _press_play(
     name = getattr(blind, "name", "")
 
     if name == "The Hook":
+        # L: blind.lua:466-487 — P5-3 replaces this direct discard with the
+        # shared discard pipeline; the call remains at the Lua press point.
         # Discard 2 random cards from hand
         hand: list = gs.get("hand", [])
         discard_pile: list = gs.setdefault("discard_pile", [])
@@ -2073,15 +2006,16 @@ def _press_play(
                 discard_pile.append(target)
 
     elif name == "The Tooth":
-        # Lose $1 per card played
-        gs["dollars"] = gs.get("dollars", 0) - len(played)
+        # L: blind.lua:497-504 — ordinary (unbuffered) queued ease at F1.
+        for card in played:
+            queue.add(EaseDollars(amount=-1, source=card))
 
     elif name == "The Fish":
-        # Flip all hand cards face-down after play (blind.lua:494-496)
+        # L: blind.lua:494-496.
         blind.prepped = True
 
     elif name == "Crimson Heart":
-        # Debuff a random joker each hand (blind.lua:488-493)
+        # L: blind.lua:488-493.
         jokers: list = gs.get("jokers", [])
         if jokers and rng:
             blind.triggered = True

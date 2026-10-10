@@ -207,6 +207,8 @@ class Blind:
         handname: str,
         *,
         check: bool = False,
+        gs: dict[str, Any] | None = None,
+        queue: Any | None = None,
     ) -> bool:
         """Check whether the entire hand is blocked by the boss blind.
 
@@ -275,11 +277,17 @@ class Blind:
             # The scoring pipeline owns the HandLevels reference and sets
             # this only when the played hand is actually above level 1.
 
-        # The Ox: doesn't block, but sets triggered if most-played hand
-        # (actual money drain happens in the scoring pipeline)
+        # L: blind.lua:560-567 — The Ox reads the stored round target and
+        # changes committed dollars immediately inside debuff_hand.
         if self.name == "The Ox" and not self.disabled:
             self.triggered = False
-            # most_played check happens at the pipeline level
+            target = (gs or {}).get("current_round", {}).get("most_played_poker_hand")
+            if target is not None and handname == target:
+                self.triggered = True
+                if not check and queue is not None:
+                    from jackdaw.engine.effects import EaseDollars
+
+                    queue.add(EaseDollars(amount=-queue.committed(), instant=True))
 
         return False
 

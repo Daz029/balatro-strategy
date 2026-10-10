@@ -165,9 +165,10 @@ class TestDna:
         ctx = make_ctx(before=True, full_hand=played, hands_played=0)
         result = calculate_joker(j, ctx)
         assert result is not None
-        assert len(result.effects) == 1
-        assert isinstance(result.effects[0], CopyCard)
-        assert result.effects[0].card is played[0]
+        # card.lua:3501-3511 emplaces DNA's copy synchronously so the same
+        # evaluate_play held-card loop can see it.
+        assert result.effects == ()
+        assert result.copy_held_card is played[0]
 
     def test_first_hand_multiple_cards_no_effect(self):
         j = _joker("j_dna")
@@ -1696,7 +1697,7 @@ class TestVampire:
         j = self._make()
         bonus = _card("Hearts", "5", enhancement="m_bonus")
         ctx = make_ctx(
-            individual_hand_end=True,
+            before=True,
             scoring_hand=[bonus],
         )
         calculate_joker(j, ctx)
@@ -1708,7 +1709,7 @@ class TestVampire:
         bonus = _card("Hearts", "5", enhancement="m_bonus")
         bonus.debuff = True
         ctx = make_ctx(
-            individual_hand_end=True,
+            before=True,
             scoring_hand=[bonus],
         )
         calculate_joker(j, ctx)
@@ -1720,7 +1721,7 @@ class TestVampire:
         for _ in range(3):
             enhanced = _card("Hearts", "5", enhancement="m_bonus")
             ctx = make_ctx(
-                individual_hand_end=True,
+                before=True,
                 scoring_hand=[enhanced],
             )
             calculate_joker(j, ctx)
@@ -1739,7 +1740,7 @@ class TestObelisk:
         levels.record_play("Pair")
         levels.record_play("Flush")  # Flush=1, Pair=3 -> Flush is NOT most
         ctx = make_ctx(
-            individual_hand_end=True,
+            before=True,
             scoring_name="Flush",
             hand_levels=levels,
         )
@@ -1754,7 +1755,7 @@ class TestObelisk:
         levels.record_play("Pair")
         # Pair is most played (2), playing Pair -> reset
         ctx = make_ctx(
-            individual_hand_end=True,
+            before=True,
             scoring_name="Pair",
             hand_levels=levels,
         )
@@ -1772,7 +1773,7 @@ class TestObelisk:
         for _ in range(2):
             levels.record_play("Flush")
             ctx = make_ctx(
-                individual_hand_end=True,
+                before=True,
                 scoring_name="Flush",
                 hand_levels=levels,
             )
@@ -1782,7 +1783,7 @@ class TestObelisk:
         # Play Pair (still most played) -> resets
         levels.record_play("Pair")
         ctx = make_ctx(
-            individual_hand_end=True,
+            before=True,
             scoring_name="Pair",
             hand_levels=levels,
         )

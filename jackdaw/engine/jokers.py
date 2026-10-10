@@ -17,6 +17,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from jackdaw.engine import read
+from jackdaw.engine.card import Card
 from jackdaw.engine.data.hands import HAND_ORDER
 from jackdaw.engine.data.prototypes import JOKERS
 from jackdaw.engine.effects import (
@@ -36,7 +37,6 @@ from jackdaw.engine.effects import (
 
 if TYPE_CHECKING:
     from jackdaw.engine.blind import Blind
-    from jackdaw.engine.card import Card
     from jackdaw.engine.hand_levels import HandLevels
     from jackdaw.engine.rng import PseudoRandom
 
@@ -59,6 +59,7 @@ class GameSnapshot:
     joker_count: int = 0
     joker_slots: int = 5
     money: int = 0
+    money_with_buffer: int | None = None
     deck_cards_remaining: int = 0
     starting_deck_size: int = 52
     playing_cards_count: int = 52
@@ -81,6 +82,10 @@ class GameSnapshot:
     skips: int = 0
     ante: int = 1
     rules: read.Rules = read.Rules()
+
+    def __post_init__(self) -> None:
+        if self.money_with_buffer is None:
+            object.__setattr__(self, "money_with_buffer", self.money)
 
 
 # ---------------------------------------------------------------------------
@@ -131,7 +136,6 @@ class JokerContext:
     debuffed_hand: bool = False
     using_consumeable: bool = False
     playing_card_added: bool = False
-    individual_hand_end: bool = False
     game_over: bool = False
 
     # Per-call context data
@@ -197,7 +201,7 @@ def context_for(
         rng=gs.get("rng"),
         blind=gs.get("blind"),
         hand_levels=gs.get("hand_levels"),
-        game=read.StateView(gs, jokers=jokers),
+        game=read.StateView(gs, jokers=jokers, queue=queue),
         queue=queue,
         **fields,
     )
@@ -241,6 +245,8 @@ class JokerResult:
     (``destroying_card`` / ``discard`` ``other_card``). Never "destroy
     myself" -- a self-destruct is a :class:`DestroyCard` effect."""
     message: str = ""
+    copy_held_card: Card | None = None
+    """DNA's synchronous before-pass copy (``card.lua:3501-3511``)."""
 
     effects: list[Effect] | tuple[Effect, ...] = ()
 
@@ -1008,9 +1014,9 @@ def _steel_joker(card: Card, ctx: JokerContext) -> JokerResult | None:
 @register("j_bull")
 def _bull(card: Card, ctx: JokerContext) -> JokerResult | None:
     """Bull: +2 chips per $1 held. Source: card.lua:3936."""
-    if ctx.joker_main and ctx.game.money > 0:
+    if ctx.joker_main and ctx.game.money_with_buffer > 0:
         return JokerResult(
-            chip_mod=card.ability.get("extra", 2) * max(0, ctx.game.money),
+            chip_mod=card.ability.get("extra", 2) * max(0, ctx.game.money_with_buffer),
         )
     return None
 
@@ -1119,7 +1125,7 @@ def _bootstraps(card: Card, ctx: JokerContext) -> JokerResult | None:
     if ctx.joker_main:
         extra = card.ability.get("extra", {})
         per = extra.get("dollars", 5)
-        buckets = ctx.game.money // per if per > 0 else 0
+        buckets = ctx.game.money_with_buffer // per if per > 0 else 0
         if buckets >= 1:
             return JokerResult(mult_mod=extra.get("mult", 2) * buckets)
     return None
@@ -1740,10 +1746,10 @@ def _caino(card: Card, ctx: JokerContext) -> JokerResult | None:
 def _vampire(card: Card, ctx: JokerContext) -> JokerResult | None:
     """Vampire: +0.1 xMult per enhancement stripped from scored cards.
 
-    Source: card.lua:3465. Fires in individual_hand_end context.
+    Source: card.lua:3465. Fires in the before context.
     Side effect: strips enhancement from scored cards (sets ability to c_base).
     """
-    if ctx.individual_hand_end and not ctx.blueprint and ctx.scoring_hand:
+    if ctx.before and not ctx.blueprint and ctx.scoring_hand:
         enhanced_count = 0
         for c in ctx.scoring_hand:
             if (
@@ -1759,7 +1765,7 @@ def _vampire(card: Card, ctx: JokerContext) -> JokerResult | None:
             card.ability["x_mult"] = (
                 card.ability.get("x_mult", 1) + card.ability.get("extra", 0.1) * enhanced_count
             )
-            return JokerResult(Xmult_mod=card.ability["x_mult"])
+            return JokerResult()
     if ctx.joker_main:
         x = card.ability.get("x_mult", 1)
         if x > 1:
@@ -1773,7 +1779,7 @@ def _obelisk(card: Card, ctx: JokerContext) -> JokerResult | None:
 
     Source: card.lua:3543. Resets to 1 when most-played hand IS played.
     """
-    if ctx.individual_hand_end and not ctx.blueprint:
+    if ctx.before and not ctx.blueprint:
         if ctx.scoring_name and ctx.hand_levels is not None:
             current_played = ctx.hand_levels[ctx.scoring_name].played
             is_most_played = True
@@ -2003,9 +2009,7 @@ def _dna(card: Card, ctx: JokerContext) -> JokerResult | None:
     """
     if ctx.before and not ctx.blueprint:
         if ctx.game.hands_played == 0 and ctx.full_hand and len(ctx.full_hand) == 1:
-            return JokerResult(
-                effects=[CopyCard(card=ctx.full_hand[0], area="hand", source=card)]
-            )
+            return JokerResult(copy_held_card=ctx.full_hand[0])
     return None
 
 

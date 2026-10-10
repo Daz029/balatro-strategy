@@ -17,15 +17,18 @@ from jackdaw.engine.data.hands import HAND_ORDER
 
 if TYPE_CHECKING:
     from jackdaw.engine.card import Card
+    from jackdaw.engine.effects import EffectQueue
 
 
-def money_committed(gs: dict[str, Any]) -> int:
+def money_committed(gs: dict[str, Any], queue: EffectQueue | None = None) -> int:
     """Return committed dollars (Vagabond, ``card.lua:3744``)."""
-    return gs.get("dollars", 0)
+    return queue.committed() if queue is not None else gs.get("dollars", 0)
 
 
-def money_with_buffer(gs: dict[str, Any]) -> int:
+def money_with_buffer(gs: dict[str, Any], queue: EffectQueue | None = None) -> int:
     """Return dollars including pending changes (Bull, ``card.lua:3936-3939``)."""
+    if queue is not None:
+        return queue.with_buffer()
     return gs.get("dollars", 0) + gs.get("dollar_buffer", 0)
 
 
@@ -363,6 +366,7 @@ class StateView:
         gs: dict[str, Any],
         jokers: list[Card] | None = None,
         overrides: dict[str, Any] | None = None,
+        queue: EffectQueue | None = None,
     ) -> None:
         """Build a view, optionally pinning named properties for this view.
 
@@ -372,6 +376,7 @@ class StateView:
         """
         self._gs = gs
         self._jokers = gs.get("jokers", []) if jokers is None else jokers
+        self._queue = queue
         for name, value in (overrides or {}).items():
             if not isinstance(vars(type(self)).get(name), cached_property):
                 raise KeyError(name)
@@ -389,13 +394,13 @@ class StateView:
     def joker_slots(self) -> int:
         return self._gs.get("joker_slots", 5)
 
-    @cached_property
+    @property
     def money(self) -> int:
-        return money_committed(self._gs)
+        return money_committed(self._gs, self._queue)
 
-    @cached_property
+    @property
     def money_with_buffer(self) -> int:
-        return money_with_buffer(self._gs)
+        return money_with_buffer(self._gs, self._queue)
 
     @cached_property
     def deck_cards_remaining(self) -> int:

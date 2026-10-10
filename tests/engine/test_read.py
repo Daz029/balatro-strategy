@@ -8,6 +8,7 @@ import pytest
 
 from jackdaw.engine.card import Card
 from jackdaw.engine.data.hands import HAND_ORDER, HandType
+from jackdaw.engine.effects import EaseDollars, EffectQueue
 from jackdaw.engine.hand_eval import get_hand_eval_flags
 from jackdaw.engine.hand_levels import HandLevels
 from jackdaw.engine.jokers import GameSnapshot
@@ -81,6 +82,18 @@ class TestMoneyProbabilityAndVouchers:
     def test_money_with_buffer_defaults_and_adds(self):
         assert money_with_buffer({"dollars": 7}) == 7
         assert money_with_buffer({"dollars": 7, "dollar_buffer": -2}) == 5
+
+    def test_money_reads_through_pass_queue(self):
+        gs = {"dollars": 7, "dollar_buffer": 0}
+        queue = EffectQueue(gs)
+        queue.add(EaseDollars(amount=3, buffered=True))
+        assert money_committed(gs, queue) == 7
+        assert money_with_buffer(gs, queue) == 10
+
+        queue.add(EaseDollars(amount=-7, instant=True))
+        assert money_committed(gs, queue) == 0
+        assert money_with_buffer(gs, queue) == 3
+        assert gs == {"dollars": 7, "dollar_buffer": 0}
 
     def test_probability_defaults_to_one(self):
         assert probability({}) == 1.0
@@ -344,6 +357,7 @@ def _state_view_fixture() -> tuple[dict, list[Card], GameSnapshot]:
         joker_count=2,
         joker_slots=6,
         money=13,
+        money_with_buffer=15,
         deck_cards_remaining=1,
         starting_deck_size=52,
         playing_cards_count=3,

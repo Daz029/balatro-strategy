@@ -341,40 +341,22 @@ and `card_factory.py`.
 
 ## 5. Buffers
 
-Lua queues most changes as events, and three buffers bridge the gap while an
-event is still pending. We keep them with Lua's exact semantics:
+The built engine keeps all three Lua buffer views on the pass-local
+`EffectQueue`, not in persistent game state. `reserved` models
+`joker_buffer`/`consumeable_buffer`; `pending_dollars` models this pass's
+explicit producer-side `dollar_buffer` reservations; and `instant_dollars`
+models committed-view changes such as The Ox. `committed()` and
+`with_buffer()` are allocation-free reads over live dollars plus those local
+deltas. Stable `gs["dollar_buffer"]` remains zero, which prevents a solver
+probe against live `gs` from leaking state.
 
-- `MoneyLedger` holds `dollars` (committed), `dollar_buffer`, and the queue of
-  not-yet-run `ease_dollars` calls.
-- `SlotReservations` holds `joker_buffer` and `consumeable_buffer`.
-- `EventFlush` runs at the points where Lua's queued events finish (the exact
-  points come from the S4-a source sweep). It commits queued money, zeroes
-  `dollar_buffer` and releases slot reservations.
-
-The fields live in the game-state dict, so clones and pickled blobs carry them.
-
-```mermaid
-classDiagram
-  class MoneyLedger {
-    <<new>>
-    +ease(gs, amount, instant)
-    +add_buffer(gs, amount)
-    +committed(gs) int
-    +with_buffer(gs) int
-  }
-  class SlotReservations {
-    <<new>>
-    +reserve(gs, area, n)
-    +used_with_buffer(gs, area) int
-    +release(gs, area)
-  }
-  class EventFlush {
-    <<module, new>>
-    +flush(gs)
-  }
-  EventFlush ..> MoneyLedger : commit queued, zero dollar_buffer
-  EventFlush ..> SlotReservations : release
-```
+`EaseDollars(buffered=True)` is used only by producers that explicitly add to
+Lua's buffer. Ordinary deferred eases (Tooth, discard costs, rental, held Gold)
+remain unbuffered; `instant=True` changes the queue's committed view at
+emission. `EffectQueue.apply()` is the event flush and commits effects in FIFO
+order. Buffer-clear events are coalesced into the queue reset: no F1/F2 money
+observer runs among those clears and commits, while dollar commits retain
+their Lua order.
 
 Why both views exist (your Vagabond note, confirmed in the source): a Gold
 seal scores during `evaluate_play`. Bull reads `dollars + dollar_buffer`
@@ -385,7 +367,7 @@ seal scores during `evaluate_play`. Bull reads `dollars + dollar_buffer`
 ```mermaid
 sequenceDiagram
   participant P as evaluate_play
-  participant L as MoneyLedger
+  participant L as EffectQueue
   participant B as Bull
   participant V as Vagabond
   Note over L: dollars 4, buffer 0
@@ -415,12 +397,12 @@ Scoring numbers (chips, mult, x_mult, retriggers) are **not** effects. They
 are values the scoring pipeline folds into the running total itself, in Lua's
 order (section 8).
 
-The built API uses one pass-local `EffectQueue`. It owns the pending effects
-and Joker/Consumable slot reservations; reservations do not live in `gs`, so
+The built API uses one pass-local `EffectQueue`. It owns pending effects,
+money views, and Joker/Consumable slot reservations; reservations do not live in `gs`, so
 a solver can score cloned objects against a live state without leaking buffer
 changes. `apply_effects` (called by `EffectQueue.apply`) is the only applier.
 
-The concrete vocabulary is `EaseDollars`, `SetDollars`, `CreateCard`,
+The concrete vocabulary is `EaseDollars`, `SetDollars`, `AddChips`, `CreateCard`,
 `CreatePlayingCard`, `CreatePlayingCards`, `CopyCard`, `AddTag`, `DestroyCard`,
 `DestroyPlayingCards`, `SetEnhancement`, `ChangeSuit`, `ChangeRank`, `SetSeal`,
 `SetEdition`, `LevelUpHand`, `ChangeRoundResource`, `ChangeHandSize`,
@@ -556,6 +538,13 @@ Spurious `not blueprint` guards are removed (D06).
 as Lua does (Vampire strips enhancements before cards score, the before pass
 can level the hand), so the solver gives it a clone. The `ScoreAccumulator`
 holds the running `hand_chips`, `mult` and the breakdown.
+
+In the built function, scoring payouts are `EaseDollars` effects emitted at
+their Lua call sites. `ScoreResult.dollars_earned` is derived from its
+non-instant dollar effects. DNA is the other synchronous special case: its
+before-pass copy enters the live hand through lifecycle (or only the solver's
+cloned held list), so the held-card loop scores it immediately without
+touching live solver state.
 
 **The pipeline owns every ordering rule.** It walks the scored cards in play
 order (left to right), then the held cards in hand order, then the jokers left
