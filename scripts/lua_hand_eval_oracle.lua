@@ -16,6 +16,7 @@ if scripts_pos then
     project_root = script_path:sub(1, scripts_pos - 1)
 end
 if project_root == "" then project_root = "./" end
+local lua_source = dofile(project_root .. "scripts/lua_source_path.lua").resolve(project_root)
 
 ----------------------------------------------------------------------------
 -- Stub globals needed by find_joker
@@ -48,7 +49,7 @@ end
 -- Load source hand eval functions
 ----------------------------------------------------------------------------
 
-local source_path = project_root .. "balatro_source/functions/misc_functions.lua"
+local source_path = lua_source .. "/functions/misc_functions.lua"
 local f = assert(io.open(source_path, "r"))
 local src = f:read("*a")
 f:close()

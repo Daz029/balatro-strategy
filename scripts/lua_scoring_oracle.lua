@@ -10,6 +10,7 @@
 local script_path = arg[0] or ""
 local scripts_pos = script_path:find("scripts")
 local project_root = scripts_pos and script_path:sub(1, scripts_pos - 1) or "./"
+local lua_source = dofile(project_root .. "scripts/lua_source_path.lua").resolve(project_root)
 
 ----------------------------------------------------------------------------
 -- Stubs for LÖVE2D / UI / animation dependencies
@@ -74,7 +75,7 @@ end
 -- Load source functions
 ----------------------------------------------------------------------------
 
-local source_path = project_root .. "balatro_source/functions/misc_functions.lua"
+local source_path = lua_source .. "/functions/misc_functions.lua"
 local f = assert(io.open(source_path, "r"))
 local src = f:read("*a")
 f:close()
@@ -89,7 +90,7 @@ end
 assert(loadstring(func_src))()
 
 -- Load eval_card from common_events.lua
-local ce_path = project_root .. "balatro_source/functions/common_events.lua"
+local ce_path = lua_source .. "/functions/common_events.lua"
 f = assert(io.open(ce_path, "r"))
 src = f:read("*a")
 f:close()

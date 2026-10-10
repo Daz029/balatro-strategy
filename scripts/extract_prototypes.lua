@@ -21,7 +21,8 @@ local project_root = script_dir:gsub("[/\\]scripts[/\\]$", "/")
 if not script_dir:find("scripts") then
     project_root = "./"
 end
-local source_path = project_root .. "balatro_source/game.lua"
+local lua_source = dofile(project_root .. "scripts/lua_source_path.lua").resolve(project_root)
+local source_path = lua_source .. "/game.lua"
 
 ----------------------------------------------------------------------------
 -- JSON serializer (handles nested tables, booleans, nil → null)

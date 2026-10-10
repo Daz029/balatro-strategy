@@ -5,14 +5,13 @@ Two halves:
 - Without the Lua source: every non-lazy :class:`Stored` entry in
   ``jackdaw.engine.state_map`` resolves on a fresh run (plus a live ``Blind``),
   so the map cannot point at a key the engine does not hold.
-- With the Lua source (``BALATRO_LUA_SRC``, default the 1.0.1o tree on the dev
+- With the Lua source (``BALATRO_SOURCE``, default the 1.0.1o tree on the dev
   Mac): every ``G.GAME`` path, ``Card`` / ``Blind`` field and ``ability`` key the
   source uses is mapped. Skips without the source, like the LuaJIT oracles.
 """
 
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -31,6 +30,7 @@ from jackdaw.engine.state_map import (
     OutOfScope,
     Stored,
 )
+from tests._lua_source import lua_source_missing_reason, resolve_lua_source
 
 _SCRIPTS = Path(__file__).resolve().parents[2] / "scripts"
 if str(_SCRIPTS) not in sys.path:
@@ -42,12 +42,7 @@ from engine_state_inventory import (  # noqa: E402
     scan_lua_self_fields,
 )
 
-_LUA_SRC = Path(
-    os.environ.get(
-        "BALATRO_LUA_SRC",
-        "~/Code/Code/balatro-strategy/balatro_source/Balatro",
-    )
-).expanduser()
+_LUA_SRC = resolve_lua_source(Path(__file__).resolve().parents[2])
 
 _MISSING = object()
 
@@ -120,9 +115,10 @@ def test_stored_blind_field_exists(field_name: str) -> None:
 # Lua-source coverage (skips without the source tree)
 # ---------------------------------------------------------------------------
 
+_LUA_MISSING_REASON = lua_source_missing_reason(_LUA_SRC)
 needs_lua = pytest.mark.skipif(
-    not (_LUA_SRC / "card.lua").is_file(),
-    reason=f"Lua source not found at {_LUA_SRC} (set BALATRO_LUA_SRC)",
+    _LUA_MISSING_REASON is not None,
+    reason=_LUA_MISSING_REASON or "Balatro Lua source is available",
 )
 
 

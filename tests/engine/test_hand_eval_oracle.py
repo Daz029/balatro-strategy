@@ -8,6 +8,7 @@ Optionally runs the Lua oracle live via LuaJIT subprocess.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -17,10 +18,12 @@ import pytest
 from jackdaw.engine.card import Card, reset_sort_id_counter
 from jackdaw.engine.card_factory import create_joker
 from jackdaw.engine.hand_eval import evaluate_hand
+from tests._lua_source import lua_source_missing_reason, resolve_lua_source
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 FIXTURE_PATH = PROJECT_ROOT / "tests" / "fixtures" / "hand_eval_oracle.json"
 ORACLE_SCRIPT = PROJECT_ROOT / "scripts" / "lua_hand_eval_oracle.lua"
+LUA_SOURCE = resolve_lua_source(PROJECT_ROOT)
 
 
 def _card(suit: str, rank: str, enhancement: str = "c_base") -> Card:
@@ -327,16 +330,22 @@ class TestFixtureOracle:
 class TestLiveOracle:
     @pytest.fixture(scope="class")
     def lua_path(self):
+        missing_source = lua_source_missing_reason(LUA_SOURCE)
+        if missing_source:
+            pytest.skip(missing_source)
         path = _find_lua()
         if not path:
-            pytest.skip("No Lua interpreter found")
+            pytest.skip("LuaJIT/Lua interpreter not found; live Lua oracle unavailable")
         return path
 
     @pytest.fixture(scope="class")
     def live_data(self, lua_path) -> dict:
+        env = os.environ.copy()
+        env["BALATRO_SOURCE"] = str(LUA_SOURCE)
         result = subprocess.run(
             [lua_path, str(ORACLE_SCRIPT)],
             cwd=str(PROJECT_ROOT),
+            env=env,
             capture_output=True,
             text=True,
             timeout=30,

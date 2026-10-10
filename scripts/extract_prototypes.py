@@ -14,6 +14,7 @@ Outputs JSON files in jackdaw/engine/data/:
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -22,6 +23,11 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT_LUA = PROJECT_ROOT / "scripts" / "extract_prototypes.lua"
 DATA_DIR = PROJECT_ROOT / "jackdaw" / "engine" / "data"
+
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from tests._lua_source import resolve_lua_source  # noqa: E402
 
 
 def find_luajit() -> str | None:
@@ -46,10 +52,13 @@ def run_via_luajit() -> bool:
         return False
 
     print(f"Using LuaJIT: {luajit}")
+    env = os.environ.copy()
+    env["BALATRO_SOURCE"] = str(resolve_lua_source(PROJECT_ROOT))
     result = subprocess.run(
         [luajit, str(SCRIPT_LUA)],
         cwd=str(PROJECT_ROOT),
         capture_output=False,
+        env=env,
         timeout=30,
     )
     return result.returncode == 0
