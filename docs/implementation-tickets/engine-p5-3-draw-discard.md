@@ -46,7 +46,7 @@ sweep's step list: forced-selection clear, sort, `pre_discard` with `hook`
 propagated to the context (Burnt Joker's `not context.hook` guard — check
 every discard-context handler for a hook guard in Lua and mirror it), seal
 then per-joker `discard` per card, destroy vs move, `remove_playing_cards`
-notification, stats, and the VOLUNTARY-only tail (discard cost, discards
+notification, `ability.discarded = True` on discarded cards (NEW-P5-O2-01; `cardarea.lua:66-79` reads it), stats, and the VOLUNTARY-only tail (discard cost, discards
 decrement, `discards_used`, DRAW_TO_HAND). Money through the P5-2 ledger;
 Faceless's payout is a nested event (NEW-P5-1-01) — keep its FIFO
 position relative to Mail-In / Trading if any observer can see the
