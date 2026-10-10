@@ -437,6 +437,13 @@ def start_round(game_state: dict[str, Any]) -> None:
     if hand_levels is not None:
         hand_levels.reset_round_counts()
 
+    # L: state_events.lua:307-309 — face-down draw markers never cross a
+    # round boundary, even if the card is currently outside the hand.
+    from jackdaw.engine import read
+
+    for card in read.playing_cards(game_state):
+        card.ability.pop("wheel_flipped", None)
+
     # NOTE: targeting cards (idol, mail, ancient, castle) are NOT re-rolled
     # here.  Vanilla rolls them once at run start (game.lua:2385-2389) and
     # then at each round END (state_events.lua:273-276) — never at round

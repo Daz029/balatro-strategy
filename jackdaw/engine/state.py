@@ -99,7 +99,7 @@ Lifecycle legend for the **set by** column:
 ::
 
     hand               list[Card]        Cards currently in the player's hand.
-                                         Set by game (_draw_hand, play/discard handlers).
+                                         Set by game (shared draw, play/discard handlers).
     deck               list[Card]        Draw pile.
                                          Set by run_init (build_deck), game (shuffle/draw/return).
     discard_pile       list[Card]        Discard pile.
@@ -702,6 +702,7 @@ GROUP_KEYS: dict[str, frozenset[str]] = {
             # challenge-only (written through apply_challenge's dynamic rule keys)
             "booster_ante_scaling",
             "discard_cost",
+            "flipped_cards",
             "inflation",
             "no_extra_hand_money",
         }

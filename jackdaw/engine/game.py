@@ -47,10 +47,13 @@ from jackdaw.engine.actions import (
 )
 from jackdaw.engine.effects import (
     AddTag,
+    ChangeHandSize,
+    ChangeRoundResource,
     CreateCard,
     EaseDollars,
     EffectQueue,
     LevelUpHand,
+    ShuffleArea,
 )
 
 
@@ -231,25 +234,23 @@ def _handle_select_blind(gs: dict[str, Any], *, allow_forced_boss: bool = False)
 
     start_round(gs)
 
-    # ------------------------------------------------------------------
-    # 3. Boss blind set-time effects (blind.lua:157-209)
-    #    In Lua, set_blind fires inside new_round BEFORE the shuffle.
-    #    Order: set_blind → joker setting_blind → shuffle → draw.
-    # ------------------------------------------------------------------
+    # L: blind.lua:157-205 — set_blind emits its boss effects before the
+    # setting_blind pass. F5 shares one FIFO queue for both producers.
+    set_blind_queue = EffectQueue(gs)
     if blind.boss:
-        _apply_boss_blind_effects(gs, blind)
+        _apply_boss_blind_effects(gs, blind, queue=set_blind_queue)
 
-    # ------------------------------------------------------------------
-    # 4. Joker setting_blind pass. Lua runs this after Blind:set_blind;
-    # Chicot therefore reverses any boss set-time effects it disables.
-    # ------------------------------------------------------------------
-    _fire_setting_blind(gs)
-
-    # Debuff playing cards based on boss blind
-    deck: list = gs.get("deck", [])
+    # L: blind.lua:207-215 — set_blind rechecks every playing card and Joker.
     active_rules = read.rules(gs)
-    for card in deck:
+    for card in read.playing_cards(gs):
         blind.debuff_card(card, active_rules, gs)
+    for joker in gs.get("jokers", []):
+        blind.debuff_card(joker, active_rules, gs, is_joker_area=True)
+
+    # L: state_events.lua:333-337 — setting_blind is emitted after set_blind.
+    _fire_setting_blind(gs, queue=set_blind_queue)
+    # F5: blind/set-blind and Joker events settle before the state shuffle.
+    set_blind_queue.apply()
 
     # ------------------------------------------------------------------
     # 6. Per-round deck shuffle (state_events.lua:344)
@@ -262,48 +263,9 @@ def _handle_select_blind(gs: dict[str, Any], *, allow_forced_boss: bool = False)
         nr_seed = rng.seed("nr" + str(ante))
         rng.shuffle(deck_list, nr_seed)
 
-    # ------------------------------------------------------------------
-    # 7. Draw hand from deck
-    # ------------------------------------------------------------------
-    _draw_hand(gs)
-    # Debuff hand cards too (they were drawn from the deck)
-    for card in gs.get("hand", []):
-        blind.debuff_card(card, active_rules, gs)
-
-    # game.lua:3226-3231: the first-hand pass fires after the draw and card
-    # debuffs, while facing the blind, before Blind:drawn_to_hand.
-    cr = gs.get("current_round", {})
-    if (
-        cr.get("hands_played", 0) == 0
-        and cr.get("discards_used", 0) == 0
-        and gs.get("facing_blind")
-    ):
-        from jackdaw.engine.jokers import fire_jokers
-
-        queue = EffectQueue(gs)
-        fire_jokers(gs, queue, first_hand_drawn=True)
-        queue.apply()
-
-    # ------------------------------------------------------------------
-    # 7b. Boss drawn_to_hand effects (Cerulean Bell, Crimson Heart)
-    # ------------------------------------------------------------------
-    if blind.boss and not blind.disabled:
-        dth = blind.drawn_to_hand(
-            hand_cards=gs.get("hand", []),
-            joker_cards=gs.get("jokers"),
-            rng=rng,
-            gs=gs,
-        )
-        if dth.get("forced_card_index") is not None:
-            hand = gs.get("hand", [])
-            idx = dth["forced_card_index"]
-            if 0 <= idx < len(hand):
-                hand[idx].ability["forced_selection"] = True
-
-    # ------------------------------------------------------------------
-    # 8. Phase → SELECTING_HAND
-    # ------------------------------------------------------------------
-    gs["phase"] = GamePhase.SELECTING_HAND
+    # L: state_events.lua:338-349; game.lua:3208-3244 — enter the one shared
+    # DRAW_TO_HAND controller after the nr shuffle.
+    _draw_from_deck_to_hand(gs)
     return gs
 
 
@@ -630,49 +592,9 @@ def _handle_play_hand(gs: dict[str, Any], indices: tuple[int, ...]) -> dict[str,
         else:
             _round_won(gs)
     else:
-        # ------------------------------------------------------------------
-        # 11. More hands — draw cards and stay in SELECTING_HAND
-        # ------------------------------------------------------------------
-        # The Serpent: draw only 3 cards instead of filling to hand_size
-        serpent_play = getattr(blind, "name", "") == "The Serpent" and not getattr(
-            blind, "disabled", False
-        )
-        if serpent_play:
-            deck: list = gs.get("deck", [])
-            hand_out: list = gs.get("hand", [])
-            for _ in range(min(3, len(deck))):
-                if deck:
-                    hand_out.append(deck.pop())
-            _sort_hand_desc(hand_out)
-        else:
-            _draw_hand(gs)
-
-        # Re-debuff hand cards for boss blind (new cards from deck)
-        if blind.boss and not blind.disabled:
-            active_rules = read.rules(gs)
-            for card in gs.get("hand", []):
-                blind.debuff_card(card, active_rules, gs)
-
-        # The Fish: flip newly drawn cards face-down
-        if getattr(blind, "name", "") == "The Fish" and getattr(blind, "prepped", False):
-            for card in gs.get("hand", []):
-                card.facing = "back"
-
-        # Boss drawn_to_hand effects on redraw (Cerulean Bell, Crimson Heart)
-        if blind.boss and not blind.disabled:
-            dth = blind.drawn_to_hand(
-                hand_cards=gs.get("hand", []),
-                joker_cards=jokers,
-                rng=rng,
-                gs=gs,
-            )
-            if dth.get("forced_card_index") is not None:
-                hand = gs.get("hand", [])
-                idx = dth["forced_card_index"]
-                if 0 <= idx < len(hand):
-                    hand[idx].ability["forced_selection"] = True
-
-        _end_round_if_hand_empty(gs)
+        # L: game.lua:3187-3244 — the DRAW_TO_HAND controller owns every
+        # post-play redraw, including Serpent and drawn_to_hand effects.
+        _draw_from_deck_to_hand(gs)
 
     return gs
 
@@ -709,171 +631,131 @@ def _handle_discard(gs: dict[str, Any], indices: tuple[int, ...]) -> dict[str, A
     if any(i < 0 or i >= len(hand) for i in indices):
         raise IllegalActionError("Card index out of range")
 
-    # ------------------------------------------------------------------
-    # 2. Extract discarded cards in sorted order
-    # ------------------------------------------------------------------
-    idx_set = set(indices)
     discarded = [hand[i] for i in sorted(indices)]
-    gs["hand"] = [c for i, c in enumerate(hand) if i not in idx_set]
+    discard_cards_from_highlighted(gs, discarded)
+    return gs
 
-    # ------------------------------------------------------------------
-    # 3. Fire joker pre_discard context (Burnt Joker: level up hand)
-    # ------------------------------------------------------------------
-    from jackdaw.engine.jokers import calculate_joker, context_for
+
+def discard_cards_from_highlighted(
+    gs: dict[str, Any],
+    cards: list[Any],
+    *,
+    hook: bool = False,
+) -> None:
+    """Shared synchronous port of Lua's voluntary/Hook discard function."""
+    from jackdaw.engine.jokers import calculate_joker, context_for, fire_jokers
+
+    # L: state_events.lua:379-393; game.lua:2247-2251 — clear forced
+    # selections, cap by discard room, and restore physical hand order.
+    for playing_card in read.playing_cards(gs):
+        playing_card.ability.pop("forced_selection", None)
+    hand: list = gs.get("hand", [])
+    selected_ids = {id(card) for card in cards}
+    discard_room = max(0, 500 - len(gs.get("played_cards_area", [])))
+    discarded = [card for card in hand if id(card) in selected_ids][:discard_room]
+    if not discarded:
+        return
 
     jokers: list = gs.get("jokers", [])
     queue = EffectQueue(gs)
 
-    pre_discard_effects: list = []
-    for joker in jokers:
-        if getattr(joker, "debuff", False):
+    # L: state_events.lua:394-396; card.lua:2748-2755 — Burnt observes the
+    # Hook flag in pre_discard and is the only vanilla discard handler that
+    # reads context.hook.
+    for joker in list(jokers):
+        if joker.debuff:
             continue
-        ctx = context_for(
-            gs,
-            queue=queue,
-            pre_discard=True,
-            full_hand=discarded,
+        result = calculate_joker(
+            joker,
+            context_for(
+                gs,
+                queue=queue,
+                pre_discard=True,
+                full_hand=discarded,
+                hook=hook,
+            ),
         )
-        result = calculate_joker(joker, ctx)
-        if result:
-            pre_discard_effects.append(result)
-
-    # Burnt Joker: level up the hand type of discarded cards
-    for eff in pre_discard_effects:
-        if eff.level_up:
+        if result is not None and result.level_up:
             hand_levels = gs.get("hand_levels")
             if hand_levels is not None:
                 from jackdaw.engine.hand_eval import evaluate_hand
 
-                det = evaluate_hand(discarded)
-                if det.detected_hand and det.detected_hand != "NULL":
-                    hand_levels.level_up(det.detected_hand)
+                detected = evaluate_hand(discarded).detected_hand
+                if detected and detected != "NULL":
+                    hand_levels.level_up(detected)
 
-    # ------------------------------------------------------------------
-    # 4. Per-card: seal effects + joker discard context
-    # ------------------------------------------------------------------
-    dollars_earned = 0
+    # L: state_events.lua:397-422 — seal first, then every Joker, per card.
     destroyed: list = []
-
     for card in discarded:
-        # Seal: Purple Seal → create random Tarot with append '8ba'
-        # (card.lua:2254-2260; slot check gates the roll so no RNG is
-        # consumed when consumable slots are full)
-        if getattr(card, "seal", None) == "Purple":
-            queue.add(CreateCard(set="Tarot", append="8ba"))
+        if card.seal == "Purple":
+            # L: card.lua:2254-2265 — Purple Seal reserves and queues a Tarot.
+            queue.add(CreateCard(set="Tarot", append="8ba", source=card))
 
-        # Fire joker discard context per card
-        card_destroyed = False
-        for joker in jokers:
-            if getattr(joker, "debuff", False):
+        removed = False
+        for joker in list(jokers):
+            if joker.debuff:
                 continue
-            ctx = context_for(
-                gs,
-                queue=queue,
-                discard=True,
-                other_card=card,
-                full_hand=discarded,
+            result = calculate_joker(
+                joker,
+                context_for(
+                    gs,
+                    queue=queue,
+                    discard=True,
+                    other_card=card,
+                    full_hand=discarded,
+                ),
             )
-            result = calculate_joker(joker, ctx)
-            if result:
-                dollars_earned += result.dollars
-                if result.level_up:
-                    # Burnt Joker: level up the discard hand type
-                    hl = gs.get("hand_levels")
-                    if hl is not None:
-                        from jackdaw.engine.hand_eval import evaluate_hand as _eval
-
-                        det = _eval(discarded)
-                        if det.detected_hand and det.detected_hand != "NULL":
-                            hl.level_up(det.detected_hand)
-                if result.remove:
-                    card_destroyed = True
-
-        if card_destroyed:
+            if result is None:
+                continue
+            if result.dollars:
+                # L: card.lua:2802-2833,2858-2869 — Mail/Trading queue their
+                # ease directly; Faceless emits it from a nested event.
+                nested = joker.center_key == "j_faceless"
+                queue.add(
+                    EaseDollars(
+                        amount=result.dollars,
+                        order=1 if nested else 0,
+                        source=joker,
+                    )
+                )
+            removed = removed or result.remove
+        if removed:
             destroyed.append(card)
 
-    # ------------------------------------------------------------------
-    # 5. Process side-effects
-    # ------------------------------------------------------------------
-    if dollars_earned:
-        gs["dollars"] = gs.get("dollars", 0) + dollars_earned
+    # L: state_events.lua:424-428 — remove first, then one notification pass.
+    if destroyed:
+        lifecycle.destroy_playing_cards(gs, destroyed, notify=False)
+        fire_jokers(gs, queue, cards_destroyed=destroyed)
 
-    lifecycle.destroy_playing_cards(gs, destroyed)
+    # L: state_events.lua:410-422 — surviving cards are marked before their
+    # queued move to discard settles at F3.
+    destroyed_ids = {id(card) for card in destroyed}
+    surviving = [card for card in discarded if id(card) not in destroyed_ids]
+    for card in surviving:
+        card.ability["discarded"] = True
+    discarded_ids = {id(card) for card in discarded}
+    hand[:] = [card for card in hand if id(card) not in discarded_ids]
+    gs.setdefault("discard_pile", []).extend(surviving)
+
+    # L: state_events.lua:430-431 — Hook and voluntary discards both count.
+    scores = gs.setdefault("round_scores", {})
+    scores["cards_discarded"] = scores.get("cards_discarded", 0) + len(discarded)
+
+    # L: state_events.lua:432-446 — cost/counters/DRAW_TO_HAND are voluntary.
+    if not hook:
+        discard_cost = gs.get("modifiers", {}).get("discard_cost", 0)
+        if discard_cost:
+            queue.add(EaseDollars(amount=-discard_cost))
+        queue.add(ChangeRoundResource(discards=-1))
+        gs["current_round"]["discards_used"] += 1
+
+    # F3: seal/Joker/move/money/resource events settle in FIFO order. Nested
+    # Faceless money is order=1, after every first-level discard event.
     queue.apply()
 
-    # ------------------------------------------------------------------
-    # 6. Discard cost (Golden Needle challenge)
-    # ------------------------------------------------------------------
-    discard_cost = gs.get("modifiers", {}).get("discard_cost", 0)
-    if discard_cost > 0:
-        gs["dollars"] = gs.get("dollars", 0) - discard_cost
-
-    # ------------------------------------------------------------------
-    # 7. Decrement discards_left, increment discards_used
-    # ------------------------------------------------------------------
-    cr["discards_left"] -= 1
-    cr["discards_used"] += 1
-
-    # ------------------------------------------------------------------
-    # 8. Move surviving cards to discard pile
-    # ------------------------------------------------------------------
-    surviving = [c for c in discarded if c not in destroyed]
-    discard_pile: list = gs.setdefault("discard_pile", [])
-    discard_pile.extend(surviving)
-
-    # Track stat
-    gs["round_scores"] = gs.get("round_scores", {})
-    gs["round_scores"]["cards_discarded"] = gs["round_scores"].get("cards_discarded", 0) + len(
-        discarded
-    )
-
-    # ------------------------------------------------------------------
-    # 9-10. Draw replacements from deck
-    # ------------------------------------------------------------------
-    blind = gs.get("blind")
-    serpent = (
-        blind is not None
-        and getattr(blind, "name", "") == "The Serpent"
-        and not getattr(blind, "disabled", False)
-        and (cr.get("hands_played", 0) > 0 or cr.get("discards_used", 0) > 0)
-    )
-    if serpent:
-        # The Serpent: draw only 3 after first action
-        # Lua's draw_card(G.deck, G.hand) pops LAST card from deck
-        deck: list = gs.get("deck", [])
-        hand_out: list = gs.get("hand", [])
-        for _ in range(min(3, len(deck))):
-            if deck:
-                hand_out.append(deck.pop())
-        _sort_hand_desc(hand_out)
-    else:
-        _draw_hand(gs)
-
-    # ------------------------------------------------------------------
-    # 11. Re-debuff drawn cards for boss blind
-    # ------------------------------------------------------------------
-    if blind and getattr(blind, "boss", False) and not getattr(blind, "disabled", False):
-        active_rules = read.rules(gs)
-        for card in gs.get("hand", []):
-            blind.debuff_card(card, active_rules, gs)
-
-        # Boss drawn_to_hand effects on discard redraw
-        rng = gs.get("rng")
-        dth = blind.drawn_to_hand(
-            hand_cards=gs.get("hand", []),
-            joker_cards=jokers,
-            rng=rng,
-            gs=gs,
-        )
-        if dth.get("forced_card_index") is not None:
-            hand = gs.get("hand", [])
-            idx = dth["forced_card_index"]
-            if 0 <= idx < len(hand):
-                hand[idx].ability["forced_selection"] = True
-
-    _end_round_if_hand_empty(gs)
-
-    return gs
+    if not hook:
+        # L: game.lua:3208-3244 — only voluntary discard enters DRAW_TO_HAND.
+        _draw_from_deck_to_hand(gs)
 
 
 def _handle_cash_out(gs: dict[str, Any]) -> dict[str, Any]:
@@ -1387,41 +1269,118 @@ def _sort_hand_desc(hand: list) -> None:
     hand.sort(key=lambda c: c.get_nominal() if hasattr(c, "get_nominal") else -1e9, reverse=True)
 
 
-def _draw_hand(gs: dict[str, Any], *, count: int | None = None) -> None:
-    """Draw cards from deck to fill the hand up to hand_size.
-
-    Cards are drawn from the END of the deck list (top of the visual
-    stack), matching Lua's ``draw_card(G.deck, G.hand, ...)`` which
-    pops from the last position.
-
-    After drawing, the hand is sorted descending by nominal value
-    (matching Lua's ``draw_from_deck_to_hand`` which passes ``sort=true``
-    to ``draw_card``, triggering ``CardArea:sort()`` with default 'desc').
-    """
+def _draw_card_to_hand(gs: dict[str, Any]) -> Any | None:
+    """Resolve one queued ``draw_card(G.deck, G.hand, ..., sort=true)``."""
     deck: list = gs.get("deck", [])
+    if not deck:
+        return None
     hand: list = gs.setdefault("hand", [])
-    hand_size: int = gs.get("hand_size", 8)
-    to_draw = min(len(deck), hand_size - len(hand))
-    if count is not None:
-        to_draw = min(to_draw, count)
-    for _ in range(to_draw):
-        if deck:
-            hand.append(deck.pop())
-    # Sort hand descending by nominal (matches Lua CardArea:sort 'desc')
+    card = deck.pop()
+    blind = gs.get("blind")
+    stay_flipped = False
+    if blind is not None:
+        cr = gs.get("current_round", {})
+        # L: common_events.lua:386-423; blind.lua:605-622.
+        stay_flipped = bool(
+            blind.stay_flipped(
+                card,
+                read.rules(gs),
+                rng=gs.get("rng"),
+                probabilities_normal=gs.get("probabilities", {}).get("normal", 1),
+                hands_played=cr.get("hands_played", 0),
+                discards_used=cr.get("discards_used", 0),
+            )
+        )
+
+    # L: common_events.lua:397-400 — the flipped-cards challenge is a second
+    # independent reason for a card to stay face-down.
+    flipped_cards = gs.get("modifiers", {}).get("flipped_cards")
+    rng = gs.get("rng")
+    if flipped_cards and rng is not None:
+        if rng.random("flipped_card") < 1 / flipped_cards:
+            stay_flipped = True
+
+    lifecycle.emplace(gs, card, "hand")
+    if stay_flipped:
+        card.facing = "back"
+        # L: cardarea.lua:39-43 — all stay-flipped hand cards use this marker,
+        # despite its Wheel-specific name.
+        card.ability["wheel_flipped"] = True
+    else:
+        card.facing = "front"
+        card.ability.pop("wheel_flipped", None)
+    if blind is not None:
+        blind.debuff_card(card, read.rules(gs), gs)
     _sort_hand_desc(hand)
+    return card
 
 
-def _end_round_if_hand_empty(gs: dict[str, Any]) -> None:
-    """End a lost round when an action exhausts the hand and draw pile.
+def _draw_from_deck_to_hand(gs: dict[str, Any]) -> bool:
+    """One synchronous DRAW_TO_HAND controller for round/play/discard draws."""
+    hand: list = gs.setdefault("hand", [])
+    hand_size = gs.get("hand_size", 8)
 
-    Leaving ``SELECTING_HAND`` with no cards exposes no legal play or discard
-    action, so an auto-resolved hand policy would be asked to decode an empty
-    hand.  The blind cannot be cleared from that state; mark it as a terminal
-    loss instead.
-    """
-    if not gs.get("hand"):
+    # L: state_events.lua:355-360 — this is Lua's sole empty-draw loss guard.
+    if hand_size <= 0 and not hand:
         gs["phase"] = GamePhase.GAME_OVER
         gs["won"] = False
+        return False
+
+    deck: list = gs.get("deck", [])
+    to_draw = max(0, min(len(deck), hand_size - len(hand)))
+    blind = gs.get("blind")
+    cr = gs.get("current_round", {})
+    # L: state_events.lua:362-368 — after either prior action, Serpent draws
+    # exactly up to three rather than filling the available hand space.
+    if (
+        blind is not None
+        and blind.name == "The Serpent"
+        and not blind.disabled
+        and (cr.get("hands_played", 0) > 0 or cr.get("discards_used", 0) > 0)
+    ):
+        to_draw = min(len(deck), 3)
+
+    # L: game.lua:3219-3231 — dispatch after draw events have been queued but
+    # before they land. In this synchronous port, handler emission happens
+    # now; its queued effects remain behind the staged card draws.
+    first_hand_queue = EffectQueue(gs)
+    if (
+        cr.get("hands_played", 0) == 0
+        and cr.get("discards_used", 0) == 0
+        and gs.get("facing_blind")
+    ):
+        from jackdaw.engine.jokers import fire_jokers
+
+        fire_jokers(gs, first_hand_queue, first_hand_drawn=True)
+
+    # L: state_events.lua:369-376; common_events.lua:386-423 — F4 resolves
+    # each draw FIFO. Certificate's already-emitted child follows these draws.
+    for _ in range(to_draw):
+        _draw_card_to_hand(gs)
+    first_hand_queue.apply()
+
+    # L: game.lua:3233-3241; blind.lua:572-603 — selecting-hand and the blind
+    # callback follow all draw/Certificate events. drawn_to_hand owns prepped.
+    gs["phase"] = GamePhase.SELECTING_HAND
+    if blind is not None:
+        dth = blind.drawn_to_hand(
+            hand_cards=hand,
+            joker_cards=gs.get("jokers"),
+            rng=gs.get("rng"),
+            gs=gs,
+        )
+        forced = dth.get("forced_card_index")
+        if forced is not None and 0 <= forced < len(hand):
+            hand[forced].ability["forced_selection"] = True
+
+    # L: game.lua:3056-3065 — SELECTING_HAND immediately ends a round when
+    # hand, deck, and play are all empty. At this stable port point play has
+    # already settled to discard, so an uncleared blind is a terminal loss.
+    if not hand and not deck and not gs.get("played_cards_area"):
+        gs["phase"] = GamePhase.GAME_OVER
+        gs["won"] = False
+        return False
+    return True
 
 
 def _round_won(gs: dict[str, Any]) -> None:
@@ -1670,13 +1629,14 @@ def _advance_ante(gs: dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _fire_setting_blind(gs: dict[str, Any]) -> None:
-    """Fire and apply the live-state ``setting_blind`` joker pass."""
+def _fire_setting_blind(gs: dict[str, Any], *, queue: EffectQueue | None = None) -> None:
+    """Fire the live-state ``setting_blind`` Joker pass."""
     from jackdaw.engine.jokers import fire_jokers
 
-    queue = EffectQueue(gs)
-    fire_jokers(gs, queue, setting_blind=True)
-    queue.apply()
+    target_queue = queue or EffectQueue(gs)
+    fire_jokers(gs, target_queue, setting_blind=True)
+    if queue is None:
+        target_queue.apply()
 
 
 # ---------------------------------------------------------------------------
@@ -1684,42 +1644,48 @@ def _fire_setting_blind(gs: dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _apply_boss_blind_effects(gs: dict[str, Any], blind: Any) -> None:
+def _apply_boss_blind_effects(
+    gs: dict[str, Any],
+    blind: Any,
+    *,
+    queue: EffectQueue | None = None,
+) -> None:
     """Apply boss blind effects at set-time (blind.lua:157-209).
 
     These are one-time mutations that happen when the blind is set,
     before the round starts.
     """
+    target_queue = queue or EffectQueue(gs)
     cr = gs.get("current_round", {})
     name = getattr(blind, "name", "")
 
-    # The Water: remove all discards
+    # L: blind.lua:176-184 — Water and Needle snapshot immediately and queue
+    # their resource changes.
     if name == "The Water":
         current_discards = cr.get("discards_left", 0)
         blind.discards_sub = current_discards
-        cr["discards_left"] = 0
+        target_queue.add(ChangeRoundResource(discards=-current_discards))
 
-    # The Needle: reduce to 1 hand
     elif name == "The Needle":
         rr = gs.get("round_resets", {})
         current_hands = rr.get("hands", 4)
         blind.hands_sub = current_hands - 1
-        cr["hands_left"] = max(1, cr.get("hands_left", current_hands) - blind.hands_sub)
+        target_queue.add(ChangeRoundResource(hands=-blind.hands_sub))
 
-    # The Manacle: -1 hand size
+    # L: blind.lua:186-188 — change_size itself is queued.
     elif name == "The Manacle":
-        gs["hand_size"] = gs.get("hand_size", 8) - 1
+        target_queue.add(ChangeHandSize(delta=-1))
 
-    # Amber Acorn: shuffle jokers (flip + randomize order)
+    # L: blind.lua:190-205 — flip now; the parent event later emits three
+    # aajk shuffles. order=1 keeps them behind first-level setting effects.
     elif name == "Amber Acorn":
         jokers: list = gs.get("jokers", [])
         if jokers:
             for j in jokers:
                 j.facing = "back"
-            rng = gs.get("rng")
-            if rng and len(jokers) > 1:
-                seed_val = rng.seed("aajk")
-                rng.shuffle(jokers, seed_val)
+            if len(jokers) > 1:
+                for _ in range(3):
+                    target_queue.add(ShuffleArea(area="jokers", seed_key="aajk", order=1))
 
     # The Eye's history lives in Blind.hands_used, reset on Blind creation.
 
@@ -1727,9 +1693,8 @@ def _apply_boss_blind_effects(gs: dict[str, Any], blind: Any) -> None:
     elif name == "The Mouth":
         blind.only_hand = None
 
-    # The House / The Mark: flip cards face-down (blind.lua:200-203)
-    # Cards are flipped at draw_to_hand time, not set_blind time.
-    # We handle this in _draw_hand context by checking blind.name.
+    if queue is None:
+        target_queue.apply()
 
 
 # ---------------------------------------------------------------------------
@@ -1993,22 +1958,27 @@ def _press_play(
     name = getattr(blind, "name", "")
 
     if name == "The Hook":
-        # L: blind.lua:466-487 — P5-3 replaces this direct discard with the
-        # shared discard pipeline; the call remains at the Lua press point.
-        # Discard 2 random cards from hand
+        # L: blind.lua:466-487 — copy the hand, take two hook-stream samples
+        # in selection order, then route the highlighted cards through the
+        # same discard function with hook=true.
         hand: list = gs.get("hand", [])
-        discard_pile: list = gs.setdefault("discard_pile", [])
+        candidates = list(hand)
+        selected: list = []
         for _ in range(min(2, len(hand))):
-            if hand and rng:
+            if candidates and rng:
                 seed_val = rng.seed("hook")
-                target, _ = rng.element(hand, seed_val)
-                hand.remove(target)
-                discard_pile.append(target)
+                target, _ = rng.element(candidates, seed_val)
+                selected.append(target)
+                candidates.remove(target)
+        if selected:
+            discard_cards_from_highlighted(gs, selected, hook=True)
+        blind.triggered = True
 
     elif name == "The Tooth":
         # L: blind.lua:497-504 — ordinary (unbuffered) queued ease at F1.
         for card in played:
             queue.add(EaseDollars(amount=-1, source=card))
+        blind.triggered = True
 
     elif name == "The Fish":
         # L: blind.lua:494-496.

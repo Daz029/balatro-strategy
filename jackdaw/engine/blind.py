@@ -50,7 +50,7 @@ class Blind:
     triggered: bool = False
     """Whether the boss effect has activated this round."""
 
-    prepped: bool = False
+    prepped: bool | None = False
     """Boss preparation flag (blind.lua:94, 491, 495; cleared at 177, 602)."""
 
     # Boss-specific state
@@ -105,6 +105,9 @@ class Blind:
             mult=proto.mult,
             dollars=dollars,
             boss=proto.boss is not None,
+            # L: blind.lua:78-95,176-177 — set_blind preps every newly set
+            # blind, then Fish clears the flag until press_play.
+            prepped=None if proto.name == "The Fish" else True,
             debuff_config=debuff,
         )
 
@@ -388,34 +391,34 @@ class Blind:
         """
         result: dict[str, Any] = {}
 
-        if self.disabled:
-            return result
+        # L: blind.lua:572-600 — disabled suppresses the effects, and Heart
+        # only rolls after press_play has prepared it.
+        if not self.disabled:
+            if self.name == "Cerulean Bell" and rng and hand_cards:
+                any_forced = any(c.ability.get("forced_selection") for c in hand_cards)
+                if not any_forced:
+                    _, idx = rng.element(
+                        {i: c for i, c in enumerate(hand_cards)},
+                        rng.seed("cerulean_bell"),
+                    )
+                    result["forced_card_index"] = idx
 
-        if self.name == "Cerulean Bell" and rng and hand_cards:
-            # Check if any card already has forced_selection
-            any_forced = any(c.ability.get("forced_selection") for c in hand_cards)
-            if not any_forced:
-                _, idx = rng.element(
-                    {i: c for i, c in enumerate(hand_cards)},
-                    rng.seed("cerulean_bell"),
-                )
-                result["forced_card_index"] = idx
+            if self.name == "Crimson Heart" and self.prepped and rng and joker_cards:
+                eligible = []
+                for i, j in enumerate(joker_cards):
+                    if not j.debuff or len(joker_cards) < 2:
+                        eligible.append(i)
+                    j.set_debuff(gs, False)
+                if eligible:
+                    _, idx = rng.element(
+                        {i: i for i in eligible},
+                        rng.seed("crimson_heart"),
+                    )
+                    joker_cards[idx].set_debuff(gs, True)
+                    result["debuffed_joker_index"] = idx
 
-        if self.name == "Crimson Heart" and rng and joker_cards:
-            # Clear all joker debuffs, then debuff one random
-            eligible = []
-            for i, j in enumerate(joker_cards):
-                if not j.debuff or len(joker_cards) < 2:
-                    eligible.append(i)
-                j.set_debuff(gs, False)
-            if eligible:
-                _, idx = rng.element(
-                    {i: i for i in eligible},
-                    rng.seed("crimson_heart"),
-                )
-                joker_cards[idx].set_debuff(gs, True)
-                result["debuffed_joker_index"] = idx
-
+        # L: blind.lua:601-603 — this clear is outside the disabled guard.
+        self.prepped = None
         return result
 
     def stay_flipped(
@@ -448,10 +451,8 @@ class Blind:
             if card.is_face(rules, from_boss=True):
                 return True
 
-        if self.name == "The Fish":
-            # Fish flips cards after each play (prepped flag)
-            # Handled via prepped state set in press_play
-            pass
+        if self.name == "The Fish" and self.prepped:
+            return True
 
         return False
 
@@ -496,9 +497,9 @@ class Blind:
 
         if self.name == "The Manacle":
             gs["hand_size"] = gs.get("hand_size", 0) + 1
-            from jackdaw.engine.game import _draw_hand
+            from jackdaw.engine.game import _draw_card_to_hand
 
-            _draw_hand(gs, count=1)
+            _draw_card_to_hand(gs)
 
         # Re-debuff all cards (expired perishables remain debuffed in setter).
         rules = read.rules(gs)

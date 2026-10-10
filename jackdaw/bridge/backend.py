@@ -259,9 +259,13 @@ class SimBackend:
             # If hand_size increased mid-round, draw cards to fill the new
             # size — matches balatrobot which immediately fills on add.
             if self._gs.get("hand_size", 8) > old_hand_size and phase == GamePhase.SELECTING_HAND:
-                from jackdaw.engine.game import _draw_hand
+                from jackdaw.engine.game import _draw_card_to_hand
 
-                _draw_hand(self._gs)
+                while (
+                    self._gs.get("deck")
+                    and len(self._gs.get("hand", [])) < self._gs.get("hand_size", 8)
+                ):
+                    _draw_card_to_hand(self._gs)
         elif key.startswith("c_"):
             card = create_consumable(key, game_state=self._gs)
             from jackdaw.engine.lifecycle import emplace

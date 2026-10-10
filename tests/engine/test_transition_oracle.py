@@ -261,7 +261,6 @@ def test_c05_bull_reads_pending_gold_seal_money() -> None:
     assert_traces_match(lua_trace, run_engine(scenario), ("chips",))
 
 
-@pytest.mark.xfail(strict=True, reason="C09: House and Mark call stay_flipped on every draw")
 @pytest.mark.parametrize("blind_key", ["bl_house", "bl_mark"])
 def test_c09_face_down_boss_draw(blind_key: str) -> None:
     scenario = Scenario(
@@ -336,7 +335,6 @@ def test_d22_losing_round_charges_rental_immediately() -> None:
     assert_matches(scenario, ("dollars",))
 
 
-@pytest.mark.xfail(strict=True, reason="D28: Crimson Heart rerolls only after a prepared play draw")
 def test_d28_crimson_heart_does_not_reroll_on_discard() -> None:
     scenario = Scenario(
         blind=BlindSpec("bl_final_heart", {"prepped": False}),
@@ -375,10 +373,6 @@ def test_d30_pillar_marker_resets_at_new_ante() -> None:
     assert_matches(scenario, ("areas.deck",))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="D31: Hook uses the discard pipeline, including Purple seals",
-)
 def test_d31_hook_forced_discard_fires_purple_seals() -> None:
     scenario = Scenario(
         blind=BlindSpec("bl_hook"),
@@ -397,7 +391,6 @@ def test_d31_hook_forced_discard_fires_purple_seals() -> None:
     )
 
 
-@pytest.mark.xfail(strict=True, reason="D32: Amber Acorn shuffles three times on the aajk stream")
 def test_d32_amber_acorn_shuffle_count() -> None:
     scenario = Scenario(
         blind=BlindSpec("bl_final_acorn"),
@@ -432,10 +425,6 @@ def test_d32_boss_defeat_restores_cards_and_jokers() -> None:
     assert_traces_match(lua_trace, run_engine(scenario), ("areas.jokers",))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="NEW-P5-O2-01: discard does not preserve gameplay ability.discarded marker",
-)
 def test_new_p5_o2_discard_marker_is_preserved() -> None:
     scenario = Scenario(
         areas={"hand": [card("discarded"), card("held", "S_3")]},

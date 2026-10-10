@@ -149,6 +149,7 @@ class TestPlayHand:
         assert gs["phase"] == GamePhase.GAME_OVER
 
     def test_game_over_when_play_exhausts_hand_and_deck(self):
+        # L: game.lua:3056-3065 ends the round when hand/deck/play are empty.
         gs = self._setup_playing()
         gs["hand"] = [gs["hand"][0]]
         gs["deck"] = []
@@ -587,19 +588,24 @@ class TestCardFlipping:
         assert c.facing == "back"
 
     def test_the_fish_flips_cards(self):
-        """The Fish boss flips hand cards after play."""
+        """The Fish flips only cards that pass through draw_card after play."""
         gs = _mech_init("FISH_FLIP")
         step(gs, SkipBlind())
         step(gs, SkipBlind())
         gs["round_resets"]["blind_choices"]["Boss"] = "bl_fish"
         step(gs, SelectBlind(allow_forced_boss=True))
+        held = list(gs["hand"][5:])
+        deck_ids = {id(card) for card in gs["deck"]}
         # Play a hand
         gs["blind"].chips = 999999
         step(gs, PlayHand(card_indices=(0, 1, 2, 3, 4)))
-        # After play, remaining hand cards should be flipped
+        # L: blind.lua:618-620; common_events.lua:386-423. Existing held
+        # cards never pass through stay_flipped and remain face-up.
         if gs["phase"] == GamePhase.SELECTING_HAND:
-            for card in gs["hand"]:
-                assert card.facing == "back", f"{card.card_key} not flipped"
+            assert all(card.facing == "front" for card in held)
+            drawn = [card for card in gs["hand"] if id(card) in deck_ids]
+            assert drawn
+            assert all(card.facing == "back" for card in drawn)
 
 
 class TestBossPressPlay:

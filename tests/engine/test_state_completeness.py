@@ -55,9 +55,10 @@ def test_old_pickled_card_uses_class_defaults_for_new_fields() -> None:
         assert getattr(restored, field_name) is False
 
 
-def test_blind_prepped_defaults_false_and_old_pickle_falls_back() -> None:
+def test_blind_create_preps_new_blind_and_old_pickle_falls_back() -> None:
     blind = Blind.create("bl_small", ante=1)
-    assert blind.prepped is False
+    # L: blind.lua:78-95 — set_blind starts prepped; drawn_to_hand clears it.
+    assert blind.prepped is True
 
     del blind.__dict__["prepped"]
     restored = pickle.loads(pickle.dumps(blind))

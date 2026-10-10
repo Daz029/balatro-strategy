@@ -123,6 +123,7 @@ class JokerContext:
     end_of_round: bool = False
     discard: bool = False
     pre_discard: bool = False
+    hook: bool = False
     destroying_card: Card | None = None
     cards_destroyed: list[Card] | None = None
     buying_card: bool = False
@@ -2548,12 +2549,11 @@ def _mr_bones(card: Card, ctx: JokerContext) -> JokerResult | None:
 def _burnt(card: Card, ctx: JokerContext) -> JokerResult | None:
     """Burnt Joker: level up discard hand on first discard of round.
 
-    Source: card.lua:2749. Fires in discard context when discards_used <= 0.
+    Source: card.lua:2748-2755. Fires before a voluntary first discard.
     """
-    if ctx.discard and not ctx.blueprint:
-        if ctx.game.discards_used <= 0 and ctx.other_card is not None:
-            if ctx.full_hand and ctx.other_card is ctx.full_hand[-1]:
-                return JokerResult(level_up=True)
+    if ctx.pre_discard and not ctx.blueprint and not ctx.hook:
+        if ctx.game.discards_used <= 0 and ctx.full_hand:
+            return JokerResult(level_up=True)
     return None
 
 

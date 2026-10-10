@@ -118,6 +118,10 @@ def _effect_case(
         before = gs["hand_size"]
         effect = effects.ChangeHandSize(delta=-1)
         return gs, effect, lambda: _assert_equal(gs["hand_size"], before - 1)
+    if effect_type is effects.ShuffleArea:
+        before = list(gs["deck"])
+        effect = effects.ShuffleArea(area="deck", seed_key="effect_shuffle")
+        return gs, effect, lambda: _assert_not_equal(gs["deck"], before)
     if effect_type is effects.DisableBlind:
         blind = Blind.create("bl_hook", ante=1)
         gs["blind"] = blind
@@ -130,6 +134,10 @@ def _effect_case(
 
 def _assert_equal(actual: Any, expected: Any) -> None:
     assert actual == expected
+
+
+def _assert_not_equal(actual: Any, expected: Any) -> None:
+    assert actual != expected
 
 
 def _assert_created(gs: dict[str, Any], area: str, before: int, key: str) -> None:

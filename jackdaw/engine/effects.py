@@ -550,6 +550,19 @@ class ChangeHandSize(Effect):
 
 
 @dataclass(kw_only=True)
+class ShuffleArea(Effect):
+    """Shuffle one card area with a fresh advance of a named Lua stream."""
+
+    area: str
+    seed_key: str
+
+    def apply(self, gs: dict[str, Any]) -> None:
+        rng = gs.get("rng")
+        if rng is not None:
+            rng.shuffle(gs.get(self.area, []), rng.seed(self.seed_key))
+
+
+@dataclass(kw_only=True)
 class DisableBlind(Effect):
     """``G.GAME.blind:disable()`` (Chicot, Luchador)."""
 
@@ -594,6 +607,7 @@ EFFECT_TYPES: tuple[type[Effect], ...] = (
     LevelUpHand,
     ChangeRoundResource,
     ChangeHandSize,
+    ShuffleArea,
     DisableBlind,
     SetPoolFlag,
 )
