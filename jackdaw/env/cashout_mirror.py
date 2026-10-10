@@ -33,7 +33,7 @@ def dollars_after_cashout(gs: dict[str, Any]) -> int:
     """Return the dollar total the engine would produce after cash-out.
 
     ``gs`` must be at ``GamePhase.ROUND_EVAL`` — the state right after a
-    blind is cleared and ``_round_won`` has computed ``gs["round_earnings"]``,
+    blind is cleared and ``end_round`` has computed ``gs["round_earnings"]``,
     but before ``CashOut`` has been applied. This is exactly the state a
     winning ``HandPlayGymEnv`` episode terminates on.
 

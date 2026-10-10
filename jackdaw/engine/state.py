@@ -36,7 +36,7 @@ Lifecycle legend for the **set by** column:
     seed              str                Original seed string.  Set by run_init.
     seeded            bool               Whether the run is seeded.  Set by run_init.
     won               bool               True when player beats win_ante boss.
-                                         Set by init (False), game (_round_won).
+                                         Set by init (False), game (end_round).
     round             int                Rounds completed (incremented each blind defeat).
                                          Set by init (0), game (+1 per win).
     stake             int                Stake level 1–8.  Set by run_init.
@@ -250,7 +250,7 @@ One-shot bonuses consumed at the start of the next round.
     last_score_result  ScoreResult       Full result from the most recent score_hand call.
                                          Set by game (_handle_play_hand).
     round_earnings     RoundEarnings     Earnings breakdown for cash-out screen.
-                                         Set by game (_round_won).
+                                         Set by game (end_round).
 
 
 .. rubric:: Pool / shop rates
@@ -315,7 +315,7 @@ encoder read them as constant 0 until Phase 2.
     hands_played       int               Total hands played across all rounds.
                                          Set by init (0), game (+1 per play).
     unused_discards    int               Cumulative unused discards across all rounds
-                                         (Garbage Tag).  Set by game (_round_won +=).
+                                         (Garbage Tag).  Set by game (end_round +=).
     actions_taken      int               Total step() calls.  Set by runner.
     previous_round     dict              Snapshot: {'dollars': int} from end of last round.
 
@@ -531,7 +531,7 @@ STATE_KEYS: dict[str, str] = {
     "seeded": "run is seeded; run_init",
     "stake": "stake level; run_init",
     "win_ante": "target ante; init",
-    "won": "run won; game (_round_won)",
+    "won": "run won; game (end_round)",
     "round": "rounds completed; game",
     "selected_back_key": "deck back key; run_init",
     "challenge": "challenge id; run_init (challenges raise, D-scope)",

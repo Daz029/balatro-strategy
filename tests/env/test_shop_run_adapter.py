@@ -176,6 +176,12 @@ class TestFailLoud:
         gs["deck"] = []
         gs["current_round"]["hands_left"] = 2
         gs["current_round"]["discards_left"] = 1
+        # A real SELECTING_HAND always has a set blind. Phase 5 routes the
+        # exhausted-area loss through end_round, which (like Lua,
+        # state_events.lua:96) decides the loss from chips vs the blind
+        # target, so the forged state needs a real target, not the empty
+        # between-rounds blind (chips=0, which 0 accumulated chips "beats").
+        gs["blind"].chips = 300
 
         calls = {"n": 0}
 

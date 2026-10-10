@@ -673,7 +673,7 @@ class HandPlayGymEnv(gymnasium.Env):
         dollars_after: int | None = None
         if won and self._v_curve is not None:
             dollars_after = dollars_after_cashout(gs)
-            # Read the terminal ante after _round_won bookkeeping: a boss
+            # Read the terminal ante after end_round bookkeeping: a boss
             # clear has already advanced it to the shop-state convention used
             # when the V_curve artifact was extracted.
             ante = gs["round_resets"]["ante"]

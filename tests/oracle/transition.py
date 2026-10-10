@@ -292,7 +292,14 @@ def _engine_card(spec: CardSpec, gs: dict[str, Any], playing_index: int | None) 
             )
         else:
             card = create_consumable(key, hands_played=gs.get("hands_played", 0), game_state=gs)
-    _merge(card.ability, spec.ability)
+    # Lua keeps stickers in card.ability (card.lua:1590-1622); the engine
+    # models them as Card attributes, so route them there instead of leaving
+    # inert ability keys behind.
+    ability = dict(spec.ability)
+    for sticker in ("rental", "perishable", "eternal"):
+        if sticker in ability:
+            setattr(card, sticker, bool(ability.pop(sticker)))
+    _merge(card.ability, ability)
     card.debuff = spec.debuff
     card.facing = spec.facing
     card._oracle_id = spec.id
@@ -507,9 +514,9 @@ def run_engine(scenario: Scenario, *, probe: EngineProbe | None = None) -> Oracl
     elif action.type == "end_round":
         # Round completion has no public player Action: it is an automatic
         # consequence of play.  Use the engine's canonical transition body.
-        from jackdaw.engine.game import _round_won  # noqa: PLC0415
+        from jackdaw.engine.game import end_round  # noqa: PLC0415
 
-        _round_won(gs)
+        end_round(gs)
     else:  # pragma: no cover - ActionName makes this unreachable
         raise ValueError(action.type)
     if probe is not None:

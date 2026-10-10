@@ -13,7 +13,7 @@ import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from jackdaw.engine import lifecycle, read
+from jackdaw.engine import lifecycle
 from jackdaw.engine.effects import (
     AddChips,
     DestroyCard,
@@ -176,9 +176,6 @@ class ScoreResult:
 
     cards_destroyed: list[Card] = field(default_factory=list)
     """Playing cards destroyed during Phase 11 (Glass shatter, etc.)."""
-
-    saved: bool = False
-    """True if Mr. Bones (or similar) prevented a game over."""
 
     @property
     def jokers_removed(self) -> list[Card]:
@@ -912,18 +909,6 @@ def score_hand(
         after_ctx = JokerContext(after=True, **_shared)
         calculate_joker(joker, after_ctx)
 
-    # Mr. Bones save check: if score < blind target and last hand
-    saved = False
-    if blind_chips > 0 and total < blind_chips and read.hands_left(gs) == 0:
-        for joker in jokers:
-            if joker.debuff:
-                continue
-            bones_ctx = JokerContext(game_over=True, **_shared)
-            bones_result = calculate_joker(joker, bones_ctx)
-            if bones_result and bones_result.saved:
-                saved = True
-                break
-
     # L: state_events.lua:1077-1084 — queued permanent-debuff modifier.
     # Challenge mode: debuff all played cards after scoring.
     # Implemented as a flag check — no joker interaction.
@@ -939,5 +924,4 @@ def score_hand(
         effects=queue.effects,
         effect_queue=queue,
         cards_destroyed=cards_destroyed,
-        saved=saved,
     )

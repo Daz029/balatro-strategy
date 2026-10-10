@@ -18,6 +18,11 @@ analysis and potential overhaul.
   generation + harvesting until the step-order phase lands, then re-harvest. Target: setters,
   getters, a clean scoring pipeline, correct buffers, tests on the OOP. Class design:
   `docs/engine_class_design_2026-10-06.md`.
+  STATUS 2026-10-10: Phases 1-5 DONE on branch `engine-phase1-state` (Phase 5 exit record in
+  the plan; timing spec `docs/engine_s4a_event_timing.md`; Lua transition oracle
+  `tests/oracle/transition.py`, 29/29 green). Label/harvest freeze lifts. OPEN user decision:
+  NEW-P5-1-05 (Lua scores played cards in hand-position order; engine keeps selection order).
+  Next: Phase 6 (legality).
   PHASE 1 (state completeness) EXIT MET 2026-10-06, branch `engine-phase1-state`: Lua state
   map `jackdaw/engine/state_map.py` + `tests/engine/test_state_map.py` (zero unmapped), aliases
   collapsed (C04/C07/C14-Green/D26/D04 fixed early), `migrate_state` on restore, new finding:

@@ -261,7 +261,7 @@ class TestC10bD29NewStoredFieldWriters:
 
         assert gs["current_round"]["most_played_poker_hand"] == "Straight"
 
-    def test_boss_tie_uses_stronger_lower_order_hand(self):
+    def test_boss_tie_preserves_lua_stale_order_bug(self):
         gs = initialize_run("b_red", 1, "BOSS_HAND_TIE")
         gs["blind_on_deck"] = "Boss"
         gs["hand_levels"].get_state(HandType.PAIR).played = 5
@@ -271,7 +271,9 @@ class TestC10bD29NewStoredFieldWriters:
 
         step(gs, PlayHand(card_indices=(0,)))
 
-        assert gs["current_round"]["most_played_poker_hand"] == "Two Pair"
+        # L: state_events.lua:129-137 never updates `_order`, so the later
+        # tied Pair overwrites Two Pair even though its display order is worse.
+        assert gs["current_round"]["most_played_poker_hand"] == "Pair"
 
 
 class TestStateAliasMigration:

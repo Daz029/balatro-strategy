@@ -684,7 +684,9 @@ class TestGrosMichel:
         result = calculate_joker(j, ctx)
         assert result is not None
         assert result.remove is False
-        assert result.saved is True
+        # Lua returns only the "Safe!" message (card.lua:3043); a `saved`
+        # flag here would rescue a LOST run in end_round (Phase 5, C11).
+        assert result.saved is False
 
     def test_pipeline_gives_mult(self):
         played = [_card("Hearts", "Ace"), _card("Spades", "Ace")]
@@ -721,7 +723,8 @@ class TestCavendish:
         )
         result = calculate_joker(j, ctx)
         assert result is not None
-        assert result.saved is True
+        # card.lua:3043 — "Safe!" message only, never Mr. Bones' `saved`.
+        assert result.saved is False
         assert result.remove is False
 
     def test_end_of_round_high_probability_destroys(self):

@@ -1005,6 +1005,64 @@ table. Remove `individual_hand_end`.
 *Fixes C01, C03, C05, C09, C10 (retriggers), C11, D12, D14, D18, D22, D28,
 D29, D30, D31, D32. Oracle observation-point tests go green.*
 
+**STATUS 2026-10-10: EXIT MET** (branch `engine-phase1-state`: P5-1
+`db3dbb7`, P5-O/O2 transition oracle, P5-2 `8afb782`, P5-3 `a2722a5`, P5-4
+after it). P5-1, P5-O, P5-O2, P5-2 and P5-3 ran through `codex exec` from
+`docs/implementation-tickets/engine-p5-*.md` and were reviewed here. P5-4 was
+half-built by codex before its usage limit and finished by hand. Per-ticket
+reports are `docs/implementation-tickets/engine-p5-*-REPORT.md`.
+
+- **Instrument (owed from Phase 0)**:
+  - The S4-a sweep, `docs/engine_s4a_event_timing.md`, has: the real Lua
+    event model; money and counter read/write tables with the view each
+    reads; ordered step lists per transition; flush points F1-F8; and ten
+    NEW findings.
+  - The headless transition oracle (`tests/oracle/transition.py`,
+    `scripts/lua_transition_oracle/`) runs the real `Card`, `Blind`,
+    `state_events`, `EventManager` and `evaluate_round` on `lupa.lua51`, with
+    a fake clock and a single `_COSMETIC` exclusion table. It compares Lua
+    and engine on the same scenario.
+  - Oracle source path: `BALATRO_SOURCE`, one resolution rule shared by
+    the oracles and tests.
+- **Exit criterion**: every one of the 17 strict oracle xfails (C01 C03 C05
+  C09x2 C10 C11 D12 D18 D22 D28 D29 D30 D31 D32x2 NEW-P5-O2-01) now passes;
+  29/29 oracle tests green. Each finding also has step-level tests in
+  `test_play_sequencing.py`, `test_draw_discard_sequencing.py` and
+  `test_end_round_sequencing.py`, checked to fail on each ticket's parent.
+- **Money ledger**: lives on the pass's `EffectQueue`, following the Phase 4
+  slot-buffer precedent (`gs["dollar_buffer"]` is 0 at every stable point,
+  pinned over the rollout). The queue holds `pending_dollars` (Lua's
+  `dollar_buffer`) and `instant_dollars` (The Ox). Bull and Bootstraps read
+  `with_buffer`, Vagabond reads `committed`. Only Lua's explicit buffer
+  producers reserve.
+- **Ports**:
+  - Play: F1 -> score -> F2. `individual_hand_end` is deleted.
+  - One shared draw and one discard; The Hook calls the discard with
+    `hook=True`.
+  - `new_round` / `set_blind`: Acorn's three shuffles; jokers re-debuffed.
+  - `end_round` (F6) covers wins, saves and losses. `evaluate_round` (F7)
+    runs a queued `Blind.defeat` after the rows. `cash_out` (F8) does the
+    resets, commits the bottom row, then post-Boss tags and the next boss.
+- **NEW findings**:
+  - Fixed: 01, 02, 03, 04, 07, 08, 09, 10, O2-01.
+  - 03 replicates Lua's stale `_order` tie code. Lua's actual winner on a
+    tie depends on `pairs` hash order, which is not reproducible, so the
+    engine iterates `HAND_BASE` order and documents that.
+  - 06 (synchronous HAND_PLAYED) is intentionally not modelled.
+  - **05 (Lua scores played cards in hand-position order; the engine keeps
+    selection order for `best_play_order`) is OPEN, awaiting a user
+    decision**, marked `# NEW-P5-1-05` at the site.
+- **Divergence kept on purpose**: `gs["won"]` is False on any GAME_OVER. Lua
+  sets `G.GAME.won` before its game-over branch even when the win-ante boss
+  is lost; our flag means "run won".
+- **Performance**: P5-2 measured stage2 -3.2% and stage3 -3.0% vs `2bdbcc2`
+  (20 seeds per stage). P5-3 and P5-4 do not touch the solver path beyond
+  deletions and one boolean dispatch gate.
+- **Data impact (Part 6)**: label semantics changed throughout the play
+  path; economy totals changed; the SHOP-phase `hands_left` /
+  `discards_left` now show next-round values (shop obs). The label and
+  harvest freeze lifts: regen and re-harvest against this engine.
+
 ### Phase 6. Legality (S5)
 
 `legality.py`; full vanilla action set in the engine (sell anywhere legal, boss

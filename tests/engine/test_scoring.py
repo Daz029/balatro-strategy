@@ -428,8 +428,11 @@ class TestAfterPhase:
         )
         assert ice in r.jokers_removed
 
-    def test_mr_bones_saves_losing_hand(self):
-        """Mr. Bones saves when score < blind_chips and hands_left == 0."""
+    def test_scoring_never_consumes_mr_bones(self):
+        """C11: Mr. Bones is an end_round decision on ACCUMULATED chips
+        (state_events.lua:92-104, card.lua:3047-3062), not a scoring-time
+        check of this hand. Pinned at step level in
+        test_end_round_sequencing.py."""
         played = [_card("Hearts", "Ace"), _card("Spades", "Ace")]
         bones = _joker("j_mr_bones")
         r = score_hand(
@@ -443,8 +446,8 @@ class TestAfterPhase:
             game_state={"hands_left": 0},
         )
         assert r.total == 64
-        assert r.saved is True
-        assert bones in r.jokers_removed
+        assert not hasattr(r, "saved")
+        assert bones not in r.jokers_removed
 
 
 # ============================================================================

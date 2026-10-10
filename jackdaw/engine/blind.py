@@ -509,6 +509,60 @@ class Blind:
 
         # TODO(phase5, C08): queue NEW_ROUND when disabling beats the boss.
 
+    def set_blind(
+        self,
+        gs: dict[str, Any],
+        blind: Blind | None,
+        *,
+        reset: bool = False,
+    ) -> None:
+        """Apply the reset/clear half of Lua ``Blind:set_blind``.
+
+        P5-4 only needs the defeat call ``set_blind(nil, nil, true)``.  The
+        engine's ordinary blind selection still constructs a fresh instance,
+        but defeat deliberately clears this instance through the same setter
+        boundary so playing-card and Joker debuffs are both re-evaluated.
+        """
+        if blind is not None or not reset:
+            raise NotImplementedError("non-reset Blind.set_blind is owned by blind selection")
+
+        # L: blind.lua:78-110 — nil blind becomes the empty between-round blind.
+        self.key = ""
+        self.name = ""
+        self.dollars = 0
+        self.debuff_config = {}
+        self.mult = 0
+        self.disabled = False
+        self.discards_sub = None
+        self.hands_sub = None
+        self.boss = False
+        self.triggered = False
+        self.prepped = True
+        self.chips = 0
+        self.hands_used = {}
+        self.only_hand = None
+
+        # L: blind.lua:207-215,624-652 — the nil setter clears boss debuffs
+        # on every playing card AND Joker. Card.set_debuff keeps a perished
+        # Joker permanently debuffed (D25), exactly as Lua's setter does.
+        active_rules = read.rules(gs)
+        for card in read.playing_cards(gs):
+            self.debuff_card(card, active_rules, gs)
+        for joker in gs.get("jokers", []):
+            self.debuff_card(joker, active_rules, gs, is_joker_area=True)
+
+    def defeat(self, gs: dict[str, Any]) -> None:
+        """Resolve blind-defeat cleanup at F7."""
+        # L: blind.lua:338-343 — facing and Manacle restore are immediate.
+        for joker in gs.get("jokers", []):
+            if joker.facing == "back":
+                joker.facing = "front"
+        if self.name == "The Manacle" and not self.disabled:
+            gs["hand_size"] = gs.get("hand_size", 0) + 1
+
+        # L: blind.lua:330-337 — the final defeat event clears via set_blind.
+        self.set_blind(gs, None, reset=True)
+
     def get_type(self) -> str:
         """Return blind type string: ``'Small'``, ``'Big'``, or ``'Boss'``."""
         if self.name == "Small Blind":

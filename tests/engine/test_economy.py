@@ -113,7 +113,10 @@ class TestInterest:
 
 
 class TestRentalJokers:
-    def test_one_rental_costs_three(self):
+    def test_rows_never_subtract_rent(self):
+        # Phase 5 (D22): rent is committed by end_round
+        # (state_events.lua:108); evaluate_round has no rent row, so the
+        # earnings function only carries the amount as metadata.
         j = _rental_joker()
         result = calculate_round_earnings(
             blind=_small_blind(),
@@ -122,9 +125,10 @@ class TestRentalJokers:
             money=0,
             jokers=[j],
             game_state={},
+            rental_cost=3,
         )
         assert result.rental_cost == 3
-        assert result.total == 0  # blind(3) - rental(3)
+        assert result.total == 3  # blind(3) only
 
 
 # ---------------------------------------------------------------------------

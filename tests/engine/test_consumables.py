@@ -713,10 +713,14 @@ class TestFullRoundEarnings:
             blind=blind,
             hands_left=2,
             discards_left=0,
-            money=23,
+            # Phase 5 (D22): end_round already committed the $3 rent
+            # (state_events.lua:108), so evaluate_round sees $23 - $3 = $20
+            # and rent is metadata, not a row.
+            money=20,
             jokers=jokers,
             game_state={},
             joker_dollars=7,
+            rental_cost=3,
         )
         assert result.blind_reward == 4
         assert result.unused_hands_bonus == 2
@@ -724,4 +728,4 @@ class TestFullRoundEarnings:
         assert result.joker_dollars == 7
         assert result.rental_cost == 3
         assert result.interest == 4
-        assert result.total == 14
+        assert result.total == 17

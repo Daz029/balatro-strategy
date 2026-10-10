@@ -344,7 +344,10 @@ def _effect_producer_contexts() -> tuple[dict[str, set[str]], list[str]]:
 def _dispatched_contexts() -> set[str]:
     dispatched: set[str] = set()
     dispatchers = {"JokerContext", "context_for", "fire_jokers"}
-    value_contexts = {"cards_destroyed", "destroying_card", "other_joker"}
+    # Contexts Lua passes as computed values, not literal `true` — e.g.
+    # end_round's `{end_of_round = true, game_over = game_over}`
+    # (state_events.lua:101).
+    value_contexts = {"cards_destroyed", "destroying_card", "other_joker", "game_over"}
     for path in ENGINE.rglob("*.py"):
         tree = ast.parse(path.read_text())
         for call in (node for node in ast.walk(tree) if isinstance(node, ast.Call)):

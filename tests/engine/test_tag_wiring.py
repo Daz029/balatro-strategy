@@ -259,14 +259,21 @@ class TestInvestmentTag:
     def test_pays_after_boss(self):
         gs = _init_gs()
         entry = _award(gs, "tag_investment")
-        _beat_blind(gs)
-        gs["blind"].boss = True  # treat the beaten blind as a boss
+        step(gs, SelectBlind())
+        gs["blind"].chips = 1
+        # Lua's last_blind.boss (blind.lua:97-98, tag.lua:119); set before
+        # the play because the tag fires inside evaluate_round.
+        gs["blind"].boss = True
+        step(gs, PlayHand(card_indices=(0, 1, 2, 3, 4)))
         dollars_before_cashout = gs["dollars"]
-        earnings = gs["round_earnings"].total
+        earnings = gs["round_earnings"]
         step(gs, CashOut())
 
         payout = TAGS["tag_investment"].config["dollars"]
-        assert gs["dollars"] == dollars_before_cashout + earnings + payout
+        # The tag row is part of the bottom-row total
+        # (state_events.lua:1183-1189), committed once at cash-out.
+        assert earnings.tag_dollars == payout
+        assert gs["dollars"] == dollars_before_cashout + earnings.total
         assert entry["consumed"] is True
 
 

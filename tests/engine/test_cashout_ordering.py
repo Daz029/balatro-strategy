@@ -24,7 +24,7 @@ interest and must not affect it — same rule class as the already-verified
 ``test_tag_wiring.py``).
 
 Both halves now hold: ``TestJokerEndOfRoundPaysAfterInterest`` guards the
-payout ordering restored by the ``game.py::_round_won`` fix.
+payout ordering restored by the ``game.py::end_round`` fix.
 """
 
 from __future__ import annotations
@@ -62,7 +62,7 @@ def _beat_blind_at(gs: dict[str, Any], *, dollars: int) -> None:
 
 class TestInBlindEarningsBeforeInterest:
     """Money earned DURING the hand (not at round-end) is already baked into
-    ``gs["dollars"]`` by the time ``_round_won`` calls
+    ``gs["dollars"]`` by the time ``end_round`` calls
     ``calculate_round_earnings`` — so it correctly crosses a $5 bracket.
     """
 
@@ -84,7 +84,7 @@ class TestInBlindEarningsBeforeInterest:
         step(gs, PlayHand(card_indices=(0, 1, 2, 3, 4)))
 
         # +$1 per diamond scored, applied in-blind (scoring.py), well before
-        # _round_won/calculate_round_earnings run.
+        # end_round/calculate_round_earnings run.
         assert gs["dollars"] == 3 + 5
         earnings = gs["round_earnings"]
         assert earnings.interest == 1  # 8 // 5 == 1 -- the in-blind $ counted
@@ -104,7 +104,7 @@ class TestInBlindEarningsBeforeInterest:
 class TestJokerEndOfRoundPaysAfterInterest:
     """Golden Joker's payout flows once, via ``earnings.total`` at cash-out,
     strictly after interest — regression for the inherited double-count /
-    interest-leak bug fixed in ``game.py::_round_won``.
+    interest-leak bug fixed in ``game.py::end_round``.
     """
 
     def test_golden_joker_pays_once_and_never_bumps_interest(self):
@@ -143,14 +143,11 @@ class TestJokerEndOfRoundPaysAfterInterest:
 
 
 class TestInvestmentPaysAfterInterest:
-    """Precedent already verified in real Balatro (CLAUDE.md tag-wiring
-    item): Investment's $25 is applied at cash-out strictly after
-    ``earnings.total`` (which already has that round's interest baked in),
-    so it can never retroactively bump that round's interest bracket.
-
-    A more detailed version of ``TestInvestmentTag.test_pays_after_boss`` in
-    ``test_tag_wiring.py``; kept here so this file stands alone as the
-    interest-ordering verification suite for the h1 V_curve work.
+    """Investment's $25 can never bump that round's interest bracket: Lua
+    adds it as an eval-tag row in the bottom-row total
+    (state_events.lua:1183-1189) while interest reads committed dollars
+    (:1191). Phase 5 moved the tag from cash-out into evaluate_round, so the
+    payout is now inside ``earnings.total``.
     """
 
     def test_investment_payout_lands_after_earnings_total(self):
@@ -171,7 +168,12 @@ class TestInvestmentPaysAfterInterest:
         step(gs, CashOut())
 
         payout = TAGS["tag_investment"].config["dollars"]
-        assert gs["dollars"] == pre_cashout_dollars + earnings.total + payout
+        # Lua adds the tag row to the bottom-row total
+        # (state_events.lua:1183-1189), but interest reads committed
+        # G.GAME.dollars (:1191), which the $25 has not reached yet.
+        assert earnings.tag_dollars == payout
+        assert earnings.interest == 0
+        assert gs["dollars"] == pre_cashout_dollars + earnings.total
 
 
 # ---------------------------------------------------------------------------
@@ -180,8 +182,11 @@ class TestInvestmentPaysAfterInterest:
 
 
 class TestRentalChargedOnceBeforeInterest:
-    """Rental's $3 lands once (via ``earnings.total``) and shrinks the
-    interest bracket — regression for the inherited double-deduction.
+    """Rental's $3 lands once and shrinks the interest bracket — regression
+    for the inherited double-deduction. Phase 5 (D22): Lua commits rent with
+    ``ease_dollars`` inside ``end_round`` (state_events.lua:108,
+    card.lua:2271-2276), so it is already off the balance at ROUND_EVAL and
+    is NOT part of the cash-out total.
     """
 
     def test_single_charge_interest_on_post_rental_balance(self):
@@ -191,14 +196,14 @@ class TestRentalChargedOnceBeforeInterest:
         gs["jokers"].append(joker)
         _beat_blind_at(gs, dollars=20)
 
-        # Not deducted directly at round end.
-        assert gs["dollars"] == 20
+        # Deducted at round end (F6), once.
+        assert gs["dollars"] == 17
         earnings = gs["round_earnings"]
-        assert earnings.rental_cost == 3
-        assert earnings.interest == (20 - 3) // 5  # post-rental bracket
+        assert earnings.rental_cost == 3  # audit metadata, not in total
+        assert earnings.interest == 17 // 5  # post-rental bracket
 
         step(gs, CashOut())
-        assert gs["dollars"] == 20 + earnings.total
+        assert gs["dollars"] == 17 + earnings.total
 
     def test_debuffed_rental_still_charges(self):
         # Rental is a sticker, not an ability: no debuff gate in vanilla.
