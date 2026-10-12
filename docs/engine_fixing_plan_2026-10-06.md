@@ -1050,8 +1050,11 @@ reports are `docs/implementation-tickets/engine-p5-*-REPORT.md`.
     engine iterates `HAND_BASE` order and documents that.
   - 06 (synchronous HAND_PLAYED) is intentionally not modelled.
   - **05 (Lua scores played cards in hand-position order; the engine keeps
-    selection order for `best_play_order`) is OPEN, awaiting a user
-    decision**, marked `# NEW-P5-1-05` at the site.
+    selection order for `best_play_order`) — RESOLVED 2026-10-12** (user):
+    the bot's pick order IS the left-to-right placement (vanilla rearranges
+    the hand for free), so index order = scoring order; the solver's order
+    does not matter. No engine behavior change; pinned by
+    `tests/engine/test_play_order_contract.py`.
 - **Divergence kept on purpose**: `gs["won"]` is False on any GAME_OVER. Lua
   sets `G.GAME.won` before its game-over branch even when the win-ante boss
   is lost; our flag means "run won".

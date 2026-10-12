@@ -562,8 +562,8 @@ def score_hand(
         blind.triggered = True
         hand_levels.level_up(hand_type, amount=-1)
 
-    # L: state_events.lua:580-612 — augment the scoring hand. The engine's
-    # intentional NEW-P5-1-05 divergence keeps selection order here.
+    # L: state_events.lua:580-612 — augment the scoring hand, in played
+    # (left-to-right) order; NEW-P5-1-05: index order is left-to-right.
     # REDUNDANT since Phase 1-2 started passing `jokers` to evaluate_hand
     # (which applies the same augmentation from the same flag), but kept:
     # both produce exactly `played_cards` in played order, so this is an

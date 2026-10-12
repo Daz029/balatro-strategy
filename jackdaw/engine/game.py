@@ -548,10 +548,11 @@ def _handle_play_hand(gs: dict[str, Any], indices: tuple[int, ...]) -> dict[str,
     if any(i < 0 or i >= len(hand) for i in indices):
         raise IllegalActionError("Card index out of range")
 
-    # L: state_events.lua:459-483 — move the selected cards into play.
-    # Preserve SELECTION ORDER (not hand position order).
-    # NEW-P5-1-05: unlike Lua's physical-x sort, solver-selected scoring order
-    # is an intentional engine behavior pending the explicit user decision.
+    # L: state_events.lua:459-483 — move the selected cards into play, which
+    # Lua sorts by physical left-to-right position. NEW-P5-1-05, DECIDED
+    # 2026-10-12: the action's index order IS that left-to-right placement
+    # (vanilla rearranges the hand for free before playing), so the cards
+    # score in index order. Pinned by tests/engine/test_play_order_contract.py.
     idx_set = set(indices)
     played = [hand[i] for i in indices]
     held = [c for i, c in enumerate(hand) if i not in idx_set]

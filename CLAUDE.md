@@ -20,10 +20,10 @@ analysis and potential overhaul.
   `docs/engine_class_design_2026-10-06.md`.
   STATUS 2026-10-10: Phases 1-5 DONE on branch `engine-phase1-state` (Phase 5 exit record in
   the plan; timing spec `docs/engine_s4a_event_timing.md`; Lua transition oracle
-  `tests/oracle/transition.py`, 29/29 green). Label/harvest freeze lifts. OPEN user decision:
-  NEW-P5-1-05 (Lua scores played cards in hand-position order; engine keeps selection order).
-  DECIDED 2026-10-12: the BOT's pick order is the left-to-right play order (the solver's
-  order does not matter). CLOSE-OUT 2026-10-12 (branch `engine-closeout`): verify all 71
+  `tests/oracle/transition.py`, 29/29 green). Label/harvest freeze lifts.
+  NEW-P5-1-05 RESOLVED 2026-10-12: the BOT's pick order is the left-to-right play order
+  (index order = scoring order; the solver's order does not matter), pinned by
+  `tests/engine/test_play_order_contract.py`. CLOSE-OUT 2026-10-12 (branch `engine-closeout`): verify all 71
   in-scope audit findings, challenges/endless ASSERT, profiles = all-unlocked only, delete
   superseded code.
   TODO LATER (user, 2026-10-12) — deferred, NOT in the close-out:

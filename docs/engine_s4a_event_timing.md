@@ -155,7 +155,7 @@ port.
    `blind.triggered`, clear forced selections, and sort highlighted cards by
    physical x (`state_events.lua:450-463`). Python validates phase/count and
    clears triggered, but preserves caller index order (`game.py:539-587`):
-   **NEW-P5-1-05**, because card/Joker scoring is order-sensitive.
+   **NEW-P5-1-05** (resolved: index order = left-to-right placement).
 2. **Queued immediate:** enter HAND_PLAYED (`state_events.lua:465-472`). Python
    has no intermediate phase (`game.py:539-747`): **NEW-P5-1-06**.
 3. **Queued:** decrement hands (`state_events.lua:475`; helper
@@ -448,7 +448,9 @@ These are not C01/C03/C05/C09/C10/C11/D12/D14/D18/D22/D28-D32.
    (`run_init.py:384-444`).
 5. **NEW-P5-1-05:** Lua sorts played cards by physical hand position before
    scoring (`state_events.lua:459-483`); Python explicitly preserves caller
-   selection order (`game.py:577-587`).
+   selection order (`game.py:577-587`). **RESOLVED 2026-10-12:** the index
+   order IS the left-to-right placement (vanilla rearranges for free), so this
+   is not a divergence; pinned by `tests/engine/test_play_order_contract.py`.
 6. **NEW-P5-1-06:** Lua enters HAND_PLAYED in a queued event before moving the
    selected cards and dispatching `Blind:press_play` (`state_events.lua:465-488`);
    Python remains in its current phase throughout the direct handler and only

@@ -84,6 +84,9 @@ class PlayHand:
     """Play selected cards from the hand.
 
     ``card_indices`` are 0-based indices into ``hand.cards``, 1–5 cards.
+    Their ORDER is the left-to-right placement of the played cards, and the
+    cards score in that order (NEW-P5-1-05): vanilla lets the player rearrange
+    the hand for free before playing, so the caller chooses the order.
     """
 
     card_indices: tuple[int, ...]
