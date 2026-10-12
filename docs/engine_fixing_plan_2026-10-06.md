@@ -1086,6 +1086,30 @@ The Part 3 raises and asserts; CardArea deletion; the remaining Part 2 rows;
 rerun the BalatroBot live harness end to end; a final audit diff (re-run the
 audit's probe, `.scratch/engine_audit_probe.py`, on the Windows machine).
 
+**STATUS 2026-10-12: DONE except the two live checks** (branch
+`engine-closeout`). Per-finding record: [`engine_audit_verification.md`](engine_audit_verification.md)
+(64 fixed and proven, 3 raise, 1 not a bug, 1 deleted, 5 deferred to Phase 6).
+CO-1 and CO-2 ran through `codex exec`
+(`docs/implementation-tickets/engine-co-{1,2}-*.md` + REPORTs); Codex hit its
+usage cap at the start of CO-3, which was done by hand.
+
+- **Part 2 rows**: all landed (CO-1, CO-2), plus two the phases had missed:
+  C13b Observatory (never implemented) and D10's joker-on-joker half.
+  Found en route: To Do List re-rolling to its own target, and Spectral
+  hidden-card rolls returning early. D55 was an audit error.
+- **Raises** (`jackdaw/engine/scope.py`): challenges at `initialize_run`
+  (challenges.py and all challenge-only reads deleted); endless at the first
+  blind decision after a win, plus `get_blind_amount` past ante 16; profiles
+  must be all-unlocked (`profile.require_full_profile`), pools read no
+  profile state.
+- **Deleted**: `card_area.py` (D58), `validator.py`, `shop.buy_card` /
+  `reroll_shop` / `calculate_reroll_cost`, and other test-only helpers
+  (list in the CO-3c commit).
+- **NEW-P5-1-05 resolved** (index order = left-to-right play order).
+- **Still open**: rerun the BalatroBot live harness, and re-run the audit probe
+  on the Windows machine. Both need machines or a running game this session
+  did not have.
+
 ### Parallelism
 
 Phase 1 comes first because Phases 2–5 all assume the fields exist. After

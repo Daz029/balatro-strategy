@@ -23,9 +23,11 @@ analysis and potential overhaul.
   `tests/oracle/transition.py`, 29/29 green). Label/harvest freeze lifts.
   NEW-P5-1-05 RESOLVED 2026-10-12: the BOT's pick order is the left-to-right play order
   (index order = scoring order; the solver's order does not matter), pinned by
-  `tests/engine/test_play_order_contract.py`. CLOSE-OUT 2026-10-12 (branch `engine-closeout`): verify all 71
-  in-scope audit findings, challenges/endless ASSERT, profiles = all-unlocked only, delete
-  superseded code.
+  `tests/engine/test_play_order_contract.py`. CLOSE-OUT DONE 2026-10-12 (branch
+  `engine-closeout`): `docs/engine_audit_verification.md` maps all 74 audit findings to a
+  status + proving test: 64 fixed, 3 raise (challenges, endless, non-full profiles —
+  `jackdaw/engine/scope.py`), D55 not a bug, D58 deleted, 5 deferred to legality. Remaining
+  Phase 7 items: BalatroBot live-harness rerun + Windows audit-probe rerun.
   TODO LATER (user, 2026-10-12) — deferred, NOT in the close-out:
   1. FIX SPECTRAL PACKS — Spectral-pack picks are omitted from legal actions (D57), so no
      agent can ever take a Spectral card out of a pack.
