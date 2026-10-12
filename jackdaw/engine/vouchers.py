@@ -301,25 +301,10 @@ def apply_voucher(key: str, game_state: dict[str, Any]) -> dict[str, Any]:
         mutations["round_resets.discards"] = rr["discards"]
 
     # -----------------------------------------------------------------------
-    # Director's Cut — enable 1 boss blind reroll per ante at cost extra ($10)
-    # (not present in extracted apply_to_run; modelled from game behaviour)
-    # -----------------------------------------------------------------------
-    elif name == "Director's Cut":
-        game_state["boss_blind_rerolls"] = game_state.get("boss_blind_rerolls", 0) + 1
-        game_state["boss_blind_reroll_cost"] = extra
-        mutations["boss_blind_rerolls"] = game_state["boss_blind_rerolls"]
-        mutations["boss_blind_reroll_cost"] = game_state["boss_blind_reroll_cost"]
-
-    # -----------------------------------------------------------------------
-    # Retcon — unlimited boss blind rerolls, free
-    # -----------------------------------------------------------------------
-    elif name == "Retcon":
-        game_state["boss_blind_rerolls"] = -1  # -1 = unlimited
-        game_state["boss_blind_reroll_cost"] = 0
-        mutations["boss_blind_rerolls"] = -1
-        mutations["boss_blind_reroll_cost"] = 0
-
-    # -----------------------------------------------------------------------
+    # Director's Cut / Retcon — no apply_to_run effect in Lua. The boss
+    # reroll button reads used_vouchers directly ($10 each; Director's Cut
+    # once per ante via round_resets.boss_rerolled, Retcon unlimited):
+    # button_callbacks.lua:2784-2797, legality.RerollBoss (audit D52).
     # Blank — unlock check only; no gameplay mutation (card.lua:1943)
     # Telescope, Observatory — passive effects handled in scoring/pack logic
     # -----------------------------------------------------------------------

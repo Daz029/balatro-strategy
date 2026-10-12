@@ -77,10 +77,12 @@ class RandomAgent:
                 selected = sorted(_random.sample(list(legal_cards), count))
                 card_target = tuple(int(i) for i in selected)
 
-        # Card target for UseConsumable (if it needs targets)
-        if at == ActionType.UseConsumable and entity_target is not None:
+        # Card target for UseConsumable / a consumable pack pick (if it needs
+        # targets; the vanilla engine rejects a targeted card without them).
+        if at in (ActionType.UseConsumable, ActionType.PickPackCard) and entity_target is not None:
             gs = info.get("raw_state", {})
-            consumables = gs.get("consumables", [])
+            area = "consumables" if at == ActionType.UseConsumable else "pack_cards"
+            consumables = gs.get(area, [])
             if entity_target < len(consumables):
                 from jackdaw.env.action_space import get_consumable_target_info
 

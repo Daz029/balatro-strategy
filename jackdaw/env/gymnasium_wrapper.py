@@ -286,7 +286,7 @@ class BalatroGymnasiumEnv(gymnasium.Env):
                 actions.append(FactoredAction(action_type=t))
 
             # --- Entity-only ---
-            elif t in _ENTITY_ONLY_TYPES:
+            elif t in _ENTITY_ONLY_TYPES and t != ActionType.PickPackCard:
                 if t in mask.entity_masks:
                     legal = np.nonzero(mask.entity_masks[t])[0]
                     for idx in legal:
@@ -300,11 +300,14 @@ class BalatroGymnasiumEnv(gymnasium.Env):
                 for combo in combos:
                     actions.append(FactoredAction(action_type=t, card_target=combo))
 
-            # --- UseConsumable (entity + optional cards) ---
-            elif t == ActionType.UseConsumable:
+            # --- UseConsumable / PickPackCard (entity + optional cards) ---
+            # A targeted consumable pack pick needs card targets exactly like
+            # a used consumable: the vanilla engine rejects it without them.
+            elif t in (ActionType.UseConsumable, ActionType.PickPackCard):
                 if t in mask.entity_masks:
                     legal_entities = np.nonzero(mask.entity_masks[t])[0]
-                    raw_consumables = info.get("raw_state", {}).get("consumables", [])
+                    area = "consumables" if t == ActionType.UseConsumable else "pack_cards"
+                    raw_consumables = info.get("raw_state", {}).get(area, [])
                     for c_idx in legal_entities:
                         c_idx_int = int(c_idx)
                         if c_idx_int < len(raw_consumables):

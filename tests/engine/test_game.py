@@ -108,7 +108,7 @@ class TestSkipBlind:
     def test_skip_boss_raises(self):
         gs = _init_gs()
         gs["blind_on_deck"] = "Boss"
-        with pytest.raises(IllegalActionError, match="Cannot skip Boss"):
+        with pytest.raises(IllegalActionError, match="cannot skip the Boss"):
             step(gs, SkipBlind())
 
 
@@ -226,7 +226,7 @@ class TestSellCard:
         gs = _init_gs()
         gs["phase"] = GamePhase.SHOP
         gs["jokers"] = [_joker_card(eternal=True)]
-        with pytest.raises(IllegalActionError, match="eternal"):
+        with pytest.raises(IllegalActionError, match="(?i)eternal"):
             step(gs, SellCard(area="jokers", card_index=0))
 
 

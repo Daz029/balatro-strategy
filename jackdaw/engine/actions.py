@@ -7,20 +7,24 @@ advances the game state accordingly.
 Game phases
 -----------
 :class:`GamePhase` enumerates the phases where player input is needed.
-Each phase permits a specific subset of actions:
+The engine exposes the FULL vanilla action set (decision 2026-10-12); the
+RL environments restrict it with their own masks. Legality — which action is
+valid in which state — lives in exactly one place,
+:mod:`jackdaw.engine.legality`, used by both :func:`step` and
+:func:`get_legal_actions`. Phase summary (``SellCard``, ``UseConsumable``
+and the joker swaps are valid in every stable phase, as in Lua):
 
 +---------------------+------------------------------------------------------+
-| Phase               | Valid actions                                         |
+| Phase               | Phase-specific actions                               |
 +=====================+======================================================+
-| BLIND_SELECT        | SelectBlind, SkipBlind                               |
+| BLIND_SELECT        | SelectBlind, SkipBlind, RerollBoss                   |
 +---------------------+------------------------------------------------------+
-| SELECTING_HAND      | PlayHand, Discard, SortHand, UseConsumable,          |
-|                     | SwapHandLeft/Right, SwapJokersLeft/Right             |
+| SELECTING_HAND      | PlayHand, Discard, SortHand, SwapHandLeft/Right      |
 +---------------------+------------------------------------------------------+
-| SHOP                | BuyCard, SellCard, UseConsumable, RedeemVoucher,     |
-|                     | OpenBooster, Reroll, SwapJokersLeft/Right, NextRound |
+| SHOP                | BuyCard, BuyAndUse, RedeemVoucher, OpenBooster,      |
+|                     | Reroll, NextRound                                    |
 +---------------------+------------------------------------------------------+
-| PACK_OPENING        | PickPackCard, SkipPack                               |
+| PACK_OPENING        | PickPackCard, SkipPack, SwapHandLeft/Right           |
 +---------------------+------------------------------------------------------+
 | ROUND_EVAL          | CashOut                                              |
 +---------------------+------------------------------------------------------+
@@ -166,6 +170,28 @@ class NextRound:
     """Leave the shop and proceed to the next round."""
 
 
+@dataclass(frozen=True)
+class BuyAndUse:
+    """Buy a shop consumable and use it immediately (``buy_and_use`` button).
+
+    Needs no consumable slot (``button_callbacks.lua:2407`` skips
+    ``check_for_buy_space``) but the card must be usable
+    (``can_buy_and_use``, ``button_callbacks.lua:77-79``).
+    """
+
+    shop_index: int
+    target_indices: tuple[int, ...] | None = None
+
+
+@dataclass(frozen=True)
+class RerollBoss:
+    """Reroll the upcoming Boss blind ($10; Retcon or Director's Cut).
+
+    ``button_callbacks.lua:2784-2848`` (``reroll_boss_button`` /
+    ``reroll_boss``).
+    """
+
+
 # ---------------------------------------------------------------------------
 # Pack opening
 # ---------------------------------------------------------------------------
@@ -278,6 +304,8 @@ Action = (
     | SkipPack
     | Reroll
     | NextRound
+    | BuyAndUse
+    | RerollBoss
     | CashOut
     | SortHand
     | SwapHandLeft
@@ -293,239 +321,96 @@ Action = (
 
 
 def get_legal_actions(game_state: dict[str, Any]) -> list[Action]:
-    """Return every valid action from the current game state.
+    """Return every legal action in the current state.
 
-    The SELECTING_HAND phase has a combinatorial action space —
-    ``PlayHand`` and ``Discard`` each admit up to C(n, 5) card
-    subsets.  This function does **not** enumerate every possible
-    subset.  Instead it returns *marker* actions with empty
-    ``card_indices``, signalling that play/discard is legal.
-    The Gym env (M13) will handle subset enumeration or
-    parameterised action spaces.
+    Candidates are enumerated per phase and kept only if
+    :func:`jackdaw.engine.legality.illegal_reason` accepts them, so this list
+    and :func:`~jackdaw.engine.game.step` can never disagree. The engine lists
+    the FULL vanilla action set; RL environments restrict it with their own
+    masks.
 
-    Parameters
-    ----------
-    game_state:
-        The full runtime state dict.  Must include:
-
-        * ``phase`` (:class:`GamePhase`) — current game phase.
-        * ``current_round`` (dict) — ``hands_left``, ``discards_left``,
-          ``reroll_cost``, ``free_rerolls``.
-        * ``dollars`` (int) — current bank balance.
-        * ``round_resets`` (dict) — ``blind_states`` dict.
-        * ``blind_on_deck`` (str | None) — ``"Small"``/``"Big"``/``"Boss"``.
-        * ``hand`` (list[Card]) — cards in the player's hand.
-        * ``jokers`` (list[Card]) — active joker cards.
-        * ``consumables`` (list[Card]) — owned consumable cards.
-        * ``joker_slots`` (int) — max joker capacity.
-        * ``consumable_slots`` (int) — max consumable capacity.
-        * ``shop_cards`` (list[Card]) — buyable cards in shop.
-        * ``shop_vouchers`` (list[Card]) — buyable vouchers.
-        * ``shop_boosters`` (list[Card]) — buyable booster packs.
-        * ``pack_cards`` (list[Card]) — cards in an opened pack.
-        * ``pack_choices_remaining`` (int) — picks left in pack.
-
-    Returns
-    -------
-    list[Action]
-        All legal actions.  Empty for ``GAME_OVER``.
+    ``PlayHand`` / ``Discard`` are MARKERS: one action with empty
+    ``card_indices`` means "some selection is legal" (enumerating C(n, 5)
+    subsets is the caller's job; Cerulean Bell's forced card must be in it,
+    see :func:`jackdaw.engine.legality.with_forced_card`). Consumable uses and
+    pack picks that need targets are listed once per legal target set.
     """
-    phase = game_state.get("phase")
-    if phase is None:
+    from jackdaw.engine import legality
+
+    gs = game_state
+    phase = legality._phase(gs)
+    if phase is None or phase == GamePhase.GAME_OVER:
         return []
 
-    if isinstance(phase, str):
-        phase = GamePhase(phase)
+    candidates: list[Action] = []
+    hand: list[Card] = gs.get("hand", [])
+    jokers: list[Card] = gs.get("jokers", [])
+    consumables: list[Card] = gs.get("consumables", [])
 
-    if phase == GamePhase.GAME_OVER:
-        return []
     if phase == GamePhase.BLIND_SELECT:
-        return _legal_blind_select(game_state)
-    if phase == GamePhase.SELECTING_HAND:
-        return _legal_selecting_hand(game_state)
-    if phase == GamePhase.ROUND_EVAL:
-        return _legal_round_eval(game_state)
-    if phase == GamePhase.SHOP:
-        return _legal_shop(game_state)
-    if phase == GamePhase.PACK_OPENING:
-        return _legal_pack_opening(game_state)
-    return []
+        candidates += [SelectBlind(), SkipBlind(), RerollBoss()]
+    elif phase == GamePhase.SELECTING_HAND:
+        if legality.can_play(gs):
+            candidates.append(PlayHand(card_indices=()))
+        if legality.can_discard(gs):
+            candidates.append(Discard(card_indices=()))
+        if len(hand) > 1:
+            candidates += [SortHand(mode="rank"), SortHand(mode="suit")]
+    elif phase == GamePhase.ROUND_EVAL:
+        candidates.append(CashOut())
+    elif phase == GamePhase.SHOP:
+        for i, card in enumerate(gs.get("shop_cards", [])):
+            candidates.append(BuyCard(shop_index=i))
+            for targets in _target_sets(card, len(hand)):
+                candidates.append(BuyAndUse(shop_index=i, target_indices=targets))
+        candidates += [RedeemVoucher(card_index=i) for i in range(len(gs.get("shop_vouchers", [])))]
+        candidates += [OpenBooster(card_index=i) for i in range(len(gs.get("shop_boosters", [])))]
+        candidates += [Reroll(), NextRound()]
+    elif phase == GamePhase.PACK_OPENING:
+        for i, card in enumerate(gs.get("pack_cards", [])):
+            for targets in _target_sets(card, len(hand)):
+                candidates.append(PickPackCard(card_index=i, target_indices=targets))
+        candidates.append(SkipPack())
 
-
-# ---------------------------------------------------------------------------
-# Per-phase helpers
-# ---------------------------------------------------------------------------
-
-
-def _legal_blind_select(gs: dict[str, Any]) -> list[Action]:
-    actions: list[Action] = []
-    blind_on_deck = gs.get("blind_on_deck", "Small")
-
-    actions.append(SelectBlind())
-
-    # Can skip Small and Big, but not Boss
-    if blind_on_deck in ("Small", "Big"):
-        actions.append(SkipBlind())
-
-    # Consumables usable during blind select
-    actions.extend(_usable_consumables(gs))
-    return actions
-
-
-def _legal_selecting_hand(gs: dict[str, Any]) -> list[Action]:
-    actions: list[Action] = []
-    cr = gs.get("current_round", {})
-    hand: list[Card] = gs.get("hand", [])
-
-    # PlayHand: marker action — at least 1 card in hand + hands remaining
-    if hand and cr.get("hands_left", 0) > 0:
-        actions.append(PlayHand(card_indices=()))
-
-    # Discard: marker action — at least 1 card in hand + discards remaining
-    if hand and cr.get("discards_left", 0) > 0:
-        actions.append(Discard(card_indices=()))
-
-    # Sort and reorder hand
-    if len(hand) > 1:
-        actions.append(SortHand(mode="rank"))
-        actions.append(SortHand(mode="suit"))
-        for i in range(1, len(hand)):
-            actions.append(SwapHandLeft(idx=i))
-        for i in range(len(hand) - 1):
-            actions.append(SwapHandRight(idx=i))
-
-    # Consumables usable during hand selection
-    actions.extend(_usable_consumables(gs))
-
-    # Swap jokers
-    jokers: list[Card] = gs.get("jokers", [])
-    if len(jokers) > 1:
-        for i in range(1, len(jokers)):
-            actions.append(SwapJokersLeft(idx=i))
-        for i in range(len(jokers) - 1):
-            actions.append(SwapJokersRight(idx=i))
-
-    return actions
-
-
-def _legal_round_eval(gs: dict[str, Any]) -> list[Action]:
-    actions: list[Action] = [CashOut()]
-    actions.extend(_usable_consumables(gs))
-    return actions
-
-
-def _legal_shop(gs: dict[str, Any]) -> list[Action]:
-    actions: list[Action] = []
-    dollars: int = gs.get("dollars", 0)
-    jokers: list[Card] = gs.get("jokers", [])
-    joker_slots: int = gs.get("joker_slots", 5)
-    consumables: list[Card] = gs.get("consumables", [])
-    consumable_slots: int = gs.get("consumable_slots", 2)
-
-    # Buy cards from shop
-    shop_cards: list[Card] = gs.get("shop_cards", [])
-    for i, card in enumerate(shop_cards):
-        if card.cost > dollars:
-            continue
-        # Check slot availability
-        card_set = card.ability.get("set", "") if isinstance(card.ability, dict) else ""
-        if card_set == "Joker":
-            is_negative = isinstance(card.edition, dict) and card.edition.get("negative")
-            if len(jokers) >= joker_slots and not is_negative:
-                continue
-        elif card_set in ("Tarot", "Planet", "Spectral"):
-            if len(consumables) >= consumable_slots:
-                continue  # No room — agent must use/sell a consumable first
-        actions.append(BuyCard(shop_index=i))
-
-    # Sell jokers (non-eternal)
-    for i, joker in enumerate(jokers):
-        if not joker.eternal:
-            actions.append(SellCard(area="jokers", card_index=i))
-
-    # Sell consumables
-    for i in range(len(consumables)):
-        actions.append(SellCard(area="consumables", card_index=i))
-
-    # Use owned consumables
-    actions.extend(_usable_consumables(gs))
-
-    # Redeem vouchers
-    shop_vouchers: list[Card] = gs.get("shop_vouchers", [])
-    for i, voucher in enumerate(shop_vouchers):
-        if voucher.cost <= dollars:
-            actions.append(RedeemVoucher(card_index=i))
-
-    # Open boosters
-    shop_boosters: list[Card] = gs.get("shop_boosters", [])
-    for i, booster in enumerate(shop_boosters):
-        if booster.cost <= dollars:
-            actions.append(OpenBooster(card_index=i))
-
-    # Reroll
-    cr = gs.get("current_round", {})
-    reroll_cost = cr.get("reroll_cost", 5)
-    free_rerolls = cr.get("free_rerolls", 0)
-    if free_rerolls > 0 or dollars >= reroll_cost:
-        actions.append(Reroll())
-
-    # Next round (always available in shop)
-    actions.append(NextRound())
-
-    # Swap jokers
-    if len(jokers) > 1:
-        for i in range(1, len(jokers)):
-            actions.append(SwapJokersLeft(idx=i))
-        for i in range(len(jokers) - 1):
-            actions.append(SwapJokersRight(idx=i))
-
-    return actions
-
-
-def _legal_pack_opening(gs: dict[str, Any]) -> list[Action]:
-    actions: list[Action] = []
-    pack_cards: list[Card] = gs.get("pack_cards", [])
-    remaining: int = gs.get("pack_choices_remaining", 0)
-    pack_type: str = gs.get("pack_type", "")
-
-    # Spectral packs: balatrobot cannot handle Spectral card highlighting
-    # via RPC, so only SkipPack is offered.  RNG stays in sync because
-    # the pack is generated normally — we just force the agent to skip.
-    if remaining > 0 and pack_type != "Spectral":
-        for i in range(len(pack_cards)):
-            actions.append(PickPackCard(card_index=i))
-
-    actions.append(SkipPack())
-    return actions
-
-
-# ---------------------------------------------------------------------------
-# Consumable usability helper
-# ---------------------------------------------------------------------------
-
-
-def _usable_consumables(gs: dict[str, Any]) -> list[Action]:
-    """Return UseConsumable actions for each usable owned consumable."""
-    consumables: list[Card] = gs.get("consumables", [])
-    if not consumables:
-        return []
-
-    from jackdaw.engine.consumables import can_use_consumable
-
-    actions: list[Action] = []
-    hand: list[Card] = gs.get("hand", [])
-    jokers: list[Card] = gs.get("jokers", [])
-    joker_limit: int = gs.get("joker_slots", 5)
-    consumable_limit: int = gs.get("consumable_slots", 2)
-
+    # Every stable phase: hand arrangement where a hand is on screen, joker
+    # arrangement, selling owned cards, using owned consumables.
+    candidates += [SwapHandLeft(idx=i) for i in range(1, len(hand))]
+    candidates += [SwapHandRight(idx=i) for i in range(len(hand) - 1)]
     for i, card in enumerate(consumables):
-        if can_use_consumable(
-            card,
-            hand_cards=hand,
-            jokers=jokers,
-            consumables=consumables,
-            consumable_limit=consumable_limit,
-            joker_limit=joker_limit,
-        ):
-            actions.append(UseConsumable(card_index=i))
-    return actions
+        for targets in _target_sets(card, len(hand)):
+            candidates.append(UseConsumable(card_index=i, target_indices=targets))
+    candidates += [SellCard(area="jokers", card_index=i) for i in range(len(jokers))]
+    candidates += [SellCard(area="consumables", card_index=i) for i in range(len(consumables))]
+    candidates += [SwapJokersLeft(idx=i) for i in range(1, len(jokers))]
+    candidates += [SwapJokersRight(idx=i) for i in range(len(jokers) - 1)]
+
+    return [
+        a
+        for a in candidates
+        if (isinstance(a, (PlayHand, Discard)) and not a.card_indices)
+        or legality.is_legal(gs, a)
+    ]
+
+
+def _target_sets(card: Card, hand_size: int) -> list[tuple[int, ...] | None]:
+    """Candidate target selections for using *card* (``None`` = untargeted).
+
+    Vanilla targeting selects at most 3 hand cards (``max_highlighted``), so
+    enumerating every 1..max subset of the hand is cheap; legality filters
+    them. Untargeted cards and non-consumables get the single ``None``.
+    """
+    from itertools import combinations
+
+    from jackdaw.engine.consumables import _resolve_consumable_config
+
+    ability = getattr(card, "ability", None)
+    if not isinstance(ability, dict) or ability.get("set") not in ("Tarot", "Planet", "Spectral"):
+        return [None]
+    cfg = _resolve_consumable_config(card)
+    top = cfg.get("max_highlighted") or (1 if card.center_key == "c_aura" else 0)
+    if not top or hand_size == 0:
+        return [None]
+    sets: list[tuple[int, ...] | None] = []
+    for k in range(1, min(top, hand_size) + 1):
+        sets.extend(combinations(range(hand_size), k))
+    return sets

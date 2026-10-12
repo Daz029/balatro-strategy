@@ -1423,8 +1423,15 @@ class TestActionCoverageEmpirical:
         total_fail = sum(s["fail"] for s in all_stats.values())
         print(f"\nTotal: {total_seen:,} seen, {total_ok:,} OK, {total_fail:,} failed")
 
-        # Assert: ALL action types have 100% coverage
+        # Assert: ALL action types have 100% coverage, except the vanilla
+        # actions the engine gained in Phase 6 that this env's action space
+        # does not represent yet (env masks are rebuilt later, CLAUDE.md
+        # TODO 4). Those must FAIL to convert — proof they stay unexposed.
+        env_unrepresented = {"BuyAndUse", "RerollBoss"}
         for type_name, s in all_stats.items():
+            if type_name in env_unrepresented:
+                assert s["ok"] == 0, f"{type_name} unexpectedly converts to the env space"
+                continue
             assert s["fail"] == 0, (
                 f"{type_name}: {s['fail']}/{s['seen']} failed to convert\n"
                 f"Examples: {all_failures.get(type_name, [])[:5]}"

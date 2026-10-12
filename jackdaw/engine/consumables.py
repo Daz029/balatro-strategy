@@ -409,9 +409,11 @@ def can_use_consumable(
             return True
         return False
 
-    # Need eligible joker (editionless)
+    # Need eligible joker (editionless). L: card.lua:4209-4223 builds
+    # eligible_strength_jokers / eligible_editionless_jokers by edition only —
+    # debuffed jokers count (audit D39; same getter the effects draw from).
     if key in _NEED_ELIGIBLE_JOKER:
-        return any(not j.edition and not j.debuff for j in jokers)
+        return bool(read.editionless_jokers(jokers))
 
     # Ankh: need joker + room to duplicate
     if key == "c_ankh":

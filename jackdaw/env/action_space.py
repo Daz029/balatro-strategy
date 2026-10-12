@@ -265,10 +265,14 @@ def get_action_mask(game_state: dict[str, Any]) -> ActionMask:
         remaining = game_state.get("pack_choices_remaining", 0)
         pack_type = game_state.get("pack_type", "")
         # Spectral packs: balatrobot cannot handle Spectral card
-        # highlighting via RPC, so only SkipPack is valid.
+        # highlighting via RPC, so only SkipPack is valid. ENV-SIDE
+        # restriction — the engine allows Spectral picks (audit D57); revisit
+        # in the env-mask rebuild (CLAUDE.md TODO 4).
         if remaining > 0 and pack_cards and pack_type != "Spectral":
-            type_mask[ActionType.PickPackCard] = True
-            entity_masks[ActionType.PickPackCard] = np.ones(len(pack_cards), dtype=bool)
+            pick_mask = _pack_pick_mask(game_state)
+            if pick_mask.any():
+                type_mask[ActionType.PickPackCard] = True
+                entity_masks[ActionType.PickPackCard] = pick_mask
         type_mask[ActionType.SkipPack] = True
 
     return ActionMask(type_mask, card_mask, entity_masks, max_card_select, min_card_select)
@@ -277,6 +281,31 @@ def get_action_mask(game_state: dict[str, Any]) -> ActionMask:
 # ---------------------------------------------------------------------------
 # Mask helpers
 # ---------------------------------------------------------------------------
+
+
+def _pack_pick_mask(gs: dict[str, Any]) -> np.ndarray:
+    """Pack cards the engine accepts for SOME target set (Phase 6 interim).
+
+    The old engine applied an untargeted or unusable pack pick as a silent
+    no-op (audit D57); the vanilla engine rejects it. Until the env masks are
+    rebuilt from ``legality`` (CLAUDE.md TODO 4) this keeps the generic env
+    from offering picks the engine refuses.
+    """
+    from jackdaw.engine import legality
+    from jackdaw.engine.actions import _target_sets
+
+    hand_size = len(gs.get("hand", []))
+    pack = gs.get("pack_cards", [])
+    return np.array(
+        [
+            any(
+                legality.is_legal(gs, EnginePickPackCard(card_index=i, target_indices=t))
+                for t in _target_sets(card, hand_size)
+            )
+            for i, card in enumerate(pack)
+        ],
+        dtype=bool,
+    )
 
 
 def _mask_shop_buy(
@@ -572,7 +601,10 @@ def factored_to_engine_action(
     if at == ActionType.PickPackCard:
         if fa.entity_target is None:
             raise ValueError("PickPackCard requires entity_target")
-        return EnginePickPackCard(card_index=fa.entity_target)
+        return EnginePickPackCard(
+            card_index=fa.entity_target,
+            target_indices=fa.card_target if fa.card_target else None,
+        )
 
     if at == ActionType.SwapJokersLeft:
         if fa.entity_target is None:

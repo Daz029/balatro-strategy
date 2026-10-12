@@ -145,6 +145,7 @@ class BossCapturingShopRunAdapter(ShopRunAdapter):
 
     def _advance(self) -> None:
         from jackdaw.engine.game import step as engine_step
+        from jackdaw.env.interim_constraints import with_cerulean_bell
 
         for _ in range(_MAX_AUTO_STEPS):
             if self.done:
@@ -171,7 +172,7 @@ class BossCapturingShopRunAdapter(ShopRunAdapter):
                 pre_state = (
                     copy.deepcopy(self._gs) if self._hand_decision_observer is not None else None
                 )
-                action = self._hand_policy(self._gs)
+                action = with_cerulean_bell(self._gs, self._hand_policy(self._gs))
                 engine_step(self._gs, action)
                 if self._hand_decision_observer is not None:
                     self._hand_decision_observer(pre_state, action, self._gs)

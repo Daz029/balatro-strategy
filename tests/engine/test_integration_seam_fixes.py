@@ -48,31 +48,35 @@ class TestFoolNeedsGameState:
         }
 
     def test_usable_when_a_prior_tarot_was_used(self):
-        """Must go through _handle_use_consumable: can_use_consumable itself was
-        always correct, so calling it directly cannot detect this bug."""
-        from jackdaw.engine.game import _handle_use_consumable
+        """Must go through step(): can_use_consumable itself was always
+        correct, so calling it directly cannot detect this bug. (Validation
+        lives in legality.illegal_reason since Phase 6.)"""
+        from jackdaw.engine.actions import UseConsumable
+        from jackdaw.engine.game import step
 
         gs = self._gs("c_magician")
-        _handle_use_consumable(gs, 0, None)  # must not raise
+        step(gs, UseConsumable(card_index=0))  # must not raise
         # The Fool was consumed and replaced by a copy of the last tarot.
         assert [c.center_key for c in gs["consumables"]] == ["c_magician"]
 
     def test_unusable_with_no_prior_tarot(self):
         import pytest
 
-        from jackdaw.engine.game import IllegalActionError, _handle_use_consumable
+        from jackdaw.engine.actions import UseConsumable
+        from jackdaw.engine.game import IllegalActionError, step
 
         with pytest.raises(IllegalActionError):
-            _handle_use_consumable(self._gs(None), 0, None)
+            step(self._gs(None), UseConsumable(card_index=0))
 
     def test_fool_cannot_copy_itself(self):
         """Vanilla forbids The Fool producing another Fool."""
         import pytest
 
-        from jackdaw.engine.game import IllegalActionError, _handle_use_consumable
+        from jackdaw.engine.actions import UseConsumable
+        from jackdaw.engine.game import IllegalActionError, step
 
         with pytest.raises(IllegalActionError):
-            _handle_use_consumable(self._gs("c_fool"), 0, None)
+            step(self._gs("c_fool"), UseConsumable(card_index=0))
 
     def test_handler_still_rejects_without_run_state(self):
         """Direct call with no game_state degrades to 'unusable', never raises."""

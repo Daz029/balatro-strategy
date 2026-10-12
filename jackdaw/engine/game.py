@@ -21,9 +21,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from jackdaw.engine import lifecycle, read
+from jackdaw.engine import legality, lifecycle, read
 from jackdaw.engine.actions import (
     Action,
+    BuyAndUse,
     BuyCard,
     CashOut,
     Discard,
@@ -34,6 +35,7 @@ from jackdaw.engine.actions import (
     PlayHand,
     RedeemVoucher,
     Reroll,
+    RerollBoss,
     SelectBlind,
     SellCard,
     SkipBlind,
@@ -70,16 +72,29 @@ class IllegalActionError(Exception):
 def step(game_state: dict[str, Any], action: Action) -> dict[str, Any]:
     """Apply *action* to *game_state* in-place and return it.
 
-    Dispatches based on action type.  Raises :class:`IllegalActionError`
-    if the action is not valid in the current phase.
+    Every action is first checked by
+    :func:`jackdaw.engine.legality.illegal_reason` (the same predicate
+    :func:`~jackdaw.engine.actions.get_legal_actions` filters with) and
+    :class:`IllegalActionError` carries its reason. The handlers below assume
+    a legal action and do no validation of their own.
     """
+    if isinstance(action, (SelectBlind, SkipBlind, RerollBoss)):
+        _reject_endless(game_state)
+    # The single legality predicate (Phase 6): step() and get_legal_actions
+    # share it, so they cannot disagree.
+    reason = legality.illegal_reason(game_state, action)
+    if reason is not None:
+        raise IllegalActionError(reason)
+
     match action:
         case SelectBlind(allow_forced_boss=allow_forced_boss):
-            _reject_endless(game_state)
             return _handle_select_blind(game_state, allow_forced_boss=allow_forced_boss)
         case SkipBlind():
-            _reject_endless(game_state)
             return _handle_skip_blind(game_state)
+        case RerollBoss():
+            return _handle_reroll_boss(game_state)
+        case BuyAndUse(shop_index=idx, target_indices=targets):
+            return _handle_buy_and_use(game_state, idx, targets)
         case PlayHand(card_indices=indices):
             return _handle_play_hand(game_state, indices)
         case Discard(card_indices=indices):
@@ -136,15 +151,6 @@ def _reject_endless(gs: dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _require_phase(gs: dict[str, Any], *phases: GamePhase) -> GamePhase:
-    """Assert the current phase is one of *phases* and return it."""
-    raw = gs.get("phase")
-    phase = GamePhase(raw) if isinstance(raw, str) else raw
-    if phase not in phases:
-        raise IllegalActionError(f"Action not valid in phase {phase!r} (expected {phases})")
-    return phase
-
-
 def _gain_joker(gs: dict[str, Any], card: Any) -> bool:
     """Thin compatibility wrapper over :func:`lifecycle.emplace`."""
     jokers: list = gs.setdefault("jokers", [])
@@ -174,7 +180,6 @@ def _handle_select_blind(gs: dict[str, Any], *, allow_forced_boss: bool = False)
     6. Draw hand from deck
     7. Set phase → SELECTING_HAND
     """
-    _require_phase(gs, GamePhase.BLIND_SELECT)
 
     from jackdaw.engine.blind import Blind
     from jackdaw.engine.run_init import start_round
@@ -291,7 +296,6 @@ def _fire_new_blind_choice_tags(gs: dict[str, Any]) -> None:
 
     awarded: list[dict] = gs.get("awarded_tags", [])
     rng = gs.get("rng")
-    rr = gs.get("round_resets", {})
 
     for entry in awarded:
         tag_key = entry.get("key", "")
@@ -311,18 +315,48 @@ def _fire_new_blind_choice_tags(gs: dict[str, Any]) -> None:
         entry["consumed_context"] = "new_blind_choice"
 
         if result.reroll_boss:
-            from jackdaw.engine.blind import get_new_boss
-
-            bosses_used = gs.setdefault("bosses_used", {})
-            ante = rr.get("ante", 1)
-            new_boss = get_new_boss(ante, bosses_used, rng)
-            rr.setdefault("blind_choices", {})["Boss"] = new_boss
+            # L: tag.lua:284-289 — the Boss Tag calls G.FUNCS.reroll_boss with
+            # G.from_boss_tag set: free, but it still marks boss_rerolled.
+            _reroll_boss(gs, from_tag=True)
 
         if result.create_pack:
             if gs.get("phase") == GamePhase.PACK_OPENING:
                 gs.setdefault("pending_tag_packs", []).append(result.create_pack)
             else:
                 _open_tag_pack(gs, result.create_pack)
+
+
+def _reroll_boss(gs: dict[str, Any], *, from_tag: bool) -> None:
+    """Port of ``G.FUNCS.reroll_boss`` (button_callbacks.lua:2800-2848).
+
+    Shared by the player's Retcon / Director's Cut reroll and the Boss Tag.
+    Marks ``round_resets.boss_rerolled`` (so a Boss Tag uses up Director's
+    Cut's one reroll for the ante, as in Lua), charges $10 unless it came
+    from the tag, and draws the replacement boss with ``get_new_boss``.
+    """
+    from jackdaw.engine.blind import get_new_boss
+
+    rr = gs["round_resets"]
+    rr["boss_rerolled"] = True
+    if not from_tag:
+        gs["dollars"] = gs.get("dollars", 0) - 10
+    rr.setdefault("blind_choices", {})["Boss"] = get_new_boss(
+        rr.get("ante", 1),
+        gs.setdefault("bosses_used", {}),
+        gs.get("rng"),
+        win_ante=gs.get("win_ante", 8),
+    )
+
+
+def _handle_reroll_boss(gs: dict[str, Any]) -> dict[str, Any]:
+    """Reroll the upcoming Boss blind (Retcon / Director's Cut, audit D52).
+
+    After the new boss is chosen Lua offers the awarded tags a
+    ``new_blind_choice`` pass (button_callbacks.lua:2840-2842).
+    """
+    _reroll_boss(gs, from_tag=False)
+    _fire_new_blind_choice_tags(gs)
+    return gs
 
 
 def _open_tag_pack(gs: dict[str, Any], pack_key: str) -> None:
@@ -421,12 +455,8 @@ def _handle_skip_blind(gs: dict[str, Any]) -> dict[str, Any]:
     7. Check Double Tag: if active, duplicate the just-awarded tag
     8. Phase stays BLIND_SELECT
     """
-    _require_phase(gs, GamePhase.BLIND_SELECT)
 
     blind_on_deck = gs.get("blind_on_deck", "Small")
-    if blind_on_deck not in ("Small", "Big"):
-        raise IllegalActionError("Cannot skip Boss blind")
-
     rr = gs["round_resets"]
 
     # ------------------------------------------------------------------
@@ -520,23 +550,14 @@ def _handle_skip_blind(gs: dict[str, Any]) -> dict[str, Any]:
 
 def _handle_play_hand(gs: dict[str, Any], indices: tuple[int, ...]) -> dict[str, Any]:
     """Synchronous port of ``play_cards_from_highlighted`` (Lua 450-537)."""
-    _require_phase(gs, GamePhase.SELECTING_HAND)
 
-    # L: state_events.lua:450-463 — validate, stop input, and clear the blind.
+    # L: state_events.lua:450-463 — stop input and clear the blind (the
+    # selection was validated by legality.illegal_reason in step()).
     blind = gs["blind"]
     blind.triggered = False
 
     cr = gs["current_round"]
-    if cr["hands_left"] <= 0:
-        raise IllegalActionError("No hands remaining")
-
     hand: list = gs.get("hand", [])
-    if not indices or not hand:
-        raise IllegalActionError("Must select at least 1 card")
-    if len(indices) > 5:
-        raise IllegalActionError("Cannot play more than 5 cards")
-    if any(i < 0 or i >= len(hand) for i in indices):
-        raise IllegalActionError("Card index out of range")
 
     # L: state_events.lua:459-483 — move the selected cards into play, which
     # Lua sorts by physical left-to-right position. NEW-P5-1-05, DECIDED
@@ -635,20 +656,8 @@ def _handle_discard(gs: dict[str, Any], indices: tuple[int, ...]) -> dict[str, A
     10. The Serpent: draw only 3 if not first action
     11. Re-debuff drawn cards for boss blind
     """
-    _require_phase(gs, GamePhase.SELECTING_HAND)
-
-    cr = gs["current_round"]
-    if cr["discards_left"] <= 0:
-        raise IllegalActionError("No discards remaining")
 
     hand: list = gs.get("hand", [])
-    if not indices or not hand:
-        raise IllegalActionError("Must select at least 1 card")
-    if len(indices) > 5:
-        raise IllegalActionError("Cannot discard more than 5 cards")
-    if any(i < 0 or i >= len(hand) for i in indices):
-        raise IllegalActionError("Card index out of range")
-
     discarded = [hand[i] for i in sorted(indices)]
     discard_cards_from_highlighted(gs, discarded)
     return gs
@@ -777,7 +786,6 @@ def discard_cards_from_highlighted(
 
 def _handle_cash_out(gs: dict[str, Any]) -> dict[str, Any]:
     """Synchronous F8 port of ``G.FUNCS.cash_out``."""
-    _require_phase(gs, GamePhase.ROUND_EVAL)
 
     rng = gs.get("rng")
     rr = gs["round_resets"]
@@ -872,16 +880,9 @@ def _handle_buy_card(gs: dict[str, Any], idx: int) -> dict[str, Any]:
     - Playing card: add to deck, fire ``playing_card_added`` joker context
     - Fire ``buying_card`` on all jokers
     """
-    _require_phase(gs, GamePhase.SHOP)
 
     shop_cards: list = gs.get("shop_cards", [])
-    if idx < 0 or idx >= len(shop_cards):
-        raise IllegalActionError(f"Invalid shop index {idx}")
-
     card = shop_cards[idx]
-    if card.cost > gs.get("dollars", 0):
-        raise IllegalActionError("Cannot afford card")
-
     gs["dollars"] -= card.cost
     shop_cards.pop(idx)
     # Place card in appropriate area
@@ -908,19 +909,36 @@ def _handle_buy_card(gs: dict[str, Any], idx: int) -> dict[str, Any]:
     return gs
 
 
-def _handle_sell_card(gs: dict[str, Any], area: str, idx: int) -> dict[str, Any]:
-    """Sell through the single queued implementation in :mod:`shop`."""
-    _require_phase(gs, GamePhase.SHOP)
+def _handle_buy_and_use(
+    gs: dict[str, Any], idx: int, targets: tuple[int, ...] | None
+) -> dict[str, Any]:
+    """Buy a shop consumable and use it at once (``buy_and_use``, audit D57).
 
+    L: button_callbacks.lua:2404-2470 — with the ``buy_and_use`` id the card
+    skips ``check_for_buy_space`` and is NOT emplaced in the consumable row;
+    every joker still sees ``buying_card``; the cost is paid; then
+    ``G.FUNCS.use_card`` uses it from the shop area.
+    """
+    shop_cards: list = gs.get("shop_cards", [])
+    card = shop_cards.pop(idx)
+    _fire_shop_joker_context(gs, buying_card=True)
+    gs["dollars"] -= card.cost
+    _use_consumable_card(gs, card, targets)
+    lifecycle.remove(gs, card)
+    return gs
+
+
+def _handle_sell_card(gs: dict[str, Any], area: str, idx: int) -> dict[str, Any]:
+    """Sell through the single queued implementation in :mod:`shop`.
+
+    Legal in every stable phase (``Card:can_sell_card``, card.lua:1640;
+    audit D23) — legality.illegal_reason has already accepted it.
+    """
     from jackdaw.engine.shop import sell_card
 
     result = sell_card(gs, area, idx)
-    if not result["ok"]:
-        reason = result["reason"]
-        if reason == "eternal":
-            raise IllegalActionError("Cannot sell eternal card")
-        raise IllegalActionError(f"Cannot sell card: {reason}")
-
+    if not result["ok"]:  # pragma: no cover - legality rejects these first
+        raise IllegalActionError(f"Cannot sell card: {result['reason']}")
     return gs
 
 
@@ -929,49 +947,19 @@ def _handle_use_consumable(
 ) -> dict[str, Any]:
     """Use a consumable from the player's consumable slots.
 
-    Consumables can be used in BLIND_SELECT, SELECTING_HAND,
-    ROUND_EVAL, and SHOP phases.  The phase does NOT change after use.
+    Legal in every stable phase, including while a pack is open (audit D57);
+    ``can_use_consumeable`` and the targets were checked by
+    legality.illegal_reason. The phase does NOT change after use.
 
     Sequence:
-    1. Validate phase and index
-    2. Pop card from consumables
-    3. Use via ``_use_consumable_card`` (builds ConsumableContext,
+    1. Pop card from consumables
+    2. Use via ``_use_consumable_card`` (builds ConsumableContext,
        applies ConsumableResult effects, and fires the one
        ``using_consumeable`` joker pass)
-    4. Track usage stats (last_tarot_planet)
+    3. Track usage stats (last_tarot_planet)
     """
-    _require_phase(
-        gs, GamePhase.BLIND_SELECT, GamePhase.SELECTING_HAND, GamePhase.ROUND_EVAL, GamePhase.SHOP
-    )
-
     consumables: list = gs.get("consumables", [])
-    if idx < 0 or idx >= len(consumables):
-        raise IllegalActionError(f"Invalid consumable index {idx}")
-
-    card = consumables[idx]
-
-    # Validate can_use before consuming (matches Balatro's can_use_consumeable)
-    from jackdaw.engine.consumables import can_use_consumable
-
-    hand: list = gs.get("hand", [])
-    highlighted: list = []
-    if targets:
-        highlighted = [hand[i] for i in targets if i < len(hand)]
-
-    if not can_use_consumable(
-        card,
-        highlighted=highlighted,
-        hand_cards=hand,
-        jokers=gs.get("jokers", []),
-        consumables=consumables,
-        joker_limit=gs.get("joker_slots", 5),
-        consumable_limit=gs.get("consumable_slots", 2),
-        game_state=gs,
-    ):
-        consumable_name = card.ability.get("name", card.center_key)
-        raise IllegalActionError(f"Consumable {consumable_name!r} cannot be used at this time")
-
-    consumables.pop(idx)
+    card = consumables.pop(idx)
     _use_consumable_card(gs, card, targets)
     lifecycle.remove(gs, card)
 
@@ -981,16 +969,9 @@ def _handle_use_consumable(
 
 def _handle_redeem_voucher(gs: dict[str, Any], idx: int) -> dict[str, Any]:
     """Purchase and activate a voucher."""
-    _require_phase(gs, GamePhase.SHOP)
 
     vouchers: list = gs.get("shop_vouchers", [])
-    if idx < 0 or idx >= len(vouchers):
-        raise IllegalActionError(f"Invalid voucher index {idx}")
-
     card = vouchers[idx]
-    if card.cost > gs.get("dollars", 0):
-        raise IllegalActionError("Cannot afford voucher")
-
     gs["dollars"] -= card.cost
     vouchers.pop(idx)
 
@@ -1017,16 +998,9 @@ def _handle_open_booster(gs: dict[str, Any], idx: int) -> dict[str, Any]:
     5. Fire ``open_booster`` joker context (Hallucination)
     6. Phase → PACK_OPENING
     """
-    _require_phase(gs, GamePhase.SHOP)
 
     boosters: list = gs.get("shop_boosters", [])
-    if idx < 0 or idx >= len(boosters):
-        raise IllegalActionError(f"Invalid booster index {idx}")
-
     pack = boosters[idx]
-    if pack.cost > gs.get("dollars", 0):
-        raise IllegalActionError("Cannot afford booster")
-
     gs["dollars"] -= pack.cost
     boosters.pop(idx)
     lifecycle.remove(gs, pack)
@@ -1103,15 +1077,9 @@ def _handle_pick_pack_card(
     closes: remaining cards are removed, dealt hand cards (if any)
     return to deck, and phase restores to SHOP.
     """
-    _require_phase(gs, GamePhase.PACK_OPENING)
 
     pack_cards: list = gs.get("pack_cards", [])
     remaining = gs.get("pack_choices_remaining", 0)
-    if remaining <= 0:
-        raise IllegalActionError("No pack choices remaining")
-    if idx < 0 or idx >= len(pack_cards):
-        raise IllegalActionError(f"Invalid pack card index {idx}")
-
     card = pack_cards.pop(idx)
     gs["pack_choices_remaining"] = remaining - 1
 
@@ -1144,7 +1112,6 @@ def _handle_skip_pack(gs: dict[str, Any]) -> dict[str, Any]:
     Fires ``skipping_booster`` on all jokers (Red Card +mult per skip),
     then closes the pack.
     """
-    _require_phase(gs, GamePhase.PACK_OPENING)
 
     # Fire skipping_booster joker context (Red Card +mult)
     _fire_shop_joker_context(gs, skipping_booster=True)
@@ -1160,18 +1127,17 @@ def _handle_reroll(gs: dict[str, Any]) -> dict[str, Any]:
     - Fire ``reroll_shop`` on all jokers (Flash Card +mult)
     - Track times_rerolled stat
     """
-    _require_phase(gs, GamePhase.SHOP)
 
     cr = gs.get("current_round", {})
     free = cr.get("free_rerolls", 0)
     cost = cr.get("reroll_cost", 5)
 
+    # Affordability (incl. Credit Card debt, can_reroll l.2076) was checked
+    # by legality.illegal_reason.
     if free > 0:
         cr["free_rerolls"] = free - 1
-    elif gs.get("dollars", 0) >= cost:
-        gs["dollars"] -= cost
     else:
-        raise IllegalActionError("Cannot afford reroll")
+        gs["dollars"] -= cost
 
     # Increment reroll cost for the next reroll. Uses the canonical
     # calculator (mirrors common_events.lua:2263) instead of the old inline
@@ -1204,7 +1170,6 @@ def _handle_next_round(gs: dict[str, Any]) -> dict[str, Any]:
     - Fire ``ending_shop`` on all jokers (Perkeo copies consumable)
     - Process Perkeo side-effects
     """
-    _require_phase(gs, GamePhase.SHOP)
 
     # Fire ending_shop joker context (Perkeo)
     from jackdaw.engine.jokers import fire_jokers
@@ -1235,7 +1200,6 @@ def _handle_next_round(gs: dict[str, Any]) -> dict[str, Any]:
 
 def _handle_sort_hand(gs: dict[str, Any], mode: str) -> dict[str, Any]:
     """Sort the hand by rank or suit."""
-    _require_phase(gs, GamePhase.SELECTING_HAND)
 
     hand: list = gs.get("hand", [])
     if mode == "rank":
@@ -1261,13 +1225,9 @@ def _handle_swap_hand(gs: dict[str, Any], idx: int, direction: int) -> dict[str,
     *direction* is ``-1`` (left) or ``+1`` (right).
     Free action — no cost, doesn't consume hands or discards.
     """
-    _require_phase(gs, GamePhase.SELECTING_HAND)
 
     hand: list = gs.get("hand", [])
     other = idx + direction
-    if not (0 <= idx < len(hand) and 0 <= other < len(hand)):
-        raise IllegalActionError("Swap index out of range")
-
     hand[idx], hand[other] = hand[other], hand[idx]
     return gs
 
@@ -1277,13 +1237,9 @@ def _handle_swap_jokers(gs: dict[str, Any], idx: int, direction: int) -> dict[st
 
     *direction* is ``-1`` (left) or ``+1`` (right).
     """
-    _require_phase(gs, GamePhase.SELECTING_HAND, GamePhase.SHOP)
 
     jokers: list = gs.get("jokers", [])
     other = idx + direction
-    if not (0 <= idx < len(jokers) and 0 <= other < len(jokers)):
-        raise IllegalActionError("Swap index out of range")
-
     jokers[idx], jokers[other] = jokers[other], jokers[idx]
     return gs
 

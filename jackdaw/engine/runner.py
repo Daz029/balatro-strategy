@@ -34,6 +34,7 @@ from jackdaw.engine.actions import (
     get_legal_actions,
 )
 from jackdaw.engine.game import IllegalActionError, step
+from jackdaw.engine.legality import with_forced_card
 from jackdaw.engine.run_init import initialize_run
 
 
@@ -139,18 +140,19 @@ def random_agent(
 
     action = _random.choice(pool)
 
-    # Resolve marker actions with random card indices
+    # Resolve marker actions with random card indices (Cerulean Bell's forced
+    # card is always part of a vanilla selection).
     if isinstance(action, PlayHand) and not action.card_indices and hand:
         n = min(5, len(hand))
         count = _random.randint(1, n)
         indices = tuple(sorted(_random.sample(range(len(hand)), count)))
-        return PlayHand(card_indices=indices)
+        return PlayHand(card_indices=with_forced_card(game_state, indices))
 
     if isinstance(action, Discard) and not action.card_indices and hand:
         n = min(5, len(hand))
         count = _random.randint(1, n)
         indices = tuple(sorted(_random.sample(range(len(hand)), count)))
-        return Discard(card_indices=indices)
+        return Discard(card_indices=with_forced_card(game_state, indices))
 
     return action
 
@@ -183,7 +185,7 @@ def greedy_play_agent(
     for a in legal_actions:
         if isinstance(a, PlayHand) and hand:
             n = min(5, len(hand))
-            return PlayHand(card_indices=tuple(range(n)))
+            return PlayHand(card_indices=with_forced_card(game_state, tuple(range(n))))
 
     # Fallback
     return legal_actions[0]

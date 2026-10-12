@@ -518,8 +518,9 @@ class HandPlayAdapter:
 
     def step(self, action: Action) -> GameState:
         from jackdaw.engine.game import step as engine_step
+        from jackdaw.env.interim_constraints import with_cerulean_bell
 
-        engine_step(self._gs, action)
+        engine_step(self._gs, with_cerulean_bell(self._gs, action))
         return snapshot(self._gs)
 
     # -- snapshot / restore (start-state reservoir substrate) ------------------

@@ -289,10 +289,8 @@ encoder read them as constant 0 until Phase 2.
 
     used_vouchers           dict[str, bool]   Redeemed vouchers {key: True}.
                                               Set by run_init (starting vouchers), game (redeem).
-    boss_blind_rerolls      int               Boss blind rerolls remaining (-1 = unlimited).
-                                              Set by voucher (Director's Cut, Retcon).
-    boss_blind_reroll_cost  int               Cost per boss reroll.
-                                              Set by voucher.
+                                              Boss rerolls read used_vouchers +
+                                              round_resets.boss_rerolled.
 
 
 .. rubric:: Run tracking / statistics
@@ -451,6 +449,10 @@ def migrate_state(gs: dict[str, Any]) -> dict[str, Any]:
     gs.pop("free_rerolls", None)
     # Challenge-only inflation amount (always 0 in vanilla); removed 2026-10-12.
     gs.pop("inflation", None)
+    # Invented boss-reroll keys (never read; Lua uses used_vouchers +
+    # round_resets.boss_rerolled); removed 2026-10-12 (audit D52).
+    gs.pop("boss_blind_rerolls", None)
+    gs.pop("boss_blind_reroll_cost", None)
 
     # The init key "tags" was never read; live tags are "awarded_tags".
     if isinstance(gs.get("tags"), dict):
@@ -599,8 +601,6 @@ STATE_KEYS: dict[str, str] = {
     "pack_choices_remaining": "picks left (Lua pack_choices); game",
     "pending_tag_packs": "tag-granted packs to open; game, tags",
     "awarded_tags": "awarded tags in order (Lua G.GAME.tags); game, tags",
-    "boss_blind_rerolls": "boss rerolls left; vouchers",
-    "boss_blind_reroll_cost": "boss reroll cost; vouchers",
     # pools / vouchers
     "used_jokers": "current-card pool exclusion set; lifecycle",
     "used_vouchers": "redeemed vouchers; run_init, game",

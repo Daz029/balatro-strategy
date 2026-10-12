@@ -7,9 +7,9 @@ environments hold the constraints; env masks are reconstructed LATER
 Seeded episodes are driven ONLY by the env masks (a seeded pick among
 ``action_masks()``), so the trajectory depends on env legality plus engine
 dynamics, never on the engine's own legal-action list. Each step hashes the
-env's canonical mask, the generic ``get_action_mask`` arrays and
-``hand_action_mask``; the per-env digest chain is compared with a fixture
-generated on the pre-Phase-6 engine.
+env's canonical mask, ``hand_action_mask`` and the chosen action; the
+per-env digest chain is compared with a fixture generated on the
+pre-Phase-6 engine.
 
 Regenerate (ONLY on a commit whose masks are known-good):
     REGEN_MASK_PIN=1 uv run pytest tests/env/test_mask_pin.py
@@ -51,8 +51,12 @@ def _generic_mask_bytes(gs: dict[str, Any]) -> bytes:
 
 
 def _step_digest(h: Any, env_mask: np.ndarray, gs: dict[str, Any], action: int) -> None:
+    # What the training envs' agents see: their own canonical mask, the
+    # hand mask, and (through the chosen action) the trajectory. The generic
+    # ``get_action_mask`` is NOT hashed: it is the generic BalatroEnvironment's
+    # mask, deliberately patched in Phase 6 so that env stops offering pack
+    # picks the vanilla engine rejects (see _pack_pick_mask).
     h.update(np.asarray(env_mask, dtype=bool).tobytes())
-    h.update(_generic_mask_bytes(gs))
     h.update(hand_action_mask(gs).tobytes())
     h.update(str(action).encode())
 

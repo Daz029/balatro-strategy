@@ -366,7 +366,8 @@ class TestD38GrimRng:
 
     def test_fixed_seed_exact_created_suits(self) -> None:
         gs = initialize_run("b_red", 1, "D38_GRIM")
-        gs["phase"] = GamePhase.SHOP
+        # Grim needs a hand on screen (card.lua:1565): SELECTING_HAND.
+        gs["phase"] = GamePhase.SELECTING_HAND
         grim = _owned_consumable(gs, "c_grim")
         del grim
         gs["hand"] = [

@@ -312,22 +312,6 @@ class TestApplyVoucherSlots:
         assert gs["consumable_slots"] == 3
 
 
-class TestApplyVoucherAnteModifiers:
-    def test_directors_cut(self):
-        gs = _voucher_gs()
-        apply_voucher("v_directors_cut", gs)
-        assert gs["boss_blind_rerolls"] == 1
-        assert gs["boss_blind_reroll_cost"] == 10
-
-
-class TestApplyVoucherBossBlindRerolls:
-    def test_retcon_sets_unlimited_free_rerolls(self):
-        gs = _voucher_gs()
-        apply_voucher("v_retcon", gs)
-        assert gs["boss_blind_rerolls"] == -1
-        assert gs["boss_blind_reroll_cost"] == 0
-
-
 class TestApplyVoucherPassive:
     def test_hone_doubles_edition_rate(self):
         gs = _voucher_gs()
