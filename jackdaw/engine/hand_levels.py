@@ -76,9 +76,8 @@ class HandLevels:
         h.chips = max(0, base.s_chips + base.l_chips * (h.level - 1))
         h.mult = max(1, base.s_mult + base.l_mult * (h.level - 1))
 
-        # Make visible once leveled (secret hands become visible)
-        if h.level > 1:
-            h.visible = True
+        # L: common_events.lua:464-468 — level_up_hand changes only level,
+        # chips, and mult; secret-hand visibility is revealed on play instead.
 
     def record_play(self, hand_type: HandType | str) -> None:
         """Record that *hand_type* was played once."""

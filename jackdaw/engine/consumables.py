@@ -32,6 +32,7 @@ from jackdaw.engine.effects import (
     DestroyPlayingCards,
     EaseDollars,
     Effect,
+    IncrementEctoplasmPenalty,
     LevelUpHand,
     SetDollars,
     SetEdition,
@@ -136,6 +137,9 @@ class ConsumableResult:
     hand_size_mod: int = 0
     """Ectoplasm (-1), Ouija (-1) reduce hand size."""
 
+    increment_ecto_minus: bool = False
+    """Advance Ectoplasm's run-wide hand-size penalty after a successful use."""
+
     money_set: int | None = None
     """Wraith sets money to 0."""
 
@@ -157,6 +161,7 @@ _CONSUMABLE_EFFECT_FIELDS = frozenset(
         "add_to_deck",
         "add_edition",
         "hand_size_mod",
+        "increment_ecto_minus",
     }
 )
 
@@ -243,6 +248,8 @@ def consumable_effects(result: ConsumableResult) -> list[Effect]:
         )
     if result.hand_size_mod:
         effects.append(ChangeHandSize(delta=result.hand_size_mod))
+    if result.increment_ecto_minus:
+        effects.append(IncrementEctoplasmPenalty())
     return effects
 
 
@@ -943,7 +950,20 @@ def _grim(card: Card, ctx: ConsumableContext) -> ConsumableResult:
     hand = list(ctx.hand_cards)
     destroyed, _ = ctx.rng.element(hand, ctx.rng.seed("random_destroy"))
     count = card.ability.get("extra", 2)
-    created = [_roll_card_spec(["A"], "grim_create", "grim_create", ctx.rng) for _ in range(count)]
+    created = []
+    for _ in range(count):
+        # L: card.lua:1322-1327 — Grim assigns Ace directly and advances
+        # grim_create only for the suit; spe_card is a separate draw.
+        suit_code, _ = ctx.rng.element(list(_SUIT_CODE), ctx.rng.seed("grim_create"))
+        enhancement, _ = ctx.rng.element(_get_enhanced_pool(), ctx.rng.seed("spe_card"))
+        created.append(
+            {
+                "rank": _RANK_CODE["A"],
+                "suit": _SUIT_CODE[suit_code],
+                "enhancement": enhancement,
+                "area": "hand",
+            }
+        )
     return ConsumableResult(destroy=[destroyed], add_to_deck=created)
 
 
@@ -1054,10 +1074,10 @@ def _aura(_card: Card, ctx: ConsumableContext) -> ConsumableResult:
 
 @register_consumable("c_ectoplasm")
 def _ectoplasm(_card: Card, ctx: ConsumableContext) -> ConsumableResult:
-    """Ectoplasm: add Negative edition to a random editionless joker, -1 hand size.
+    """Ectoplasm: add Negative edition and pay the increasing hand-size cost.
 
     Source: card.lua:1270.  Seed: 'ectoplasm'.
-    hand_size_mod=-1 is cumulative (each use subtracts 1 permanently).
+    The run-wide cost grows 1, 2, 3, ... across successful uses.
     """
     if ctx.rng is None:
         return ConsumableResult()
@@ -1065,9 +1085,13 @@ def _ectoplasm(_card: Card, ctx: ConsumableContext) -> ConsumableResult:
     if not editionless:
         return ConsumableResult()
     target, _ = ctx.rng.element(editionless, ctx.rng.seed("ectoplasm"))
+    # L: card.lua:1494-1498 — spend the current run-wide cost; its increment
+    # is emitted separately so every mutation runs through the effect queue.
+    penalty = read.ectoplasm_penalty(ctx.game_state or {})
     return ConsumableResult(
         add_edition={"target": target, "edition": {"negative": True}},
-        hand_size_mod=-1,
+        hand_size_mod=-penalty,
+        increment_ecto_minus=True,
     )
 
 

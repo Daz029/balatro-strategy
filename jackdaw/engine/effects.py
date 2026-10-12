@@ -550,6 +550,33 @@ class ChangeHandSize(Effect):
 
 
 @dataclass(kw_only=True)
+class IncrementEctoplasmPenalty(Effect):
+    """Advance ``G.GAME.ecto_minus`` after Ectoplasm applies."""
+
+    amount: int = 1
+
+    def apply(self, gs: dict[str, Any]) -> None:
+        # L: card.lua:1494-1498 — each successful use increments the run-wide
+        # cost after changing hand size by its current value.
+        gs["ecto_minus"] = gs.get("ecto_minus", 1) + self.amount
+
+
+@dataclass(kw_only=True)
+class IncreaseSellValues(Effect):
+    """Gift Card's cost-setter update over owned cards."""
+
+    cards: tuple[Card, ...]
+    amount: int
+
+    def apply(self, gs: dict[str, Any]) -> None:
+        # L: card.lua:2993-3005 — update extra_value, then call set_cost for
+        # every owned Joker and consumable.
+        for card in self.cards:
+            card.ability["extra_value"] = card.ability.get("extra_value", 0) + self.amount
+            card.set_cost(gs)
+
+
+@dataclass(kw_only=True)
 class ShuffleArea(Effect):
     """Shuffle one card area with a fresh advance of a named Lua stream."""
 
@@ -607,6 +634,8 @@ EFFECT_TYPES: tuple[type[Effect], ...] = (
     LevelUpHand,
     ChangeRoundResource,
     ChangeHandSize,
+    IncrementEctoplasmPenalty,
+    IncreaseSellValues,
     ShuffleArea,
     DisableBlind,
     SetPoolFlag,

@@ -90,6 +90,7 @@ def test_every_consumable_result_field_translates_to_an_effect() -> None:
         "add_edition": {"target": card, "edition": {"foil": True}},
         "destroy_jokers": [joker],
         "hand_size_mod": -1,
+        "increment_ecto_minus": True,
         "money_set": 0,
     }
 

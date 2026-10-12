@@ -112,17 +112,15 @@ class CardArea:
 
     def sort_by_value(self, descending: bool = True) -> None:
         """Sort cards by rank nominal value, matching ``CardArea:sort('desc')``."""
-        self.cards.sort(
-            key=lambda c: _card_nominal(c),
-            reverse=descending,
-        )
+        # L: cardarea.lua:194-205; card.lua:950-955 — every sort calls the
+        # one Card:get_nominal implementation.
+        self.cards.sort(key=lambda c: c.get_nominal(), reverse=descending)
 
     def sort_by_suit(self, descending: bool = True) -> None:
         """Sort cards by suit then rank, matching ``CardArea:sort('suit desc')``."""
-        self.cards.sort(
-            key=lambda c: _card_nominal_suit(c),
-            reverse=descending,
-        )
+        # L: cardarea.lua:194-205; card.lua:950-955 — suit sorting changes
+        # only the modifier passed to the same nominal implementation.
+        self.cards.sort(key=lambda c: c.get_nominal("suit"), reverse=descending)
 
     # -- info ---------------------------------------------------------------
 
@@ -131,45 +129,6 @@ class CardArea:
 
     def __repr__(self) -> str:
         return f"CardArea(type={self.type!r}, cards={len(self.cards)}, limit={self.card_limit})"
-
-
-# ---------------------------------------------------------------------------
-# Sorting helpers (match Card:get_nominal in card.lua:950)
-# ---------------------------------------------------------------------------
-
-
-def _card_nominal(card: Card) -> float:
-    """Sort key for rank-based sorting (``Card:get_nominal()``)."""
-    if card.base is None:
-        return 0.0
-    b = card.base
-    effect = card.ability.get("effect", "")
-    stone_penalty = -1000.0 if effect == "Stone Card" else 0.0
-    return (
-        b.nominal
-        + b.suit_nominal
-        + (b.suit_nominal_original or 0) * 0.0001
-        + b.face_nominal
-        + 0.000001 * card.sort_id
-        + stone_penalty
-    )
-
-
-def _card_nominal_suit(card: Card) -> float:
-    """Sort key for suit-based sorting (``Card:get_nominal('suit')``)."""
-    if card.base is None:
-        return 0.0
-    b = card.base
-    effect = card.ability.get("effect", "")
-    stone_penalty = -1000.0 if effect == "Stone Card" else 0.0
-    return (
-        b.nominal
-        + b.suit_nominal * 1000
-        + (b.suit_nominal_original or 0) * 0.0001 * 1000
-        + b.face_nominal
-        + 0.000001 * card.sort_id
-        + stone_penalty
-    )
 
 
 # ---------------------------------------------------------------------------

@@ -300,12 +300,13 @@ class TestCopyResolution:
         )
         assert not res[1].active
 
-    def test_brainstorm_resolves_leftmost_skipping_self(self):
+    def test_leftmost_brainstorm_is_inactive(self):
+        """card.lua:2321-2327 targets slot one, then rejects itself."""
         brain = create_joker("j_brainstorm")
         photo = create_joker("j_photograph")
         res = resolve_copy_targets(_gs([], [brain, photo]))
-        assert res[0].active
-        assert res[0].target_index == 1
+        assert not res[0].active
+        assert res[0].target_index == -1
 
     def test_chain_resolves_through_copies(self):
         # [lusty, blueprint, brainstorm]: Blueprint copies Brainstorm,

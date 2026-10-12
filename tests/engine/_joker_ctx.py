@@ -45,6 +45,7 @@ def make_ctx(**kwargs: Any) -> JokerContext:
         consumables = [object() for _ in range(consumables_owned)]
     else:
         consumables = list(consumables_owned)
+    snapshot_values.setdefault("consumables", tuple(consumables))
 
     gs = {
         "jokers": queue_jokers,

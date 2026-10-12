@@ -346,14 +346,14 @@ class TestSerializeHands:
         # mult = 2 + 1 * (3-1) = 4
         assert pair["mult"] == 4
 
-    def test_secret_hand_visible_after_level_up(self):
+    def test_secret_hand_hidden_after_level_up(self):
         hl = HandLevels()
         assert "Flush Five" not in serialize_hands(hl)
 
         hl.level_up("Flush Five")
         result = serialize_hands(hl)
-        assert "Flush Five" in result
-        assert result["Flush Five"]["level"] == 2
+        # L: common_events.lua:464-468 — leveling does not reveal secret hands.
+        assert "Flush Five" not in result
 
 
 # ============================================================================

@@ -37,6 +37,11 @@ def probability(gs: dict[str, Any]) -> float:
     return float(gs.get("probabilities", {}).get("normal", 1))
 
 
+def ectoplasm_penalty(gs: dict[str, Any]) -> int:
+    """Return the next Ectoplasm hand-size cost (``card.lua:1494-1498``)."""
+    return gs.get("ecto_minus", 1)
+
+
 def has_voucher(gs: dict[str, Any], key: str) -> bool:
     """Return whether *key* is truthy in ``G.GAME.used_vouchers``."""
     return bool(gs.get("used_vouchers", {}).get(key))
@@ -276,8 +281,8 @@ def played_hand_types(gs: dict[str, Any]) -> set[str]:
     """Hand types played at least once this run (Planet pool softlock gate).
 
     common_events.lua:2009 gates a Planet on ``G.GAME.hands[hand_type].played > 0``.
-    Leveling a secret hand (Black Hole) makes it visible but does not unlock
-    its Planet. Empty when the state has no hand levels.
+    Leveling a secret hand (including Black Hole) neither reveals it nor
+    unlocks its Planet. Empty when the state has no hand levels.
     """
     hand_levels = gs.get("hand_levels")
     if hand_levels is None:
@@ -398,6 +403,11 @@ class StateView:
     @cached_property
     def joker_slots(self) -> int:
         return self._gs.get("joker_slots", 5)
+
+    @cached_property
+    def consumables(self) -> tuple[Card, ...]:
+        """Owned consumables (Gift Card, ``card.lua:3000-3005``)."""
+        return tuple(self._gs.get("consumables", []))
 
     @property
     def money(self) -> int:

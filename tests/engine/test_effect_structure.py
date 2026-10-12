@@ -118,6 +118,17 @@ def _effect_case(
         before = gs["hand_size"]
         effect = effects.ChangeHandSize(delta=-1)
         return gs, effect, lambda: _assert_equal(gs["hand_size"], before - 1)
+    if effect_type is effects.IncrementEctoplasmPenalty:
+        before = gs["ecto_minus"]
+        effect = effects.IncrementEctoplasmPenalty()
+        return gs, effect, lambda: _assert_equal(gs["ecto_minus"], before + 1)
+    if effect_type is effects.IncreaseSellValues:
+        target = create_joker("j_joker", game_state=gs)
+        lifecycle.emplace(gs, target, "jokers")
+        target.set_cost(gs)
+        before = target.sell_cost
+        effect = effects.IncreaseSellValues(cards=(target,), amount=1)
+        return gs, effect, lambda: _assert_sell_value(target, before)
     if effect_type is effects.ShuffleArea:
         before = list(gs["deck"])
         effect = effects.ShuffleArea(area="deck", seed_key="effect_shuffle")
@@ -171,6 +182,11 @@ def _assert_playing_cards_removed(gs: dict[str, Any], targets: list[Card]) -> No
 def _assert_round_resources(gs: dict[str, Any], before_hands: int) -> None:
     assert gs["current_round"]["hands_left"] == before_hands + 2
     assert gs["current_round"]["discards_left"] == 1
+
+
+def _assert_sell_value(target: Card, before: int) -> None:
+    assert target.ability["extra_value"] == 1
+    assert target.sell_cost == before + 1
 
 
 @pytest.mark.parametrize("effect_type", effects.EFFECT_TYPES, ids=lambda cls: cls.__name__)
@@ -255,6 +271,7 @@ _EXPECTED_EFFECT_PRODUCER_CONTEXTS = {
     "j_chicot": {"setting_blind"},
     "j_diet_cola": {"selling_self"},
     "j_gros_michel": {"end_of_round"},
+    "j_gift": {"end_of_round"},
     "j_hallucination": {"open_booster"},
     "j_ice_cream": {"after"},
     "j_invisible": {"selling_self"},

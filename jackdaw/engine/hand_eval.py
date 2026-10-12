@@ -190,9 +190,9 @@ def get_highest(hand: list[Card]) -> list[list[Card]]:
     if not hand:
         return []
 
-    from jackdaw.engine.card_area import _card_nominal
-
-    highest = max(hand, key=_card_nominal)
+    # L: misc_functions.lua:613-619; card.lua:950-955 — High Card compares
+    # through the same Card:get_nominal implementation as CardArea sorting.
+    highest = max(hand, key=lambda card: card.get_nominal())
     return [[highest]]
 
 

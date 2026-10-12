@@ -182,7 +182,8 @@ class TestDna:
         ctx = make_ctx(before=True, full_hand=played, hands_played=1)
         assert calculate_joker(j, ctx) is None
 
-    def test_blueprint_does_not_copy(self):
+    def test_blueprint_copies_first_hand_branch(self):
+        """card.lua:3501-3522 omits a Blueprint guard on the copy branch."""
         j = _joker("j_dna")
         played = [_card("Hearts", "Ace")]
         ctx = make_ctx(
@@ -191,7 +192,9 @@ class TestDna:
             hands_played=0,
             blueprint=1,
         )
-        assert calculate_joker(j, ctx) is None
+        result = calculate_joker(j, ctx)
+        assert result is not None
+        assert result.copy_held_card is played[0]
 
 
 class TestRiffRaff:
@@ -410,10 +413,12 @@ class TestGiftCard:
         j2 = _joker("j_stuntman", extra={"chip_mod": 250})
         jokers = [gift, j1, j2]
         for j in jokers:
+            j.base_cost = 4
             j.sell_cost = 2
 
         ctx = make_ctx(end_of_round=True, jokers=jokers)
         calculate_joker(gift, ctx)
+        ctx.queue.apply()
 
         for j in jokers:
             assert j.ability.get("extra_value", 0) == 1
@@ -424,10 +429,13 @@ class TestGiftCard:
         j1 = _joker("j_joker", mult=4)
         jokers = [gift, j1]
         for j in jokers:
+            j.base_cost = 2
             j.sell_cost = 1
 
         for _ in range(3):
-            calculate_joker(gift, make_ctx(end_of_round=True, jokers=jokers))
+            ctx = make_ctx(end_of_round=True, jokers=jokers)
+            calculate_joker(gift, ctx)
+            ctx.queue.apply()
 
         assert j1.ability["extra_value"] == 3
         assert j1.sell_cost == 4
@@ -930,7 +938,8 @@ class TestHiker:
         assert r2.chips == 42.0
         assert played[0].ability["perma_bonus"] == 10
 
-    def test_blueprint_does_not_mutate(self):
+    def test_blueprint_also_mutates(self):
+        """card.lua:3067-3074 has no Blueprint guard."""
         j = _joker("j_hiker", extra=5)
         ace = _card("Hearts", "Ace")
         ctx = make_ctx(
@@ -940,7 +949,7 @@ class TestHiker:
             blueprint=1,
         )
         calculate_joker(j, ctx)
-        assert ace.ability.get("perma_bonus", 0) == 0
+        assert ace.ability.get("perma_bonus", 0) == 5
 
 
 # ============================================================================

@@ -679,13 +679,14 @@ class Card:
             mult = 1000.0
         if self.ability.get("effect") == "Stone Card":
             mult = -1000.0
-        unique_val = 1.0 - self.sort_id / 1603301.0
+        # L: card.lua:950-955 — nominal ordering uses the card's unique_val
+        # after applying the Stone/suit multiplier to both suit terms.
         return (
             self.base.nominal
             + self.base.suit_nominal * mult
             + (self.base.suit_nominal_original or 0.0) * 0.0001 * mult
             + self.base.face_nominal
-            + 0.000001 * unique_val
+            + 0.000001 * self.unique_val
         )
 
     def get_chip_bonus(self) -> int:

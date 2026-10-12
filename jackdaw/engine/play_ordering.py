@@ -370,10 +370,10 @@ def sorted_joker_order(jokers: list[Card]) -> list[Card]:
     jokers before x-mult-position jokers, copy jokers placed by adjacency
     heuristic (no evaluation -- the context-free tier):
 
-      - Brainstorm copies the LEFTMOST joker regardless of its own slot; its
-        copied effect fires at its own position. After the partition the
-        leftmost is additive whenever any additive joker exists, so an early
-        slot (index 1, right after its target) is the safe placement.
+      - Brainstorm copies the LEFTMOST joker unless it occupies that slot
+        itself (card.lua:2321-2327); its copied effect fires at its own
+        position. After the partition the leftmost is additive whenever any
+        additive joker exists, so index 1, right after its target, is safe.
       - Blueprint copies its RIGHT neighbor, so it goes immediately before
         the LAST non-copy joker -- an x-mult joker whenever one exists
         (doubling an x-mult dominates doubling an additive of comparable

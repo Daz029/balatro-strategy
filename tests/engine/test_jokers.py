@@ -730,10 +730,13 @@ class TestBlackboard:
         ctx = make_ctx(joker_main=True, held_cards=held)
         assert calculate_joker(joker, ctx) is None
 
-    def test_empty_held_no_effect(self):
+    def test_empty_held_triggers(self):
+        """card.lua:3951-3963 passes because zero black equals zero total."""
         joker = _joker_card("j_blackboard", extra=3)
         ctx = make_ctx(joker_main=True, held_cards=[])
-        assert calculate_joker(joker, ctx) is None
+        result = calculate_joker(joker, ctx)
+        assert result is not None
+        assert result.Xmult_mod == 3
 
     def test_wild_card_counts(self):
         """Wild Card is_suit returns True for any suit including Clubs/Spades."""
@@ -1499,15 +1502,13 @@ class TestBrainstorm:
         assert result is not None
         assert result.mult_mod == 4
 
-    def test_brainstorm_is_leftmost_skips_self(self):
-        """Brainstorm is leftmost → copies the second joker."""
+    def test_brainstorm_is_leftmost_no_effect(self):
+        """card.lua:2321-2327 targets itself in slot one, then no-ops."""
         brain = _joker_card("j_brainstorm")
         joker = _joker_card("j_joker", mult=4)
         jokers = [brain, joker]
         ctx = make_ctx(joker_main=True, jokers=jokers)
-        result = calculate_joker(brain, ctx)
-        assert result is not None
-        assert result.mult_mod == 4
+        assert calculate_joker(brain, ctx) is None
 
     def test_brainstorm_alone_no_effect(self):
         brain = _joker_card("j_brainstorm")

@@ -31,6 +31,7 @@ from jackdaw.engine.effects import (
     DisableBlind,
     Effect,
     EffectQueue,
+    IncreaseSellValues,
     SetPoolFlag,
     UnappliedEffectError,
 )
@@ -58,6 +59,7 @@ class GameSnapshot:
 
     joker_count: int = 0
     joker_slots: int = 5
+    consumables: tuple[Card, ...] = ()
     money: int = 0
     money_with_buffer: int | None = None
     deck_cards_remaining: int = 0
@@ -1046,8 +1048,8 @@ def _blackboard(card: Card, ctx: JokerContext) -> JokerResult | None:
     Uses ``flush_calc=True`` in is_suit calls (matching source).
     """
     if ctx.joker_main and ctx.held_cards is not None:
-        if not ctx.held_cards:
-            return None
+        # L: card.lua:3951-3963 — compare black count with total count, so
+        # the empty held hand succeeds because zero equals zero.
         for c in ctx.held_cards:
             if not (
                 c.is_suit("Clubs", ctx.rules, flush_calc=True)
@@ -1186,7 +1188,9 @@ def _raised_fist(card: Card, ctx: JokerContext) -> JokerResult | None:
             lowest_id = 15
             lowest_card = None
             for c in ctx.held_cards:
-                if c.ability.get("effect") != "Stone Card" and c.get_id() < lowest_id:
+                # L: card.lua:3320-3326 — the >= scan replaces on equal IDs,
+                # selecting the last tied lowest card in hand order.
+                if c.ability.get("effect") != "Stone Card" and c.get_id() <= lowest_id:
                     lowest_id = c.get_id()
                     lowest_card = c
             if ctx.other_card is lowest_card:
@@ -1347,11 +1351,15 @@ def _to_do_list(card: Card, ctx: JokerContext) -> JokerResult | None:
     if ctx.end_of_round and not ctx.blueprint and ctx.rng is not None:
         # Re-roll the target for next round (pseudoseed('to_do')).  Restricted
         # to VISIBLE hand types so the joker cannot ask for an undiscovered
-        # secret hand (Flush Five etc.); HandLevels flips `visible` on once a
-        # hand is leveled.  Falls back to all 12 when hand_levels is absent.
-        choices = [ht for ht in HAND_ORDER]
+        # secret hand (Flush Five etc.); evaluation reveals a secret hand when
+        # it is played (state_events.lua:578). Falls back to all 12 when hand
+        # levels are absent.
+        # L: card.lua:2975-2980 — the current target is excluded from the
+        # re-roll (NEW-CO1-01).
+        current = extra.get("poker_hand")
+        choices = [ht for ht in HAND_ORDER if str(ht) != current]
         if ctx.hand_levels is not None:
-            visible = [ht for ht in HAND_ORDER if ctx.hand_levels[ht].visible]
+            visible = [ht for ht in choices if ctx.hand_levels[ht].visible]
             if visible:
                 choices = visible
         target, _ = ctx.rng.element([str(ht) for ht in choices], ctx.rng.seed("to_do"))
@@ -1396,13 +1404,13 @@ def _find_right_neighbor(card: Card, ctx: JokerContext) -> Card | None:
 
 
 def _find_leftmost(card: Card, ctx: JokerContext) -> Card | None:
-    """Find the leftmost joker that isn't *card*."""
-    if ctx.jokers is None:
+    """Find Brainstorm's slot-one target, or no target when that is itself."""
+    if not ctx.jokers:
         return None
-    for j in ctx.jokers:
-        if j is not card:
-            return j
-    return None
+    # L: card.lua:2321-2327,4225-4237 — Brainstorm always reads slot one;
+    # unlike Blueprint it does not search past itself.
+    leftmost = ctx.jokers[0]
+    return None if leftmost is card else leftmost
 
 
 def blueprint_compatible(target: Card) -> bool:
@@ -2017,7 +2025,9 @@ def _dna(card: Card, ctx: JokerContext) -> JokerResult | None:
     Source: card.lua:3501. Fires in before context when hands_played == 0
     and exactly 1 card in full_hand.
     """
-    if ctx.before and not ctx.blueprint:
+    # L: card.lua:3501-3522 — the first-hand copy branch has no Blueprint
+    # guard (the separate UI pulse branch at 2483 does).
+    if ctx.before:
         if ctx.game.hands_played == 0 and ctx.full_hand and len(ctx.full_hand) == 1:
             return JokerResult(copy_held_card=ctx.full_hand[0])
     return None
@@ -2284,9 +2294,9 @@ def _hiker(card: Card, ctx: JokerContext) -> JokerResult | None:
     Mutates other_card.ability.perma_bonus in-place.
     """
     if ctx.individual and ctx.cardarea == "play" and ctx.other_card is not None:
-        if not ctx.blueprint:
-            pb = ctx.other_card.ability.get("perma_bonus", 0)
-            ctx.other_card.ability["perma_bonus"] = pb + card.ability.get("extra", 5)
+        # L: card.lua:3067-3074 — copied Hikers also add permanent chips.
+        pb = ctx.other_card.ability.get("perma_bonus", 0)
+        ctx.other_card.ability["perma_bonus"] = pb + card.ability.get("extra", 5)
         return JokerResult()
     return None
 
@@ -2375,10 +2385,9 @@ def _gift_card(card: Card, ctx: JokerContext) -> JokerResult | None:
     """
     if ctx.end_of_round and not ctx.blueprint and ctx.jokers:
         increment = card.ability.get("extra", 1)
-        for j in ctx.jokers:
-            j.ability["extra_value"] = j.ability.get("extra_value", 0) + increment
-            j.sell_cost = j.sell_cost + increment
-        return JokerResult()
+        # L: card.lua:2993-3005 — both owned areas are repriced via set_cost.
+        owned = (*ctx.jokers, *ctx.game.consumables)
+        return JokerResult(effects=[IncreaseSellValues(cards=owned, amount=increment)])
     return None
 
 
@@ -2567,7 +2576,9 @@ def _burnt(card: Card, ctx: JokerContext) -> JokerResult | None:
 
     Source: card.lua:2748-2755. Fires before a voluntary first discard.
     """
-    if ctx.pre_discard and not ctx.blueprint and not ctx.hook:
+    # L: card.lua:2748-2755 — copied Burnt Jokers level the hand too; only
+    # Hook and the used-discard count suppress this branch.
+    if ctx.pre_discard and not ctx.hook:
         if ctx.game.discards_used <= 0 and ctx.full_hand:
             return JokerResult(level_up=True)
     return None
