@@ -1073,6 +1073,16 @@ with two named follow-ups: (1) fix Spectral packs (D57: Spectral picks omitted
 from legal actions), (2) fix boss rerolls (D52: no reroll action; Retcon priced
 free). The close-out on branch `engine-closeout` does not touch them.
 
+**UPDATE 2026-10-12: UNDEFERRED, ENGINE ONLY** (branch `engine-legality`).
+The user approved the design ("the engine should be fully vanilla, the
+environment should contain the constraints") and asked to fix all of D23
+(sell phases), D27, D50, D52, D56, D57 in the engine. **Env masks are out of
+scope and will be reconstructed later** (user): they are computed
+independently of the engine (`env/action_space.py::get_action_mask`,
+`hand_play_gym.hand_action_mask`, the pointer-head masks) and copy the D27,
+D50 and D57 bugs. The engine pass pins them unchanged; the rebuild derives
+them from `legality.py` plus explicit env restrictions (CLAUDE.md TODO 4).
+
 `legality.py`; full vanilla action set in the engine (sell anywhere legal, boss
 reroll with the Retcon / Director's Cut pricing, Spectral picks, consumable use
 in packs, buy-and-use); remove agent-convenience restrictions from the engine;

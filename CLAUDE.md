@@ -36,6 +36,18 @@ analysis and potential overhaul.
   3. LOOK AT LEGALITY (Phase 6) — one legality predicate shared by step() and the action list;
      engine = full vanilla actions, env masks restrict (D23 sell phases, D27 Cerulean Bell,
      D50 Credit Card debt, D56 step accepts illegal actions, D57).
+     IN PROGRESS 2026-10-12 (user: "engine fully vanilla, env holds the constraints"), branch
+     `engine-legality`: ENGINE ONLY. Items 1-2 above are fixed on the engine side by it.
+  4. RECONSTRUCT ENV MASKS (user, 2026-10-12) — deferred, NOT part of the engine pass. The env
+     masks do NOT come from the engine's legal-action list: `jackdaw/env/action_space.py::
+     get_action_mask` (shop + generic envs) and `hand_play_gym.hand_action_mask` (+ the
+     pointer head's `hand_pointer_head` masks) re-derive legality independently, and they
+     copy engine bugs: Spectral-pack picks masked out (D57), Credit Card debt ignored in buy/
+     reroll/voucher/booster affordability (D50), Cerulean Bell's forced card not required
+     (D27). Rebuild them as "engine legality (`legality.py`) ∩ explicit env restrictions",
+     deciding per restriction whether to keep it (e.g. no sell-in-blind / boss-reroll rows
+     until appended to the action space) or drop it (the three bugs above). Until then the
+     engine pass pins the current masks unchanged, so checkpoints see no difference.
   PHASE 1 (state completeness) EXIT MET 2026-10-06, branch `engine-phase1-state`: Lua state
   map `jackdaw/engine/state_map.py` + `tests/engine/test_state_map.py` (zero unmapped), aliases
   collapsed (C04/C07/C14-Green/D26/D04 fixed early), `migrate_state` on restore, new finding:
