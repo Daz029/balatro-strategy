@@ -1065,6 +1065,11 @@ reports are `docs/implementation-tickets/engine-p5-*-REPORT.md`.
 
 ### Phase 6. Legality (S5)
 
+**STATUS 2026-10-12: DEFERRED by the user** ("look at legality later"), together
+with two named follow-ups: (1) fix Spectral packs (D57: Spectral picks omitted
+from legal actions), (2) fix boss rerolls (D52: no reroll action; Retcon priced
+free). The close-out on branch `engine-closeout` does not touch them.
+
 `legality.py`; full vanilla action set in the engine (sell anywhere legal, boss
 reroll with the Retcon / Director's Cut pricing, Spectral picks, consumable use
 in packs, buy-and-use); remove agent-convenience restrictions from the engine;

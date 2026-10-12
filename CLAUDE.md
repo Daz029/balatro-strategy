@@ -22,7 +22,18 @@ analysis and potential overhaul.
   the plan; timing spec `docs/engine_s4a_event_timing.md`; Lua transition oracle
   `tests/oracle/transition.py`, 29/29 green). Label/harvest freeze lifts. OPEN user decision:
   NEW-P5-1-05 (Lua scores played cards in hand-position order; engine keeps selection order).
-  Next: Phase 6 (legality).
+  DECIDED 2026-10-12: the BOT's pick order is the left-to-right play order (the solver's
+  order does not matter). CLOSE-OUT 2026-10-12 (branch `engine-closeout`): verify all 71
+  in-scope audit findings, challenges/endless ASSERT, profiles = all-unlocked only, delete
+  superseded code.
+  TODO LATER (user, 2026-10-12) — deferred, NOT in the close-out:
+  1. FIX SPECTRAL PACKS — Spectral-pack picks are omitted from legal actions (D57), so no
+     agent can ever take a Spectral card out of a pack.
+  2. FIX BOSS REROLLS — no boss-reroll action exists, so Retcon / Director's Cut are dead;
+     Retcon is also recorded as free instead of $10 (D52).
+  3. LOOK AT LEGALITY (Phase 6) — one legality predicate shared by step() and the action list;
+     engine = full vanilla actions, env masks restrict (D23 sell phases, D27 Cerulean Bell,
+     D50 Credit Card debt, D56 step accepts illegal actions, D57).
   PHASE 1 (state completeness) EXIT MET 2026-10-06, branch `engine-phase1-state`: Lua state
   map `jackdaw/engine/state_map.py` + `tests/engine/test_state_map.py` (zero unmapped), aliases
   collapsed (C04/C07/C14-Green/D26/D04 fixed early), `migrate_state` on restore, new finding:
