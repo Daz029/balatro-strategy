@@ -55,6 +55,7 @@ from jackdaw.engine.effects import (
     LevelUpHand,
     ShuffleArea,
 )
+from jackdaw.engine.scope import UnsupportedGameModeError
 
 
 class IllegalActionError(Exception):
@@ -74,8 +75,10 @@ def step(game_state: dict[str, Any], action: Action) -> dict[str, Any]:
     """
     match action:
         case SelectBlind(allow_forced_boss=allow_forced_boss):
+            _reject_endless(game_state)
             return _handle_select_blind(game_state, allow_forced_boss=allow_forced_boss)
         case SkipBlind():
+            _reject_endless(game_state)
             return _handle_skip_blind(game_state)
         case PlayHand(card_indices=indices):
             return _handle_play_hand(game_state, indices)
@@ -113,6 +116,19 @@ def step(game_state: dict[str, Any], action: Action) -> dict[str, Any]:
             return _handle_swap_jokers(game_state, idx, +1)
         case _:
             raise IllegalActionError(f"Unknown action type: {type(action).__name__}")
+
+
+def _reject_endless(gs: dict[str, Any]) -> None:
+    """Raise if a blind would start after the run is won (endless, audit D49).
+
+    The win-ante boss's own ``end_round`` still advances the ante and the
+    run may still cash out and shop (as in Lua); the first blind decision
+    after a win is where endless begins, and endless is not implemented.
+    """
+    if gs.get("won"):
+        raise UnsupportedGameModeError(
+            f"endless mode is not implemented (run won at ante {gs.get('win_ante', 8)})"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -753,10 +769,9 @@ def discard_cards_from_highlighted(
     scores["cards_discarded"] = scores.get("cards_discarded", 0) + len(discarded)
 
     # L: state_events.lua:432-446 — cost/counters/DRAW_TO_HAND are voluntary.
+    # Lua's modifiers.discard_cost charge (state_events.lua:433) is
+    # challenge-only (Golden Needle; challenges raise) and is not ported.
     if not hook:
-        discard_cost = gs.get("modifiers", {}).get("discard_cost", 0)
-        if discard_cost:
-            queue.add(EaseDollars(amount=-discard_cost))
         queue.add(ChangeRoundResource(discards=-1))
         gs["current_round"]["discards_used"] += 1
 
@@ -1324,13 +1339,8 @@ def _draw_card_to_hand(gs: dict[str, Any]) -> Any | None:
             )
         )
 
-    # L: common_events.lua:397-400 — the flipped-cards challenge is a second
-    # independent reason for a card to stay face-down.
-    flipped_cards = gs.get("modifiers", {}).get("flipped_cards")
-    rng = gs.get("rng")
-    if flipped_cards and rng is not None:
-        if rng.random("flipped_card") < 1 / flipped_cards:
-            stay_flipped = True
+    # L: common_events.lua:397-400's flipped-cards branch is challenge-only
+    # (challenges raise, D-scope) and is not ported.
 
     lifecycle.emplace(gs, card, "hand")
     if stay_flipped:

@@ -124,7 +124,7 @@ GAME_PATHS: dict[str, Entry] = {
     "hand_usage": _STATS,
     "hands": Stored("hand_levels", note="HandLevels object"),
     "hands_played": Stored("hands_played"),
-    "inflation": Stored("inflation"),
+    "inflation": _CHALLENGE,
     "interest_amount": Stored("interest_amount"),
     "interest_cap": Stored("interest_cap"),
     "joker_buffer": Stored("joker_buffer", note="writer: Phase 4 applier"),

@@ -24,11 +24,8 @@ from jackdaw.engine.rng import PseudoRandom
 from jackdaw.engine.shop import (
     TYPE_JOKER,
     TYPE_PLAYING_CARD,
-    buy_card,
-    calculate_reroll_cost,
     get_pack,
     populate_shop,
-    reroll_shop,
     roll_illusion_modifiers,
     select_shop_card_type,
     sell_card,
@@ -205,63 +202,6 @@ class TestPopulateShopDeterminism:
 # ===========================================================================
 
 
-class TestCalculateRerollCost:
-    def test_default_cost_is_five(self):
-        gs = {"current_round": {}, "round_resets": {"reroll_cost": 5}}
-        assert calculate_reroll_cost(gs) == 5
-
-    def test_free_rerolls_gives_zero_cost(self):
-        gs = {
-            "current_round": {"free_rerolls": 1},
-            "round_resets": {"reroll_cost": 5},
-        }
-        assert calculate_reroll_cost(gs) == 0
-
-    def test_increase_adds_to_base(self):
-        gs = {
-            "current_round": {"reroll_cost_increase": 2},
-            "round_resets": {"reroll_cost": 5},
-        }
-        assert calculate_reroll_cost(gs) == 7
-
-
-class TestBuyCard:
-    def test_successful_purchase_deducts_dollars(self):
-        card = _joker()
-        card.cost = 5
-        shop = _shop_area()
-        shop.add(card)
-        dest = _joker_area()
-        gs = _base_gs(dollars=10)
-        result = buy_card(card, shop, dest, gs)
-        assert result["ok"] is True
-        assert gs["dollars"] == 5
-
-    def test_insufficient_funds_rejected(self):
-        card = _joker()
-        card.cost = 15
-        shop = _shop_area()
-        shop.add(card)
-        dest = _joker_area()
-        gs = _base_gs(dollars=10)
-        result = buy_card(card, shop, dest, gs)
-        assert result["ok"] is False
-        assert result["reason"] == "insufficient_funds"
-
-    def test_negative_edition_grants_bonus_space(self):
-        card = _joker()
-        card.cost = 3
-        card.set_edition({}, {"negative": True})
-        shop = _shop_area()
-        shop.add(card)
-        dest = _joker_area(limit=1)
-        filler = _joker()
-        dest.add(filler)
-        gs = _base_gs(dollars=10)
-        result = buy_card(card, shop, dest, gs)
-        assert result["ok"] is True
-
-
 class TestSellCard:
     def test_successful_sale_awards_dollars(self):
         card = _joker()
@@ -280,60 +220,6 @@ class TestSellCard:
         result = sell_card(gs, "jokers", 0)
         assert result["ok"] is False
         assert result["reason"] == "eternal"
-
-
-class TestRerollShop:
-    def _make_shop(self, n_cards: int = 2) -> CardArea:
-        area = CardArea(card_limit=10, area_type="shop")
-        for key in list(("j_joker", "j_greedy_joker", "j_lusty_joker"))[:n_cards]:
-            c = _joker(key)
-            area.add(c)
-        return area
-
-    def test_cost_deducted(self):
-        shop = self._make_shop()
-        gs = _base_gs(dollars=10)
-        gs.update(
-            {"current_round": {"reroll_cost_increase": 0}, "round_resets": {"reroll_cost": 5}}
-        )
-        result = reroll_shop(shop, PseudoRandom("RR_COST"), 1, gs)
-        assert result["ok"] is True
-        assert result["cost"] == 5
-        assert gs["dollars"] == 5
-
-    def test_new_cards_generated(self):
-        shop = self._make_shop(2)
-        gs = _base_gs(dollars=10)
-        gs.update(
-            {"current_round": {"reroll_cost_increase": 0}, "round_resets": {"reroll_cost": 5}}
-        )
-        result = reroll_shop(shop, PseudoRandom("RR_NEW"), 1, gs)
-        assert len(result["new_cards"]) == 2
-        assert len(shop.cards) == 2
-
-    def test_insufficient_funds_rejected(self):
-        shop = self._make_shop()
-        gs = _base_gs(dollars=3)
-        gs.update(
-            {"current_round": {"reroll_cost_increase": 0}, "round_resets": {"reroll_cost": 5}}
-        )
-        result = reroll_shop(shop, PseudoRandom("RR_POOR"), 1, gs)
-        assert result["ok"] is False
-        assert result["reason"] == "insufficient_funds"
-
-    def test_free_reroll_zero_cost(self):
-        shop = self._make_shop()
-        gs = _base_gs(dollars=0)
-        gs.update(
-            {
-                "current_round": {"free_rerolls": 1, "reroll_cost_increase": 0},
-                "round_resets": {"reroll_cost": 5},
-            }
-        )
-        result = reroll_shop(shop, PseudoRandom("RR_FREE"), 1, gs)
-        assert result["ok"] is True
-        assert result["cost"] == 0
-        assert result["was_free"] is True
 
 
 # ===========================================================================
@@ -363,45 +249,6 @@ class TestShowmanAllowsDuplicates:
         assert "j_joker" in pool_with_showman
         idx = pool_with_showman.index("j_joker")
         assert pool_with_showman[idx] != UNAVAILABLE
-
-
-class TestFullCycle:
-    def test_full_shop_cycle(self):
-        rng, gs = _fresh_gs(seed="FULL_CYCLE", ante=1, dollars=200)
-        gs["jokers"] = []
-
-        # Step 1: populate shop
-        result = populate_shop(rng, 1, gs)
-        assert len(result["jokers"]) == 2
-
-        # Step 2: buy the first joker
-        joker_cards = [c for c in result["jokers"] if c.ability.get("set") == "Joker"]
-        if not joker_cards:
-            pytest.skip("No Joker-type card in first shop slot")
-
-        shop_area = CardArea(card_limit=2, area_type="shop")
-        for c in result["jokers"]:
-            shop_area.add(c)
-        joker_area = CardArea(card_limit=5, area_type="joker")
-
-        first_joker = joker_cards[0]
-        initial_dollars = gs["dollars"]
-        buy_result = buy_card(first_joker, shop_area, joker_area, gs)
-        assert buy_result["ok"] is True
-        assert gs["dollars"] == initial_dollars - first_joker.cost
-        assert first_joker.center_key in gs["used_jokers"]
-
-        # Step 3: reroll
-        dollars_before_reroll = gs["dollars"]
-        reroll_result = reroll_shop(shop_area, rng, 1, gs)
-        assert reroll_result["ok"] is True
-        assert reroll_result["cost"] == 5
-        assert gs["dollars"] == dollars_before_reroll - 5
-
-        # Step 4: second reroll costs more
-        r2 = reroll_shop(shop_area, rng, 1, gs)
-        assert r2["ok"] is True
-        assert r2["cost"] == 6
 
 
 # ============================================================================

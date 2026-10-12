@@ -95,7 +95,6 @@ _REQUIRED_TOP_LEVEL = {
     "interest_amount",
     "discount_percent",
     "base_reroll_cost",
-    "inflation",
     "rental_rate",
     "bankrupt_at",
     # Card areas

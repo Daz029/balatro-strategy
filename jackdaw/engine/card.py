@@ -520,14 +520,14 @@ class Card:
     def set_cost(self, gs: dict[str, Any]) -> None:
         """Calculate cost and sell_cost, matching card.lua:369 (Card:set_cost).
 
-        All pricing inputs come from the live run state.
+        All pricing inputs come from the live run state. Lua's two
+        challenge-only terms are omitted because challenges raise (D-scope):
+        ``G.GAME.inflation`` (card.lua:371, always 0 in vanilla) and
+        ``modifiers.booster_ante_scaling`` (card.lua:376).
         """
         import math
 
-        inflation = gs.get("inflation", 0)
         discount_percent = gs.get("discount_percent", 0)
-        ante = gs.get("round_resets", {}).get("ante", 1)
-        booster_ante_scaling = gs.get("modifiers", {}).get("booster_ante_scaling", False)
         has_astronomer = bool(read.find_joker(gs, "Astronomer"))
 
         # Edition surcharge
@@ -538,17 +538,13 @@ class Card:
             edition_extra += 5 if self.edition.get("polychrome") else 0
             edition_extra += 5 if self.edition.get("negative") else 0
 
-        self.extra_cost = inflation + edition_extra
+        self.extra_cost = edition_extra
 
         # Base formula (card.lua:375)
         self.cost = max(
             1,
             math.floor((self.base_cost + self.extra_cost + 0.5) * (100 - discount_percent) / 100),
         )
-
-        # Booster ante scaling (card.lua:376)
-        if self.ability.get("set") == "Booster" and booster_ante_scaling:
-            self.cost += ante - 1
 
         # Astronomer: planets and celestial packs cost 0 (card.lua:380)
         if has_astronomer:

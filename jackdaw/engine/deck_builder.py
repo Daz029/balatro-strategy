@@ -24,16 +24,17 @@ from jackdaw.engine.rng import PseudoRandom
 def build_deck(
     back_key: str,
     rng: PseudoRandom,
-    challenge: dict[str, Any] | None = None,
     starting_params: dict[str, Any] | None = None,
     game_state: dict[str, Any] | None = None,
 ) -> list[Card]:
     """Build the starting deck for a run.
 
+    Challenge deck overrides are not implemented: challenge runs raise in
+    ``initialize_run`` (audit C15, D-scope).
+
     Args:
         back_key: P_CENTERS back key (e.g. ``"b_red"``, ``"b_abandoned"``).
         rng: The run's PseudoRandom instance.
-        challenge: Challenge definition dict (with ``deck`` sub-dict) or None.
         starting_params: Effective starting parameters (needs ``no_faces``,
             ``erratic_suits_and_ranks``).  If None, derived from the back's config.
 
@@ -51,68 +52,30 @@ def build_deck(
         back_config.get("randomize_rank_suit", False),
     )
 
-    # Challenge deck override
-    challenge_deck: dict[str, Any] | None = None
-    if challenge and "deck" in challenge:
-        challenge_deck = challenge["deck"]
-
     # -------------------------------------------------------------------
     # Step 1: Build card_protos
     # -------------------------------------------------------------------
-    card_protos: list[dict[str, str | None]]
+    card_protos: list[dict[str, str | None]] = []
+    # Iterate all 52 standard P_CARDS entries
+    for card_key in PLAYING_CARDS:
+        key = card_key
 
-    if challenge_deck and "cards" in challenge_deck:
-        # Explicit card list from challenge
-        card_protos = list(challenge_deck["cards"])
-    else:
-        card_protos = []
-        # Iterate all 52 standard P_CARDS entries
-        for card_key in PLAYING_CARDS:
-            key = card_key
+        # Erratic Deck: replace with random P_CARDS key
+        if erratic:
+            _, key = rng.element(
+                {k: k for k in PLAYING_CARDS},
+                rng.seed("erratic"),
+            )
 
-            # Erratic Deck: replace with random P_CARDS key
-            if erratic:
-                _, key = rng.element(
-                    {k: k for k in PLAYING_CARDS},
-                    rng.seed("erratic"),
-                )
+        # Parse suit letter and rank letter from key like "S_A"
+        _s = key[0]  # suit letter
+        _r = key[2]  # rank letter
 
-            # Parse suit letter and rank letter from key like "S_A"
-            _s = key[0]  # suit letter
-            _r = key[2]  # rank letter
+        # Abandoned Deck: skip face cards
+        if no_faces and _r in ("K", "Q", "J"):
+            continue
 
-            keep = True
-            _e: str | None = None
-            _d: str | None = None
-            _g: str | None = None
-
-            # Challenge filtering
-            if challenge_deck:
-                yes_ranks = challenge_deck.get("yes_ranks")
-                if yes_ranks and _r not in yes_ranks:
-                    keep = False
-                no_ranks = challenge_deck.get("no_ranks")
-                if no_ranks and _r in no_ranks:
-                    keep = False
-                yes_suits = challenge_deck.get("yes_suits")
-                if yes_suits and _s not in yes_suits:
-                    keep = False
-                no_suits = challenge_deck.get("no_suits")
-                if no_suits and _s in no_suits:
-                    keep = False
-                if "enhancement" in challenge_deck:
-                    _e = challenge_deck["enhancement"]
-                if "edition" in challenge_deck:
-                    _d = challenge_deck["edition"]
-                if "gold_seal" in challenge_deck:
-                    _g = challenge_deck["gold_seal"]
-
-            # Abandoned Deck: skip face cards
-            if no_faces and _r in ("K", "Q", "J"):
-                keep = False
-
-            if keep:
-                card_protos.append({"s": _s, "r": _r, "e": _e, "d": _d, "g": _g})
+        card_protos.append({"s": _s, "r": _r, "e": None, "d": None, "g": None})
 
     # -------------------------------------------------------------------
     # Step 2: Deterministic sort (game.lua:2367)

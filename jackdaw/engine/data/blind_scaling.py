@@ -45,6 +45,13 @@ def get_blind_amount(ante: int, scaling: int = 1) -> int:
     """
     if ante < 1:
         return 100
+    if ante > 16:
+        # Audit D49: past here Lua's doubles and Python's ints diverge
+        # (and overflow differently). Only endless reaches it, and endless
+        # is not implemented (jackdaw.engine.scope).
+        from jackdaw.engine.scope import UnsupportedGameModeError
+
+        raise UnsupportedGameModeError(f"blind amounts past ante 16 (got {ante})")
 
     amounts = _AMOUNTS.get(scaling, _AMOUNTS[1])
 

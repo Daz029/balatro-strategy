@@ -8,7 +8,8 @@ by ``end_round`` at ``state_events.lua:108``.
 
 1. Blind reward — ``blind.dollars`` only when committed chips beat it.
 2. Unused hands bonus — ``hands_left × (money_per_hand or 1)``.
-   Skipped when ``modifiers['no_extra_hand_money']`` is set.
+   (Lua's challenge-only ``no_extra_hand_money`` skip is not ported:
+   challenges raise, D-scope.)
 3. Unused discards bonus — ``discards_left × money_per_discard``.
    Only present when ``modifiers['money_per_discard']`` is set (Green Deck).
 4. Joker dollar bonuses — via ``round_dollar_bonus`` (``calc_dollar_bonus``).
@@ -21,7 +22,6 @@ Source references
 - state_events.lua:96-110  — rental deduction, end-of-round joker evals
 - state_events.lua:1135-1208 — evaluate_round (blind + hands + discards
   + joker bonuses + interest)
-- state_events.lua:433 — discard cost modifier (Golden Needle challenge)
 - game.lua:1909-1915 — ``interest_cap=25``, ``interest_amount=1``,
   ``rental_rate=3`` defaults
 """
@@ -64,10 +64,7 @@ class RoundEarnings:
     """
 
     unused_hands_bonus: int = 0
-    """``hands_left × money_per_hand`` (default $1/hand).
-
-    0 when ``modifiers['no_extra_hand_money']`` is truthy.
-    """
+    """``hands_left × money_per_hand`` (default $1/hand)."""
 
     unused_discards_bonus: int = 0
     """``discards_left × money_per_discard``.
@@ -93,22 +90,6 @@ class RoundEarnings:
 
     total: int = 0
     """Net dollars earned this round."""
-
-
-# ---------------------------------------------------------------------------
-# Discard cost helper (Golden Needle challenge)
-# ---------------------------------------------------------------------------
-
-
-def calculate_discard_cost(game_state: dict[str, Any]) -> int:
-    """Return the dollar cost charged per discard action.
-
-    Mirrors the ``G.GAME.modifiers.discard_cost`` check in
-    ``state_events.lua:433`` — the Golden Needle challenge sets this to 1.
-
-    Returns 0 if no discard cost modifier is active.
-    """
-    return game_state.get("modifiers", {}).get("discard_cost", 0)
 
 
 # ---------------------------------------------------------------------------
@@ -152,7 +133,6 @@ def calculate_round_earnings(
     | ``rental_rate``       | 3        | Cost per rental joker per round.     |
     +-----------------------+----------+--------------------------------------+
     | ``modifiers``         | {}       | Dict of run modifiers:               |
-    |                       |          | ``no_extra_hand_money``: bool        |
     |                       |          | ``money_per_hand``: int (default 1)  |
     |                       |          | ``money_per_discard``: int|None      |
     |                       |          | ``no_interest``: bool                |
@@ -185,7 +165,7 @@ def calculate_round_earnings(
     # Step 3 — Unused hands bonus (state_events.lua:1165)
     # hands_left * (modifiers.money_per_hand or 1)
     # ------------------------------------------------------------------
-    if hands_left > 0 and not modifiers.get("no_extra_hand_money"):
+    if hands_left > 0:
         money_per_hand: int = modifiers.get("money_per_hand", 1)
         unused_hands_bonus = hands_left * money_per_hand
     else:

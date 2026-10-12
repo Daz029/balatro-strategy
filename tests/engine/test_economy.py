@@ -9,10 +9,7 @@ import pytest
 from jackdaw.engine.blind import Blind
 from jackdaw.engine.card import Card, reset_sort_id_counter
 from jackdaw.engine.data.prototypes import VOUCHERS
-from jackdaw.engine.economy import (
-    calculate_discard_cost,
-    calculate_round_earnings,
-)
+from jackdaw.engine.economy import calculate_round_earnings
 from jackdaw.engine.round_lifecycle import process_round_end_cards
 from jackdaw.engine.vouchers import (
     apply_voucher,
@@ -50,17 +47,6 @@ def _rental_joker() -> Card:
     j = _joker("j_spare_trousers")
     j.rental = True
     return j
-
-
-# ---------------------------------------------------------------------------
-# calculate_discard_cost
-# ---------------------------------------------------------------------------
-
-
-class TestCalculateDiscardCost:
-    def test_golden_needle_returns_one(self):
-        gs = {"modifiers": {"discard_cost": 1}}
-        assert calculate_discard_cost(gs) == 1
 
 
 # ---------------------------------------------------------------------------

@@ -58,8 +58,6 @@ def get_current_pool(
     playing_card_count: int = 52,
     played_hand_types: set[str] | None = None,
     shop_vouchers: set[str] | None = None,
-    discovered: set[str] | None = None,
-    profile_unlocked: set[str] | None = None,
 ) -> tuple[list[str], str]:
     """Return ``(pool, seed_key)`` for the given pool type.
 
@@ -106,6 +104,9 @@ def get_current_pool(
     shop_vouchers:
         Set of voucher keys currently displayed in the shop (excluded from
         Voucher pool to avoid duplicates).
+
+    Profile state (unlock / discovery) is never consulted: every run assumes
+    an all-unlocked, all-discovered profile (``jackdaw.engine.profile``).
     """
     used_jokers = used_jokers or set()
     used_vouchers = used_vouchers or set()
@@ -152,8 +153,6 @@ def get_current_pool(
             deck_enhancements=deck_enhancements,
             played_hand_types=played_hand_types,
             shop_vouchers=shop_vouchers,
-            discovered=discovered,
-            profile_unlocked=profile_unlocked,
         )
         result.append(entry)
 
@@ -375,8 +374,6 @@ def _filter_key(
     deck_enhancements: set[str],
     played_hand_types: set[str],
     shop_vouchers: set[str],
-    discovered: set[str] | None = None,
-    profile_unlocked: set[str] | None = None,
 ) -> str:
     """Return *key* if it passes all filters, otherwise ``UNAVAILABLE``."""
 
@@ -394,7 +391,7 @@ def _filter_key(
         return key
 
     if pool_type == "Tag":
-        return _filter_tag(key=key, ante=ante, used_vouchers=used_vouchers, discovered=discovered)
+        return _filter_tag(key=key, ante=ante)
 
     # --- Universal duplicate check (common_events.lua:1987) ---
     # Lua checks G.GAME.used_jokers[v.key] for ALL remaining types
@@ -551,13 +548,7 @@ def _filter_planet(*, key: str, played_hand_types: set[str]) -> str:
     return key
 
 
-def _filter_tag(
-    *,
-    key: str,
-    ante: int,
-    used_vouchers: set[str],
-    discovered: set[str] | None = None,
-) -> str:
+def _filter_tag(*, key: str, ante: int) -> str:
     proto = TAGS.get(key)
     if proto is None:
         return UNAVAILABLE
@@ -566,13 +557,7 @@ def _filter_tag(
     if proto.min_ante is not None and ante < proto.min_ante:
         return UNAVAILABLE
 
-    # requires: in Lua, this checks G.P_CENTERS[v.requires].discovered —
-    # whether the item has been SEEN in a previous run, not purchased.
-    # The engine assumes a fully-unlocked profile (consistent with the
-    # joker unlock skip at line 377), so if discovered is None we treat
-    # all items as discovered.  Pass an explicit set to restrict.
-    if proto.requires and discovered is not None:
-        if "all" not in discovered and proto.requires not in discovered:
-            return UNAVAILABLE
-
+    # requires: Lua checks G.P_CENTERS[v.requires].discovered — a PROFILE
+    # fact (seen in any earlier run). Every run assumes an all-discovered
+    # profile (jackdaw.engine.profile), so the gate always passes.
     return key

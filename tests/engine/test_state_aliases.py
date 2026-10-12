@@ -178,23 +178,6 @@ class TestD04LuckyTrigger:
         assert "lucky_trigger" not in lucky.ability
 
 
-class TestC15ChallengeModifierAliases:
-    def test_booster_ante_scaling_is_read_from_modifiers(self):
-        gs = init_game_object()
-        gs["modifiers"]["booster_ante_scaling"] = True
-        gs["round_resets"]["ante"] = 3
-
-        booster = create_card(
-            "Booster",
-            PseudoRandom("BOOSTER_ALIAS"),
-            3,
-            forced_key="p_arcana_normal_1",
-            game_state=gs,
-        )
-
-        assert booster.cost == 6
-
-
 class TestC13OmenGlobeCanonicalFlag:
     def test_redeem_omen_globe_uses_used_vouchers_only(self):
         gs = initialize_run("b_red", 1, "OMEN_ALIAS")

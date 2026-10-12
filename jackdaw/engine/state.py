@@ -15,7 +15,6 @@ Lifecycle legend for the **set by** column:
 - **run_init** = :func:`~jackdaw.engine.run_init.initialize_run`
 - **stakes** = :func:`~jackdaw.engine.stakes.apply_stake_modifiers`
 - **back** = :meth:`~jackdaw.engine.back.Back.apply_to_run`
-- **challenge** = :func:`~jackdaw.engine.challenges.apply_challenge`
 - **voucher** = :func:`~jackdaw.engine.vouchers.apply_voucher`
 - **game** = :func:`~jackdaw.engine.game.step` (various handlers)
 - **runner** = :func:`~jackdaw.engine.runner.simulate_run`
@@ -67,8 +66,6 @@ Lifecycle legend for the **set by** column:
                                          Set by init, voucher (Clearance Sale→25, Liquidation→50).
     base_reroll_cost   int               Reroll cost before per-round increases (default 5).
                                          Set by run_init.
-    inflation          int               Cumulative reroll cost increase (default 0).
-                                         Set by init.
     rental_rate        int               Cost per rental joker per round (default 3).
                                          Set by init.
                                          Read by Card:calculate_rental (card.lua:2273) and
@@ -360,7 +357,8 @@ encoder read them as constant 0 until Phase 2.
 
 .. rubric:: Modifiers — ``gs["modifiers"]``
 
-Run-wide rule flags, set by stakes and challenges.
+Run-wide rule flags, set by stakes and decks. (Lua's challenge-only
+modifiers are not modeled: challenges raise, D-scope.)
 
 ::
 
@@ -369,23 +367,18 @@ Run-wide rule flags, set by stakes and challenges.
     enable_eternals_in_shop    bool          Eternal jokers appear (stake ≥ 4).
     enable_perishables_in_shop bool          Perishable jokers appear (stake ≥ 7).
     enable_rentals_in_shop     bool          Rental jokers appear (stake ≥ 8).
-    booster_ante_scaling       bool          Booster cost increases with ante (challenge).
-    inflation                  bool          Purchases increase shop inflation (challenge).
-    no_extra_hand_money    bool              Unused hands give no bonus (challenge).
-    money_per_hand         int               Override $/hand for unused-hand bonus.
-    money_per_discard      int               Override $/discard for unused-discard bonus.
-    no_interest            bool              Disable interest entirely (challenge).
-    discard_cost           int               Cost per discard action (Golden Needle).
+    money_per_hand         int               Override $/hand for unused-hand bonus (Green).
+    money_per_discard      int               Override $/discard for unused-discard bonus (Green).
+    no_interest            bool              Disable interest entirely (Green).
 
 
-.. rubric:: Challenge state
+.. rubric:: Bans
 
 ::
 
-    challenge          str | None        Challenge ID (e.g. ``'c_omelette_1'``).
-                                         Set by run_init (if challenge provided).
-    banned_keys        dict[str, bool]   Cards/vouchers banned by challenge.
-                                         Set by init ({}), challenge.
+    banned_keys        dict[str, bool]   Lua G.GAME.banned_keys. Always {} (init):
+                                         only challenges populate it, and
+                                         challenges raise (D-scope).
 
 
 .. rubric:: Pool flags
@@ -409,13 +402,8 @@ Run-wide rule flags, set by stakes and challenges.
     pseudorandom       dict              Raw seed state (Lua compat).  Set by init ({}).
     hand_levels        HandLevels        Hand level progression tracker.  Set by run_init.
 
-
-.. rubric:: Profile (discovery tracking)
-
-::
-
-    profile_unlocked   set               Unlocked profile items.  Set externally.
-    discovered         set               Discovered cards/items.  Set externally.
+Profile (unlock / discovery) state is NOT stored: every run assumes an
+all-unlocked, all-discovered profile (``jackdaw.engine.profile``).
 """
 
 from __future__ import annotations
@@ -461,6 +449,8 @@ def migrate_state(gs: dict[str, Any]) -> dict[str, Any]:
             modifiers.setdefault(key, gs.pop(key))
 
     gs.pop("free_rerolls", None)
+    # Challenge-only inflation amount (always 0 in vanilla); removed 2026-10-12.
+    gs.pop("inflation", None)
 
     # The init key "tags" was never read; live tags are "awarded_tags".
     if isinstance(gs.get("tags"), dict):
@@ -534,8 +524,6 @@ STATE_KEYS: dict[str, str] = {
     "won": "run won; game (end_round)",
     "round": "rounds completed; game",
     "selected_back_key": "deck back key; run_init",
-    "challenge": "challenge id; run_init (challenges raise, D-scope)",
-    "challenge_jokers": "challenge starting jokers; run_init",
     "actions_taken": "step() counter; runner",
     "rng": "PseudoRandom (Lua G.GAME.pseudorandom); run_init",
     "pseudorandom": "Lua raw seed table; init only (state lives in rng)",
@@ -548,7 +536,6 @@ STATE_KEYS: dict[str, str] = {
     "interest_cap": "interest cap; init, vouchers",
     "interest_amount": "interest per $5; init, To the Moon",
     "discount_percent": "shop discount; init, vouchers",
-    "inflation": "challenge inflation amount; init, shop",
     "rental_rate": "rental cost per round; init (never mutated)",
     "base_reroll_cost": "reroll base; run_init",
     "previous_round": "{'dollars'} snapshot; game cash-out (UI in Lua)",
@@ -594,7 +581,6 @@ STATE_KEYS: dict[str, str] = {
     "max_jokers": "Lua max jokers held (unlock stat); init only",
     "current_boss_streak": "Lua boss streak (stat); init only",
     "round_scores": "run statistics (D59 scope); init, game",
-    "cards_purchased": "purchase count (stats; Lua round_scores.cards_purchased); shop",
     "tag_tally": "Lua tag counter; init only (engine orders tags by list)",
     "perishable_rounds": "perishable lifetime; init only (cards carry perish_tally)",
     "pack_size": "Lua booster size; init only (engine sizes packs from the booster)",
@@ -618,7 +604,7 @@ STATE_KEYS: dict[str, str] = {
     # pools / vouchers
     "used_jokers": "current-card pool exclusion set; lifecycle",
     "used_vouchers": "redeemed vouchers; run_init, game",
-    "banned_keys": "banned centers; init, challenges",
+    "banned_keys": "banned centers; init ({}; only challenges write it in Lua)",
     "pool_flags": "pool flags (gros_michel_extinct); init, game",
     "edition_rate": "edition weight; init, vouchers",
     "joker_rate": "joker weight; init",
@@ -627,10 +613,7 @@ STATE_KEYS: dict[str, str] = {
     "spectral_rate": "spectral weight; init, back",
     "playing_card_rate": "playing-card weight; init, vouchers",
     "probabilities": "{'normal'}; init, Oops add/remove_from_deck",
-    "modifiers": "stake/back/challenge rule flags; stakes, back, challenges",
-    # profile (external)
-    "discovered": "discovered centers; set externally",
-    "profile_unlocked": "unlocked profile items; set externally",
+    "modifiers": "stake/back rule flags; stakes, back",
 }
 
 GROUP_KEYS: dict[str, frozenset[str]] = {
@@ -699,12 +682,9 @@ GROUP_KEYS: dict[str, frozenset[str]] = {
             "no_blind_reward",
             "no_interest",
             "scaling",
-            # challenge-only (written through apply_challenge's dynamic rule keys)
-            "booster_ante_scaling",
-            "discard_cost",
-            "flipped_cards",
-            "inflation",
-            "no_extra_hand_money",
+            # Lua's challenge-only modifiers (booster_ante_scaling,
+            # discard_cost, flipped_cards, inflation, no_extra_hand_money) are
+            # neither written nor read: challenges raise (D-scope).
         }
     ),
     "shop": frozenset({"joker_max"}),

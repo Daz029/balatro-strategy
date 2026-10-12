@@ -8,14 +8,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from jackdaw.engine.challenges import CHALLENGES
+import pytest
+
 from jackdaw.engine.data.prototypes import BLINDS, TAGS
 from jackdaw.engine.pools import UNAVAILABLE, get_current_pool
-from jackdaw.engine.profile import (
-    fresh_profile,
-)
+from jackdaw.engine.profile import default_profile, require_full_profile
 from jackdaw.engine.rng import PseudoRandom
 from jackdaw.engine.run_init import get_starting_params, init_game_object, initialize_run
+from jackdaw.engine.scope import UnsupportedGameModeError
 from jackdaw.engine.stakes import DEFAULT_STARTING_PARAMS, apply_stake_modifiers
 
 # ---------------------------------------------------------------------------
@@ -78,7 +78,6 @@ class TestInitGameObject:
             "discount_percent",
             "interest_cap",
             "interest_amount",
-            "inflation",
             "hands_played",
             "unused_discards",
             "perishable_rounds",
@@ -184,13 +183,23 @@ class TestZodiacDeck:
 # ============================================================================
 
 
-class TestFreshProfile:
-    def test_105_jokers_unlocked(self):
-        p = fresh_profile()
-        from jackdaw.engine.data.prototypes import JOKERS
+class TestProfileScope:
+    """D44 / D-scope: only an all-unlocked, all-discovered profile is supported."""
 
-        unlocked_jokers = {k for k in JOKERS if k in p.unlocked}
-        assert len(unlocked_jokers) == 105
+    def test_default_profile_passes(self):
+        require_full_profile(default_profile())
+
+    def test_locked_profile_raises(self):
+        p = default_profile()
+        p.unlocked.discard("j_hanging_chad")
+        with pytest.raises(UnsupportedGameModeError, match="1 locked"):
+            require_full_profile(p)
+
+    def test_undiscovered_profile_raises(self):
+        p = default_profile()
+        p.discovered.discard("e_foil")
+        with pytest.raises(UnsupportedGameModeError, match="1 undiscovered"):
+            require_full_profile(p)
 
 
 class TestPoolFilteringWithProfile:
@@ -205,10 +214,10 @@ class TestPoolFilteringWithProfile:
         pool, _ = get_current_pool("Joker", rng, 1, rarity=1)
         assert locked_joker in pool and pool[pool.index(locked_joker)] != UNAVAILABLE
 
-    def test_discovery_gated_tags_available_by_default(self):
-        """Tags with 'requires' fields are available when discovered is not set."""
-        # tag_foil requires e_foil to be discovered.  The engine defaults to
-        # everything discovered, so it should appear in the Tag pool at ante 1.
+    def test_discovery_gated_tags_always_available(self):
+        """Tags with 'requires' fields are available: the profile is all-discovered."""
+        # tag_foil requires e_foil to be discovered. Every run assumes an
+        # all-discovered profile, so it is in the Tag pool at ante 1.
         rng = PseudoRandom("TAG_DISC_TEST")
         pool, _ = get_current_pool("Tag", rng, 1)
         assert "tag_foil" in pool and pool[pool.index("tag_foil")] != UNAVAILABLE
@@ -258,14 +267,12 @@ class TestStake8:
         assert gs["starting_params"]["discards"] == 2  # 3 - 1
 
 
-class TestChallengesData:
-    def test_exactly_20_challenges(self):
-        assert len(CHALLENGES) == 20
+class TestChallengesRaise:
+    """C15 / D-scope: challenge rules are not implemented, so runs refuse them."""
 
+    def test_initialize_run_rejects_a_challenge(self):
+        with pytest.raises(UnsupportedGameModeError, match="c_omelette_1"):
+            initialize_run("b_red", 1, "OMELETTE_TEST", challenge={"id": "c_omelette_1"})
 
-class TestIntegrationWithInitializeRun:
-    def test_omelette_through_initialize_run(self):
-        gs = initialize_run("b_red", 1, "OMELETTE_TEST", challenge=CHALLENGES["c_omelette_1"])
-        assert gs["modifiers"]["no_blind_reward"]["Small"] is True
-        assert gs["banned_keys"].get("j_golden") is True
-        assert len(gs["challenge_jokers"]) == 5
+    def test_vanilla_run_has_no_bans(self):
+        assert initialize_run("b_red", 1, "NO_BANS")["banned_keys"] == {}

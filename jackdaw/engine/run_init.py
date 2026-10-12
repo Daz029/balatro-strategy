@@ -3,7 +3,7 @@
 Public API
 ----------
 :func:`init_game_object`  — create the default ``G.GAME`` state dict.
-:func:`initialize_run`    — complete run init (stake → back → challenge → deck → ante).
+:func:`initialize_run`    — complete run init (stake → back → deck → ante).
 :func:`start_round`       — per-round reset from ``round_resets``.
 
 Source references
@@ -21,11 +21,11 @@ from typing import Any
 
 from jackdaw.engine.actions import GamePhase
 from jackdaw.engine.back import Back
-from jackdaw.engine.challenges import apply_challenge
 from jackdaw.engine.data.prototypes import BLINDS
 from jackdaw.engine.hand_levels import HandLevels
 from jackdaw.engine.rng import PseudoRandom
 from jackdaw.engine.round_lifecycle import reset_round_targets
+from jackdaw.engine.scope import UnsupportedGameModeError
 from jackdaw.engine.stakes import apply_stake_modifiers
 from jackdaw.engine.tags import assign_ante_blinds
 from jackdaw.engine.vouchers import apply_voucher
@@ -107,7 +107,6 @@ def init_game_object() -> dict[str, Any]:
         "discount_percent": 0,
         "interest_cap": 25,
         "interest_amount": 1,
-        "inflation": 0,
         "hands_played": 0,
         "unused_discards": 0,
         "perishable_rounds": 5,
@@ -207,7 +206,7 @@ def initialize_run(
     2. Set stake
     3. Apply stake modifiers (:func:`~jackdaw.engine.stakes.apply_stake_modifiers`)
     4. Apply back mutations (:meth:`~jackdaw.engine.back.Back.apply_to_run`)
-    5. Apply challenge overrides (jokers, consumables, vouchers, rules, restrictions)
+    5. (Challenge overrides — not implemented; challenges raise.)
     6. Transfer ``starting_params`` → ``round_resets`` and ``dollars``
     7. Initialize :class:`~jackdaw.engine.rng.PseudoRandom`
     8. Generate first ante (boss, tags, voucher)
@@ -217,7 +216,17 @@ def initialize_run(
     12. Reset targeting cards (idol, mail, ancient, castle)
 
     Returns the fully populated game_state dict.
+
+    Raises :class:`~jackdaw.engine.scope.UnsupportedGameModeError` for any
+    *challenge*: challenge rules are not implemented (audit C15), so a
+    challenge run would silently be a different game. The parameter stays so
+    callers that thread it through fail loudly rather than drop it.
     """
+    if challenge is not None:
+        raise UnsupportedGameModeError(
+            f"challenge runs are not implemented (got {challenge.get('id', challenge)!r})"
+        )
+
     # -----------------------------------------------------------------------
     # 1. Create base game_state
     # -----------------------------------------------------------------------
@@ -281,13 +290,6 @@ def initialize_run(
     gs["starting_consumables"] = starting_consumables
 
     # -----------------------------------------------------------------------
-    # 5. Apply challenge overrides
-    # -----------------------------------------------------------------------
-    if challenge:
-        gs["challenge"] = challenge.get("id")
-        apply_challenge(challenge, gs)
-
-    # -----------------------------------------------------------------------
     # 6. Transfer starting_params → round_resets + dollars
     # -----------------------------------------------------------------------
     rr = gs["round_resets"]
@@ -339,7 +341,7 @@ def initialize_run(
     # -----------------------------------------------------------------------
     from jackdaw.engine.deck_builder import build_deck
 
-    built_deck = build_deck(back_key, rng, challenge, sp, game_state=gs)
+    built_deck = build_deck(back_key, rng, sp, game_state=gs)
     gs["deck"] = []
     from jackdaw.engine.lifecycle import emplace
 

@@ -471,11 +471,8 @@ def generate_blind_tags(
     from jackdaw.engine.pools import pick_card_from_pool
 
     used_vouchers: set[str] = set(game_state.get("used_vouchers", []))
-    discovered: set[str] | None = game_state.get("discovered")
-    small = pick_card_from_pool(
-        "Tag", rng, ante, used_vouchers=used_vouchers, discovered=discovered
-    )
-    big = pick_card_from_pool("Tag", rng, ante, used_vouchers=used_vouchers, discovered=discovered)
+    small = pick_card_from_pool("Tag", rng, ante, used_vouchers=used_vouchers)
+    big = pick_card_from_pool("Tag", rng, ante, used_vouchers=used_vouchers)
     return {"Small": small, "Big": big}
 
 

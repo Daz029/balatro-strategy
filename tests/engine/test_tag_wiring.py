@@ -6,7 +6,7 @@ call sites): ``shop_start`` (D6), ``store_joker_create`` (Rare/Uncommon),
 (Coupon), ``eval`` (Investment), ``round_start_bonus`` (Juggle).
 
 Dormant bugs fixed alongside and regression-tested here:
-* ``calculate_reroll_cost`` (shop.py) used ``or`` on ``temp_reroll_cost`` —
+* ``calculate_reroll_cost`` used ``or`` on ``temp_reroll_cost`` —
   Lua's ``0 or x`` is 0, Python's falls through, so D6's $0 base was ignored.
 * ``_handle_reroll`` recomputed cost from ``base_reroll_cost``, ignoring the
   Reroll Surplus/Glut voucher discount (mutates ``round_resets.reroll_cost``)
@@ -33,8 +33,7 @@ from jackdaw.engine.actions import (
 )
 from jackdaw.engine.data.prototypes import JOKERS, TAGS
 from jackdaw.engine.game import step
-from jackdaw.engine.run_init import initialize_run
-from jackdaw.engine.shop import calculate_reroll_cost
+from jackdaw.engine.run_init import _calculate_reroll_cost, initialize_run
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -106,7 +105,8 @@ class TestD6Tag:
             "current_round": {"free_rerolls": 0, "reroll_cost_increase": 0},
             "round_resets": {"temp_reroll_cost": 0, "reroll_cost": 5},
         }
-        assert calculate_reroll_cost(gs) == 0
+        _calculate_reroll_cost(gs, skip_increment=True)
+        assert gs["current_round"]["reroll_cost"] == 0
 
 
 # ---------------------------------------------------------------------------
