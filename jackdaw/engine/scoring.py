@@ -13,7 +13,7 @@ import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from jackdaw.engine import lifecycle
+from jackdaw.engine import lifecycle, read
 from jackdaw.engine.effects import (
     AddChips,
     DestroyCard,
@@ -793,29 +793,42 @@ def score_hand(
                 0,
             )
 
-    # L: state_events.lua:873-944 — Joker main pass, left to right.
-    for joker in jokers:
-        if joker.debuff:
-            continue
+    # L: state_events.lua:873-944 — Joker main pass, left to right over the
+    # jokers THEN the consumables (877-878). A debuffed card gets no edition
+    # (get_edition) and no main effect (calculate_joker's debuff return), but
+    # the joker-on-joker loop still runs with it as the target (D10).
+    from jackdaw.engine.consumables import _PLANET_HAND
+    from jackdaw.engine.data.prototypes import VOUCHERS
 
+    n_jokers = len(jokers)
+    observatory = read.has_voucher(gs, "v_observatory")
+    observatory_x = VOUCHERS["v_observatory"].config["extra"]
+    for slot, joker in enumerate((*jokers, *gs.get("consumables", []))):
         # 9a: Edition additive (chip_mod, mult_mod) BEFORE joker effect
         edition = joker.get_edition()
         if edition:
             hand_chips += edition.get("chip_mod", 0)
             mult += edition.get("mult_mod", 0)
 
-        # 9b: Main joker effect
-        main_ctx = JokerContext(joker_main=True, **_shared)
-        result = calculate_joker(joker, main_ctx)
-        if result:
-            if result.mult_mod:
-                mult += result.mult_mod
-            if result.chip_mod:
-                hand_chips += result.chip_mod
-            if result.Xmult_mod:
-                mult *= result.Xmult_mod
-            if result.dollars:
-                queue.add(EaseDollars(amount=result.dollars, buffered=True, source=joker))
+        # 9b: Main effect
+        if joker.debuff:
+            pass
+        elif slot < n_jokers:
+            main_ctx = JokerContext(joker_main=True, **_shared)
+            result = calculate_joker(joker, main_ctx)
+            if result:
+                if result.mult_mod:
+                    mult += result.mult_mod
+                if result.chip_mod:
+                    hand_chips += result.chip_mod
+                if result.Xmult_mod:
+                    mult *= result.Xmult_mod
+                if result.dollars:
+                    queue.add(EaseDollars(amount=result.dollars, buffered=True, source=joker))
+        elif observatory and _PLANET_HAND.get(joker.center_key) == hand_type:
+            # L: card.lua:2293-2300 — Observatory: a held Planet for the
+            # scoring hand gives X(v_observatory.config.extra) = X1.5.
+            mult *= observatory_x
 
         # 9c: Joker-on-joker (other_joker context)
         for other in jokers:

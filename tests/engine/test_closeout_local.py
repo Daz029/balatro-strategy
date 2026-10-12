@@ -12,11 +12,10 @@ from jackdaw.engine.actions import (
     UseConsumable,
 )
 from jackdaw.engine.blind import Blind
-from jackdaw.engine.card_area import CardArea
 from jackdaw.engine.card_factory import create_consumable, create_joker, create_playing_card
 from jackdaw.engine.data.enums import Rank, Suit
 from jackdaw.engine.data.hands import HAND_ORDER, HandType
-from jackdaw.engine.game import step
+from jackdaw.engine.game import _sort_hand_desc, step
 from jackdaw.engine.hand_levels import HandLevels
 from jackdaw.engine.run_init import initialize_run
 from jackdaw.engine.scoring import score_hand
@@ -79,11 +78,10 @@ class TestD01Nominal:
         assert result.hand_type == "High Card"
         assert len(result.scoring_cards) == 1
         assert result.scoring_cards[0] is earlier
-        area = CardArea(area_type="hand")
-        area.cards = [later, earlier]
-        area.sort_by_value()
-        assert area.cards[0] is earlier
-        assert area.cards[1] is later
+        hand = [later, earlier]
+        _sort_hand_desc(hand)  # the production hand sort (CardArea:sort 'desc')
+        assert hand[0] is earlier
+        assert hand[1] is later
 
     def test_stone_nominal_scales_suit_terms(self) -> None:
         gs = initialize_run("b_red", 1, "CO1_D01_STONE")
@@ -210,6 +208,44 @@ class TestD09BlackboardEmptyHand:
         step(gs, PlayHand(card_indices=(0,)))
 
         assert gs["last_score_result"].total == 21
+
+
+class TestD10JokerOnJokerDebuffedTarget:
+    """Lua ``state_events.lua:916-927`` runs other_joker for every ``_card``.
+
+    The joker-on-joker loop is outside ``_card``'s own debuff check, so Baseball
+    Card (``card.lua:3397``) still gives X1.5 for a DEBUFFED Uncommon.
+    """
+
+    def test_baseball_counts_a_debuffed_uncommon(self) -> None:
+        gs = initialize_run("b_red", 1, "CO_D10_J2J")
+        played = [_card(gs, Suit.HEARTS, Rank.FIVE), _card(gs, Suit.SPADES, Rank.FIVE)]
+        baseball = create_joker("j_baseball", game_state=gs)
+        alone = _score(gs, played, [], [baseball]).total
+
+        uncommon = create_joker("j_steel_joker", game_state=gs)
+        uncommon.debuff = True  # test fixture: no passive to toggle on Steel Joker
+        with_debuffed = _score(gs, played, [], [baseball, uncommon]).total
+
+        assert with_debuffed == int(alone * 1.5)
+
+
+class TestC13bObservatory:
+    """Lua ``card.lua:2293-2300``: with Observatory, each held Planet whose
+    hand type is the scoring hand gives X1.5 in the joker_main pass, which
+    walks jokers THEN consumables (``state_events.lua:877-878``)."""
+
+    def test_held_matching_planet_multiplies(self) -> None:
+        gs = initialize_run("b_red", 1, "CO_C13B")
+        _owned_consumable(gs, "c_mercury")  # Pair
+        _owned_consumable(gs, "c_pluto")  # High Card: must not fire
+        played = [_card(gs, Suit.HEARTS, Rank.FIVE), _card(gs, Suit.SPADES, Rank.FIVE)]
+        # Pair L1: (10 + 5 + 5) chips * 2 mult = 40.
+        assert _score(gs, played, [], []).total == 40
+
+        gs["used_vouchers"]["v_observatory"] = True
+        # X1.5 from Mercury only: 20 * 3 = 60.
+        assert _score(gs, played, [], []).total == 60
 
 
 class TestD13SecretHandVisibility:
