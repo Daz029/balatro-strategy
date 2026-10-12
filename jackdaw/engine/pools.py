@@ -185,6 +185,9 @@ def check_soul_chance(
     rng: PseudoRandom,
     ante: int,
     soulable: bool = True,
+    *,
+    used_jokers: set[str] | dict[str, bool] | None = None,
+    has_showman: bool = False,
 ) -> str | None:
     """Check for a forced Soul or Black Hole card (0.3% chance per roll).
 
@@ -194,7 +197,7 @@ def check_soul_chance(
     The roll key is ``'soul_' + pool_type + str(ante)`` (advances the named
     stream via :meth:`~PseudoRandom.random`).
 
-    * **Joker** — one roll; hit → ``'c_soul'``
+    * **Tarot / Tarot_Planet** — one roll; hit → ``'c_soul'``
     * **Planet** — one roll; hit → ``'c_black_hole'``
     * **Spectral** — *two* rolls on the same stream key; first hit → ``'c_soul'``,
       second hit → ``'c_black_hole'``
@@ -220,26 +223,33 @@ def check_soul_chance(
     if not soulable:
         return None
 
+    used_jokers = used_jokers or set()
+
+    def currently_used(key: str) -> bool:
+        if isinstance(used_jokers, dict):
+            return bool(used_jokers.get(key))
+        return key in used_jokers
+
     roll_key = "soul_" + pool_type + str(ante)
 
-    if pool_type == "Joker":
+    # L: common_events.lua:2088-2099 — existing hidden cards suppress their
+    # draw unless Showman is active. Spectral evaluates Soul, then Black Hole
+    # with NO early exit: both rolls advance the stream, and a Black Hole hit
+    # overwrites an earlier Soul hit (forced_key is simply reassigned).
+    forced: str | None = None
+    if pool_type in ("Tarot", "Spectral", "Tarot_Planet") and (
+        has_showman or not currently_used("c_soul")
+    ):
         if rng.random(roll_key) > _SOUL_THRESHOLD:
-            return "c_soul"
-        return None
+            forced = "c_soul"
 
-    if pool_type == "Planet":
+    if pool_type in ("Planet", "Spectral") and (
+        has_showman or not currently_used("c_black_hole")
+    ):
         if rng.random(roll_key) > _SOUL_THRESHOLD:
-            return "c_black_hole"
-        return None
+            forced = "c_black_hole"
 
-    if pool_type == "Spectral":
-        if rng.random(roll_key) > _SOUL_THRESHOLD:
-            return "c_soul"
-        if rng.random(roll_key) > _SOUL_THRESHOLD:
-            return "c_black_hole"
-        return None
-
-    return None
+    return forced
 
 
 # ---------------------------------------------------------------------------

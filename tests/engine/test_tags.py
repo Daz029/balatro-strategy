@@ -72,11 +72,13 @@ class TestTagEconomy:
 class TestTagOrbital:
     def test_returns_level_up(self):
         rng = PseudoRandom("TEST_ORBITAL")
-        result = _tag("tag_orbital").apply("immediate", _gs(), rng=rng)
+        result = _tag("tag_orbital").apply(
+            "immediate", _gs(), rng=rng, orbital_hand=HandType.PAIR.value
+        )
         assert result is not None
         assert result.level_up is not None
         hand_type, levels = result.level_up
-        assert isinstance(hand_type, HandType)
+        assert hand_type is HandType.PAIR
         assert levels == 3  # config["levels"]
 
 

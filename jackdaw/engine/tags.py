@@ -227,16 +227,12 @@ class Tag:
                 return TagResult(create_jokers=self.config["spawn_jokers"])
 
             if self.key == "tag_orbital":
-                if rng is None:
-                    raise ValueError("tag_orbital requires an rng instance")
-                seed_val = rng.seed("orbital")
-                # Select a random hand type — mirrors pseudorandom_element
-                # over the sorted hand list (sorted by order/sort_id in Lua)
-                from jackdaw.engine.data.hands import HAND_BASE
-
-                hands_by_order = sorted(HAND_BASE.keys(), key=lambda h: HAND_BASE[h].order)
-                idx = rng.random(seed_val, 1, len(hands_by_order))
-                chosen = hands_by_order[idx - 1]
+                # L: tag.lua:191-198 — redemption reads the hand stored when
+                # the offered Tag was constructed; it performs no RNG draw.
+                orbital_hand = kwargs.get("orbital_hand")
+                if orbital_hand is None:
+                    raise ValueError("tag_orbital requires its offered orbital_hand")
+                chosen = HandType(orbital_hand)
                 levels = self.config["levels"]
                 return TagResult(level_up=(chosen, levels))
 
@@ -483,6 +479,32 @@ def generate_blind_tags(
     return {"Small": small, "Big": big}
 
 
+def assign_orbital_choices(
+    ante: int,
+    blind_tags: dict[str, str],
+    rng: PseudoRandom,
+    game_state: dict[str, Any],
+) -> None:
+    """Fix visible-hand choices for Orbital Tags at offer time."""
+    hand_levels = game_state.get("hand_levels")
+    if hand_levels is None:
+        return
+    visible = sorted(
+        (hand_type for hand_type in HandType if hand_levels.get_state(hand_type).visible),
+        key=lambda hand_type: hand_type.value,
+    )
+    if not visible:
+        return
+    ante_choices = game_state.setdefault("orbital_choices", {}).setdefault(ante, {})
+    for blind_type, tag_key in blind_tags.items():
+        if tag_key != "tag_orbital" or blind_type in ante_choices:
+            continue
+        # L: UI_definitions.lua:1506-1515; tag.lua:103-111 — only visible
+        # hands are eligible, and the selected offer is stored by ante/blind.
+        chosen, _ = rng.element(visible, rng.seed("orbital"))
+        ante_choices[blind_type] = chosen.value
+
+
 def assign_ante_blinds(
     ante: int,
     rng: PseudoRandom,
@@ -560,6 +582,8 @@ def assign_ante_blinds(
     boss = get_new_boss(ante, bosses_used, rng)
 
     blind_tags: dict[str, str] = {"Small": small, "Big": big}
+
+    assign_orbital_choices(ante, blind_tags, rng, game_state)
 
     # Persist to game_state (mirrors G.GAME.round_resets.blind_tags)
     round_resets: dict[str, Any] = game_state.setdefault("round_resets", {})

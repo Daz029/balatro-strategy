@@ -584,5 +584,6 @@ class _ScriptedRNG:
 class TestCheckSoulChanceThreshold:
     """Boundary tests using a scripted RNG stub."""
 
-    def test_joker_hit_at_boundary(self):
-        assert check_soul_chance("Joker", _ScriptedRNG(0.9971), 1) == "c_soul"
+    def test_tarot_hit_at_boundary(self):
+        # L: common_events.lua:2088-2093 — Soul replaces Tarot/Spectral, not Joker.
+        assert check_soul_chance("Tarot", _ScriptedRNG(0.9971), 1) == "c_soul"

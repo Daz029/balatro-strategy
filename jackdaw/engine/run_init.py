@@ -323,6 +323,10 @@ def initialize_run(
     gs["rng"] = rng
     gs["seeded"] = True
 
+    # Hand visibility exists before blind offers are built in Lua's game
+    # object (L: game.lua:2001-2014; UI_definitions.lua:1506-1515).
+    gs["hand_levels"] = HandLevels()
+
     # -----------------------------------------------------------------------
     # 8. Generate first ante (boss, tags, voucher) — game.lua:2177-2180
     # -----------------------------------------------------------------------
@@ -355,17 +359,30 @@ def initialize_run(
     reset_round_targets(rng, gs["round_resets"]["ante"], gs)
 
     # -----------------------------------------------------------------------
-    # HandLevels (not in Lua start_run but needed for scoring)
-    # -----------------------------------------------------------------------
-    gs["hand_levels"] = HandLevels()
-
-    # -----------------------------------------------------------------------
     # Card areas — initialize empty lists so callers don't have to
     # -----------------------------------------------------------------------
     gs.setdefault("jokers", [])
     gs.setdefault("consumables", [])
     gs.setdefault("hand", [])
     gs.setdefault("discard_pile", [])
+
+    # L: back.lua:184-195 — create each forced starting consumable through
+    # create_card and emplace it. A forced key skips pool/hidden-card RNG, and
+    # a non-Joker receives no edition or sticker rolls.
+    from jackdaw.engine.card_factory import create_card
+
+    for key in starting_consumables:
+        card = create_card(
+            "Tarot",
+            rng,
+            1,
+            area="",
+            soulable=False,
+            forced_key=key,
+            append="deck",
+            game_state=gs,
+        )
+        emplace(gs, card, "consumables")
 
     # -----------------------------------------------------------------------
     # Phase — the run starts at blind selection for Small blind

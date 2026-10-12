@@ -338,6 +338,8 @@ class TestDoubleTag:
         gs = _init_gs()
         _award(gs, "tag_double")
         orbital = _award(gs, "tag_orbital")
+        orbital["orbital_hand"] = "Pair"
+        orbital["blind_type"] = "Small"
 
         from jackdaw.engine.data.hands import HandType
 

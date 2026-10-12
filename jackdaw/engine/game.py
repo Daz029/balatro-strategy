@@ -441,13 +441,28 @@ def _handle_skip_blind(gs: dict[str, Any]) -> dict[str, Any]:
         from jackdaw.engine.tags import Tag
 
         tag = Tag(tag_key)
-        tag_result = tag.apply("immediate", gs, rng=gs.get("rng"))
+        orbital_hand = (
+            gs.get("orbital_choices", {}).get(rr.get("ante", 1), {}).get(blind_on_deck)
+            if tag_key == "tag_orbital"
+            else None
+        )
+        # L: tag.lua:103-111,191-198 — carry the advertised hand into the
+        # awarded Tag, then redeem that fixed value without another RNG draw.
+        tag_result = tag.apply(
+            "immediate",
+            gs,
+            rng=gs.get("rng"),
+            orbital_hand=orbital_hand,
+        )
 
         awarded_entry = {
             "key": tag_key,
             "result": tag_result,
             "blind": blind_on_deck,
+            "blind_type": blind_on_deck,
         }
+        if orbital_hand is not None:
+            awarded_entry["orbital_hand"] = orbital_hand
         awarded_tags.append(awarded_entry)
 
         # Apply immediate tag effects; immediate tags are single-use and
@@ -826,6 +841,9 @@ def _cashout_reset_boss_choices(gs: dict[str, Any]) -> None:
             "Small": pick_card_from_pool("Tag", rng, rr["ante"], used_vouchers=used_vouchers),
             "Big": pick_card_from_pool("Tag", rng, rr["ante"], used_vouchers=used_vouchers),
         }
+        from jackdaw.engine.tags import assign_orbital_choices
+
+        assign_orbital_choices(rr["ante"], rr["blind_tags"], rng, gs)
         # L: common_events.lua:2326-2335 — reset_blinds chooses the boss last.
         rr["blind_choices"]["Boss"] = get_new_boss(
             rr["ante"],
@@ -860,13 +878,14 @@ def _handle_buy_card(gs: dict[str, Any], idx: int) -> dict[str, Any]:
 
     gs["dollars"] -= card.cost
     shop_cards.pop(idx)
-    gs["current_round"]["jokers_purchased"] = (
-        gs.get("current_round", {}).get("jokers_purchased", 0) + 1
-    )
-
     # Place card in appropriate area
     card_set = _get_card_set(card)
     if card_set == "Joker":
+        # L: button_callbacks.lua:2440-2449 — cards_purchased counts every
+        # purchase, but current_round.jokers_purchased counts Jokers only.
+        gs["current_round"]["jokers_purchased"] = (
+            gs.get("current_round", {}).get("jokers_purchased", 0) + 1
+        )
         _gain_joker(gs, card)
     elif card_set in ("Tarot", "Planet", "Spectral"):
         lifecycle.emplace(gs, card, "consumables")
@@ -2077,12 +2096,22 @@ def _check_double_tag(gs: dict[str, Any], awarded_entry: dict[str, Any]) -> None
         entry["consumed"] = True
         entry["consumed_context"] = "tag_add"
 
-        dup_result = Tag(awarded_tag_key).apply("immediate", gs, rng=gs.get("rng"))
+        # L: tag.lua:320-328 — Double Tag transfers Orbital's stored hand to
+        # the duplicate before constructing/redeeming it.
+        dup_result = Tag(awarded_tag_key).apply(
+            "immediate",
+            gs,
+            rng=gs.get("rng"),
+            orbital_hand=awarded_entry.get("orbital_hand"),
+        )
         dup_entry: dict[str, Any] = {
             "key": awarded_tag_key,
             "result": dup_result,
             "blind": "double",
+            "blind_type": awarded_entry.get("blind_type"),
         }
+        if awarded_entry.get("orbital_hand") is not None:
+            dup_entry["orbital_hand"] = awarded_entry["orbital_hand"]
         awarded_tags.append(dup_entry)
 
         if dup_result is not None:

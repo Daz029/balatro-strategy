@@ -173,6 +173,15 @@ def apply_voucher(key: str, game_state: dict[str, Any]) -> dict[str, Any]:
         shop = game_state.setdefault("shop", {})
         shop["joker_max"] = shop.get("joker_max", 2) + 1
         mutations["shop.joker_max"] = shop["joker_max"]
+        # L: common_events.lua:1097-1115 — an open shop immediately fills the
+        # newly added capacity through the ordinary shop-card factory.
+        if "shop_cards" in game_state and game_state.get("rng") is not None:
+            from jackdaw.engine.shop import create_shop_slot_card
+
+            ante = game_state.get("round_resets", {}).get("ante", 1)
+            missing = max(0, shop["joker_max"] - len(game_state["shop_cards"]))
+            for _ in range(missing):
+                create_shop_slot_card(game_state["rng"], ante, game_state)
 
     # -----------------------------------------------------------------------
     # Tarot rate — G.GAME.tarot_rate = 4 * extra
@@ -230,6 +239,12 @@ def apply_voucher(key: str, game_state: dict[str, Any]) -> dict[str, Any]:
     elif name in ("Clearance Sale", "Liquidation"):
         game_state["discount_percent"] = extra
         mutations["discount_percent"] = extra
+        # L: card.lua:1917-1923 — set_cost runs over every live Card, covering
+        # shop cards/vouchers/boosters and owned sell values immediately.
+        from jackdaw.engine import read
+
+        for card in read.all_cards(game_state):
+            card.set_cost(game_state)
 
     # -----------------------------------------------------------------------
     # Reroll cost — round_resets.reroll_cost -= extra

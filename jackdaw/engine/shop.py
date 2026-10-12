@@ -376,6 +376,9 @@ def create_shop_slot_card(
             rng,
             ante,
             area="shop",
+            # L: UI_definitions.lua:776 — create_card_for_shop does not pass
+            # soulable; only booster generation opts into hidden replacements.
+            soulable=False,
             append=_SHOP_APPEND,
             game_state=gs,
         )

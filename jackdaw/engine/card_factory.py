@@ -301,9 +301,9 @@ def create_card(
     4. **Cost** — :meth:`Card.set_cost` with values extracted from
        *game_state*.
 
-    The sticker RNG streams are always advanced for Jokers in shop/pack
-    context even when the corresponding stake option is disabled. The edition
-    stream advances for every created Joker, matching Lua.
+    The Eternal/Perishable stream advances for every shop/pack Joker. The
+    Rental stream advances only when Rentals are enabled. The edition stream
+    advances for every created Joker, matching Lua.
 
     Parameters
     ----------
@@ -374,7 +374,13 @@ def create_card(
         key = "c_base"
 
     if key is None and soulable:
-        key = check_soul_chance(card_type, rng, ante)
+        key = check_soul_chance(
+            card_type,
+            rng,
+            ante,
+            used_jokers=gs.get("used_jokers"),
+            has_showman=_has_showman(gs),
+        )
 
     if key is None:
         key = pick_card_from_pool(
@@ -434,10 +440,12 @@ def create_card(
         elif ep_roll > _EP_PERISHABLE_THRESHOLD and enable_perishables:
             card.set_perishable(gs, True)
 
-        # -- Rental (independent roll) --
-        r_roll = rng.random(_RENTAL_KEY[area] + str(ante))
-        if r_roll > _RENTAL_THRESHOLD and enable_rentals:
-            card.set_rental(gs, True)
+        # L: common_events.lua:2144-2145 — the modifier guard short-circuits
+        # before pseudorandom, so disabled Rentals consume no stream draw.
+        if enable_rentals:
+            r_roll = rng.random(_RENTAL_KEY[area] + str(ante))
+            if r_roll > _RENTAL_THRESHOLD:
+                card.set_rental(gs, True)
 
     if card.ability.get("set") == "Joker":
         edition = poll_edition(
