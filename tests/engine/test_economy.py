@@ -14,7 +14,6 @@ from jackdaw.engine.round_lifecycle import process_round_end_cards
 from jackdaw.engine.vouchers import (
     apply_voucher,
     check_voucher_prerequisites,
-    get_available_voucher_pool,
     get_next_voucher_key,
 )
 
@@ -135,11 +134,6 @@ class TestGreenDeck:
         )
         assert result.unused_hands_bonus == 3
         assert result.unused_discards_bonus == 2
-
-
-# ---------------------------------------------------------------------------
-# To the Moon — increased interest_amount
-# ---------------------------------------------------------------------------
 
 
 # ===========================================================================
@@ -271,21 +265,6 @@ class TestCheckVoucherPrerequisites:
 
     def test_requires_satisfied_returns_true(self):
         assert check_voucher_prerequisites("v_overstock_plus", {"v_overstock_norm": True}) is True
-
-
-class TestGetAvailableVoucherPool:
-    def test_no_used_vouchers_returns_all_unlocked(self):
-        pool = get_available_voucher_pool({})
-        for key in pool:
-            proto = VOUCHERS[key]
-            for req in proto.requires:
-                assert req not in pool or key == req, (
-                    f"{key} in pool but its prereq {req} is not used"
-                )
-
-    def test_includes_upgraded_when_base_used(self):
-        pool = get_available_voucher_pool({"v_overstock_norm": True})
-        assert "v_overstock_plus" in pool
 
 
 class TestGetNextVoucherKey:

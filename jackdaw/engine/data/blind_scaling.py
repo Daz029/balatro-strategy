@@ -77,23 +77,3 @@ def get_blind_amount(ante: int, scaling: int = 1) -> int:
     return amount
 
 
-def get_blind_target(
-    ante: int,
-    blind_type: str,
-    scaling: int = 1,
-    ante_scaling: float = 1.0,
-) -> int:
-    """Return the actual chip target for a specific blind.
-
-    Args:
-        ante: Current ante number.
-        blind_type: ``"Small"``, ``"Big"``, or ``"Boss"``.
-        scaling: Stake scaling level (1/2/3).
-        ante_scaling: Deck ante scaling (1.0 normally, 2.0 for Plasma).
-
-    Returns:
-        Chip target the player must reach to beat this blind.
-    """
-    base = get_blind_amount(ante, scaling)
-    mult = BLIND_MULT.get(blind_type, 2.0)
-    return math.floor(base * mult * ante_scaling)

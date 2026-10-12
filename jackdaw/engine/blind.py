@@ -657,27 +657,3 @@ def get_new_boss(
     return boss_key
 
 
-def get_ante_blinds(
-    ante: int,
-    bosses_used: dict[str, int],
-    rng: Any,
-    *,
-    win_ante: int = 8,
-    banned_keys: dict[str, bool] | None = None,
-) -> dict[str, str]:
-    """Get the blind assignments for an ante.
-
-    Returns ``{'Small': 'bl_small', 'Big': 'bl_big', 'Boss': <boss_key>}``.
-    """
-    boss_key = get_new_boss(
-        ante,
-        bosses_used,
-        rng,
-        win_ante=win_ante,
-        banned_keys=banned_keys,
-    )
-    return {
-        "Small": "bl_small",
-        "Big": "bl_big",
-        "Boss": boss_key,
-    }

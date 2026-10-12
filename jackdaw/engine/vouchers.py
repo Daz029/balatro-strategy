@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from jackdaw.engine.data.prototypes import CENTER_POOLS, VOUCHERS
+from jackdaw.engine.data.prototypes import VOUCHERS
 
 if TYPE_CHECKING:
     from jackdaw.engine.rng import PseudoRandom
@@ -41,36 +41,6 @@ def check_voucher_prerequisites(key: str, used_vouchers: dict[str, bool]) -> boo
     if proto is None:
         return False
     return all(used_vouchers.get(req) for req in proto.requires)
-
-
-# ---------------------------------------------------------------------------
-# Pool building — mirrors get_current_pool for Vouchers
-# ---------------------------------------------------------------------------
-
-
-def get_available_voucher_pool(
-    used_vouchers: dict[str, bool],
-    in_shop: list[str] | None = None,
-) -> list[str]:
-    """Return the sorted list of eligible voucher keys for the current state.
-
-    Mirrors the culling loop inside ``get_current_pool`` for set='Voucher'
-    (common_events.lua:1985):
-    - Excludes already-used vouchers.
-    - Excludes vouchers whose ``requires`` list is not fully satisfied.
-    - Excludes vouchers currently in the shop (``in_shop``).
-
-    Order preserved from ``CENTER_POOLS['Voucher']`` (sorted by ``order``
-    field), matching the Lua source-pool ordering.
-    """
-    in_shop_set = set(in_shop or [])
-    return [
-        key
-        for key in CENTER_POOLS["Voucher"]
-        if not used_vouchers.get(key)
-        and key not in in_shop_set
-        and check_voucher_prerequisites(key, used_vouchers)
-    ]
 
 
 # ---------------------------------------------------------------------------

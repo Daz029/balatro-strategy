@@ -154,16 +154,6 @@ def _gain_joker(gs: dict[str, Any], card: Any) -> bool:
     return True
 
 
-def _lose_joker(gs: dict[str, Any], card: Any) -> bool:
-    """Thin compatibility wrapper over :func:`lifecycle.remove`."""
-    jokers: list = gs.get("jokers", [])
-    for owned in jokers:
-        if owned is card:
-            lifecycle.remove(gs, owned)
-            return True
-    return False
-
-
 # ---------------------------------------------------------------------------
 # Handlers
 # ---------------------------------------------------------------------------

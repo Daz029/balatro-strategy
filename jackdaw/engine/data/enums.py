@@ -46,14 +46,6 @@ class GameState(IntEnum):
     NEW_ROUND = 19
 
 
-class GameStage(IntEnum):
-    """High-level game mode from globals.lua G.STAGES."""
-
-    MAIN_MENU = 1
-    RUN = 2
-    SANDBOX = 3
-
-
 # ---------------------------------------------------------------------------
 # Card properties
 # ---------------------------------------------------------------------------

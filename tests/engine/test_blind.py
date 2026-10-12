@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import pytest
 
-from jackdaw.engine.blind import Blind, get_ante_blinds, get_new_boss
+from jackdaw.engine.blind import Blind, get_new_boss
 from jackdaw.engine.card import Card, reset_sort_id_counter
-from jackdaw.engine.data.blind_scaling import get_blind_amount, get_blind_target
+from jackdaw.engine.data.blind_scaling import get_blind_amount
 from jackdaw.engine.data.prototypes import BLINDS as ALL_BLINDS
 from jackdaw.engine.read import Rules
 from jackdaw.engine.rng import PseudoRandom
@@ -429,16 +429,6 @@ class TestGetNewBoss:
         )
 
 
-class TestGetAnteBlinds:
-    def test_structure(self):
-        bosses_used = {k: 0 for k in ALL_BLINDS if ALL_BLINDS[k].boss}
-        rng = PseudoRandom("TESTSEED")
-        result = get_ante_blinds(1, bosses_used, rng)
-        assert result["Small"] == "bl_small"
-        assert result["Big"] == "bl_big"
-        assert result["Boss"] in ALL_BLINDS
-
-
 # ============================================================================
 # Blind chip requirement scaling
 # ============================================================================
@@ -499,16 +489,3 @@ class TestExponentialFormula:
         expected = EXPONENTIAL_TRUTH[scaling][ante]
         actual = get_blind_amount(ante, scaling)
         assert actual == expected, f"scaling={scaling} ante={ante}: {actual} != {expected}"
-
-
-# ============================================================================
-# get_blind_target (Plasma Deck)
-# ============================================================================
-
-
-class TestGetBlindTarget:
-    def test_plasma_deck_doubles(self):
-        """Plasma Deck: ante_scaling=2.0 doubles all targets."""
-        normal = get_blind_target(1, "Boss", scaling=1, ante_scaling=1.0)
-        plasma = get_blind_target(1, "Boss", scaling=1, ante_scaling=2.0)
-        assert plasma == normal * 2

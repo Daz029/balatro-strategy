@@ -9,7 +9,6 @@ import pytest
 
 from jackdaw.engine import lifecycle
 from jackdaw.engine.card import Card, reset_sort_id_counter
-from jackdaw.engine.card_area import CardArea
 from jackdaw.engine.card_factory import create_joker
 from jackdaw.engine.data.prototypes import BOOSTERS, CENTER_POOLS, PLANETS
 from jackdaw.engine.hand_levels import HandLevels
@@ -44,14 +43,6 @@ def _joker(key: str = "j_joker", **kwargs) -> Card:
     card = create_joker(key, **kwargs)
     card.set_cost({})
     return card
-
-
-def _shop_area() -> CardArea:
-    return CardArea(card_limit=10, area_type="shop")
-
-
-def _joker_area(limit: int = 5) -> CardArea:
-    return CardArea(card_limit=limit, area_type="joker")
 
 
 def _base_gs(dollars: int = 10) -> dict:

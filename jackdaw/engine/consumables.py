@@ -271,11 +271,6 @@ def register_consumable(key: str) -> Callable[[ConsumableHandler], ConsumableHan
     return wrapper
 
 
-def registered_consumables() -> list[str]:
-    """Return sorted list of all registered consumable center keys."""
-    return sorted(_CONSUMABLE_REGISTRY)
-
-
 # ---------------------------------------------------------------------------
 # Validation — can_use_consumable
 # ---------------------------------------------------------------------------

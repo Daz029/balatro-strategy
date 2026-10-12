@@ -5,10 +5,11 @@ from __future__ import annotations
 import copy
 from typing import Any
 
+from jackdaw.engine import lifecycle
 from jackdaw.engine.actions import BuyCard, GamePhase, PickPackCard, SellCard
 from jackdaw.engine.card_factory import create_joker
 from jackdaw.engine.effects import CreateCard, EffectQueue
-from jackdaw.engine.game import _gain_joker, _lose_joker, step
+from jackdaw.engine.game import _gain_joker, step
 from jackdaw.engine.run_init import initialize_run
 
 
@@ -107,7 +108,7 @@ def test_removal_uses_identity_when_duplicate_jokers_compare_equal() -> None:
     _gain_joker(gs, second)
 
     assert first == second
-    assert _lose_joker(gs, second) is True
+    lifecycle.remove(gs, second)  # identity, not equality
 
     assert len(gs["jokers"]) == 1
     assert gs["jokers"][0] is first

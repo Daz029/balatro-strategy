@@ -499,35 +499,6 @@ def _filter_voucher(
     return key
 
 
-_PLANET_HAND: dict[str, str] = {
-    "c_pluto": "High Card",
-    "c_mercury": "Pair",
-    "c_uranus": "Two Pair",
-    "c_venus": "Three of a Kind",
-    "c_saturn": "Straight",
-    "c_jupiter": "Flush",
-    "c_earth": "Full House",
-    "c_mars": "Four of a Kind",
-    "c_neptune": "Straight Flush",
-    "c_planet_x": "Five of a Kind",
-    "c_ceres": "Flush House",
-    "c_eris": "Flush Five",
-    "c_black_hole": "all",
-}
-
-
-def _is_softlocked_planet(key: str, visible_hand_types: set[str]) -> bool:
-    """Return True if *key* is a planet whose hand type is not yet visible.
-
-    In Lua, softlocked planets are simply absent from the pool — they are
-    never added, so they don't affect pool size or index alignment.
-    """
-    hand_type = _PLANET_HAND.get(key)
-    if hand_type is None or hand_type == "all":
-        return False
-    return hand_type not in visible_hand_types
-
-
 _SOFTLOCK_PLANETS: dict[str, str] = {
     "c_planet_x": "Five of a Kind",
     "c_ceres": "Flush House",
