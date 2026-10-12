@@ -1,6 +1,7 @@
 # Engine audit verification
 
-Date: **2026-10-12**. Branch `engine-closeout` (off `engine-phase1-state`).
+Date: **2026-10-12**. Branches `engine-closeout` (off `engine-phase1-state`)
+and `engine-legality` (Phase 6, off `engine-closeout`).
 Input: the 74 findings in [`engine_audit.md`](engine_audit.md) (C01–C15,
 D01–D59). Plan: [`engine_fixing_plan_2026-10-06.md`](engine_fixing_plan_2026-10-06.md).
 
@@ -14,16 +15,15 @@ Every finding has one of these statuses:
   different game.
 - **Not a bug**: re-checked against the 1.0.1o Lua source; the engine already
   matched Lua and the audit was wrong.
-- **Deferred**: legality. The user deferred Phase 6 on 2026-10-12, together with
-  the Spectral-pack and boss-reroll fixes (see the TODO in `CLAUDE.md`).
+Legality (Phase 6) landed on `engine-legality` the same day: the engine is
+fully vanilla and the environments hold the constraints. Env masks are
+reconstructed later (CLAUDE.md TODO 4); until then
+`tests/env/test_mask_pin.py` pins the training envs' masks byte-identical.
 
-Summary over the 74 findings: **64 fixed, 3 raise (C15, D44, D49), 1 not a
-bug (D55), 1 deleted (D58), 5 deferred to legality (D27, D50, D52, D56,
-D57)**. Of the 71 in scope (excluding the 3 that raise), all 64 fixes are
-done and proven; the 5 legality findings are the only open ones. Three
-"fixed" rows are partly elsewhere: D23's sell-outside-shop half is deferred
-with legality, D43's ban half raises with challenges, and D59's telemetry
-half is out of scope. Test paths are under `tests/engine/`.
+Summary over the 74 findings: **69 fixed, 3 raise (C15, D44, D49), 1 not a
+bug (D55), 1 deleted (D58)**. All 71 in-scope findings are closed. Two
+"fixed" rows are partly elsewhere: D43's ban half raises with challenges, and
+D59's telemetry half is out of scope. Test paths are under `tests/engine/`.
 
 | ID | Finding (short) | Status | Proving tests |
 |---|---|---|---|
@@ -65,11 +65,11 @@ half is out of scope. Test paths are under `tests/engine/`.
 | D20 | Turtle Bean live hand size | Fixed (P3) | `test_lifecycle_wiring::TestD20TurtleBeanDecay` |
 | D21 | Gift Card consumables | Fixed (CO-1) | `test_closeout_local::TestD21GiftCardConsumables` |
 | D22 | Rental / losing-round lifecycle | Fixed (P5) | `test_end_round_sequencing::test_d22_*`, oracle |
-| D23 | selling_self + Verdant / sell phases | Fixed (P4: selling_self, Verdant); **Deferred**: sell outside the shop (legality) | `test_effect_pipeline::TestQueuedSales` |
+| D23 | selling_self + Verdant / sell phases | Fixed (P4: selling_self, Verdant; **P6**: sell in every stable phase) | `test_effect_pipeline::TestQueuedSales`, `test_legality::TestD23SellOutsideTheShop` |
 | D24 | Perkeo copy | Fixed (P3) | `test_lifecycle_wiring::TestD24PerkeoCopy` |
 | D25 | Debuff passives / perishable | Fixed (P3) | `test_card_setters::TestD25DebuffSetter` |
 | D26 | Chaos / Drunkard current round | Fixed (P1) | `test_state_aliases::TestD26ChaosFreeRerolls` |
-| D27 | Cerulean Bell enforcement | **Deferred** (legality) | — |
+| D27 | Cerulean Bell enforcement | Fixed (P6); interim env shim `env/interim_constraints.with_cerulean_bell` | `test_legality::TestD27CeruleanBell`, `tests/env/test_interim_constraints.py` |
 | D28 | Crimson Heart prepped | Fixed (P5) | `test_draw_discard_sequencing::test_d28_*`, oracle |
 | D29 | The Ox | Fixed (P5) | `test_play_sequencing::test_d29_*`, oracle |
 | D30 | Pillar reset | Fixed (P5) | `test_end_round_sequencing::test_d30_*`, oracle |
@@ -81,7 +81,7 @@ half is out of scope. Test paths are under `tests/engine/`.
 | D36 | Debuff refresh after consumable change | Fixed (P3) | `test_card_setters::TestD36*`, `test_lifecycle_wiring::TestD36*` |
 | D37 | Pack-created card placement | Fixed (P3) | `test_lifecycle_wiring::TestD37CreatedPlayingCardAreas` |
 | D38 | Grim RNG draw | Fixed (CO-1) | `test_closeout_local::TestD38GrimRng` |
-| D39 | Edition consumables + debuffed jokers | Fixed (P2) | `test_grabber_wiring::TestD39EditionlessCandidates` |
+| D39 | Edition consumables + debuffed jokers | Fixed (P2 candidates; **P6** usability check) | `test_grabber_wiring::TestD39EditionlessCandidates`, `test_legality::TestD39UsabilityCountsDebuffedJokers` |
 | D40 | Tarot usage / Black Hole | Fixed (P2; verified CO-1) | `test_closeout_local::TestD40ConsumableUsage`, `test_state_aliases::TestD40*` |
 | D41 | Suit-change nominal / Checkered keys | Fixed (P3) | `test_card_setters::TestD41BaseSetter` |
 | D42 | Created-joker editions / deck_enhancements | Fixed (P2+P3) | `test_lifecycle::TestD42CreatedJokerEditions`, `test_grabber_wiring::TestD42DeckEnhancementGate` |
@@ -92,14 +92,14 @@ half is out of scope. Test paths are under `tests/engine/`.
 | D47 | Sticker setters | Fixed (P3) | `test_card_setters::TestD47StickerSetters` |
 | D48 | RNG keys (Hallucination, rental stream) | Fixed (P4 + CO-2) | `test_closeout_shop::TestD48RngCallSites` |
 | D49 | Endless numerics | **Raises** | `test_scope_guards::TestEndlessRaises` |
-| D50 | Credit Card debt purchases | **Deferred** (legality) | — |
+| D50 | Credit Card debt purchases | Fixed (P6) | `test_legality::TestD50CreditCardAffordability` |
 | D51 | Voucher resize/reprice current shop | Fixed (CO-2) | `test_closeout_shop::TestD51VoucherShopRefresh` |
-| D52 | Retcon price / boss reroll | **Deferred** (legality; "fix boss rerolls" TODO) | — |
+| D52 | Retcon price / boss reroll | Fixed (P6): `RerollBoss` action, $10, Boss Tag shares the primitive | `test_legality::TestD52BossReroll` |
 | D53 | Coupon tags | Fixed (P3) | `test_card_setters::TestD53CostSetter`, `test_lifecycle_wiring::TestD53TagPricing` |
 | D54 | Orbital Tag fixed at offer | Fixed (CO-2) | `test_closeout_shop::TestD54OrbitalTagOffer` |
 | D55 | Voucher Tag extra voucher | **Not a bug**: Lua `Card:redeem` clears `current_round.voucher` unconditionally (`card.lua:1850`) | `test_closeout_shop::TestD55VoucherTagRedemption` |
-| D56 | step accepts illegal actions | **Deferred** (legality) | — |
-| D57 | Pack picks / Spectral picks / pack actions | **Deferred** (legality; "fix Spectral packs" TODO) | — |
+| D56 | step accepts illegal actions | Fixed (P6 `legality.py`); selling from a non-owned area was already rejected | `test_legality::TestD56StepRejectsImpossibleActions` |
+| D57 | Pack picks / Spectral picks / pack actions | Fixed (P6 engine); Spectral picks still masked out by the ENV until the mask rebuild | `test_legality::TestD57PackDecisions` |
 | D58 | CardArea helpers | **Deleted** (`card_area.py` removed) | — |
 | D59 | Statistics | Fixed (CO-2, gameplay part: `jokers_purchased`); telemetry out of scope | `test_closeout_shop::TestD59JokerPurchaseCounter` |
 

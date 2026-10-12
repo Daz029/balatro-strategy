@@ -28,16 +28,17 @@ analysis and potential overhaul.
   status + proving test: 64 fixed, 3 raise (challenges, endless, non-full profiles —
   `jackdaw/engine/scope.py`), D55 not a bug, D58 deleted, 5 deferred to legality. Remaining
   Phase 7 items: BalatroBot live-harness rerun + Windows audit-probe rerun.
-  TODO LATER (user, 2026-10-12) — deferred, NOT in the close-out:
-  1. FIX SPECTRAL PACKS — Spectral-pack picks are omitted from legal actions (D57), so no
-     agent can ever take a Spectral card out of a pack.
-  2. FIX BOSS REROLLS — no boss-reroll action exists, so Retcon / Director's Cut are dead;
-     Retcon is also recorded as free instead of $10 (D52).
-  3. LOOK AT LEGALITY (Phase 6) — one legality predicate shared by step() and the action list;
-     engine = full vanilla actions, env masks restrict (D23 sell phases, D27 Cerulean Bell,
-     D50 Credit Card debt, D56 step accepts illegal actions, D57).
-     IN PROGRESS 2026-10-12 (user: "engine fully vanilla, env holds the constraints"), branch
-     `engine-legality`: ENGINE ONLY. Items 1-2 above are fixed on the engine side by it.
+  PHASE 6 (legality) EXIT MET 2026-10-12 (engine only), branch `engine-legality`: user
+  decision "engine fully vanilla, env holds the constraints". `jackdaw/engine/legality.py`
+  is the single predicate for step() and get_legal_actions; new actions RerollBoss and
+  BuyAndUse; D23 sell phases, D27, D50, D52, D56, D57 (+ D39 residual) fixed — with this
+  every one of the 71 in-scope audit findings is closed (`docs/engine_audit_verification.md`).
+  The old TODOs "fix Spectral packs" and "fix boss rerolls" are DONE ENGINE-SIDE; agents
+  still cannot reach either until the env masks are rebuilt (item 4).
+  FOLLOW-UP: the hand solver ignores Cerulean Bell's forced card, so generate_hand_demos'
+  engine check rejects such labels (logged to failures.jsonl) — teach the solver at the next
+  regen.
+  TODO LATER (user, 2026-10-12):
   4. RECONSTRUCT ENV MASKS (user, 2026-10-12) — deferred, NOT part of the engine pass. The env
      masks do NOT come from the engine's legal-action list: `jackdaw/env/action_space.py::
      get_action_mask` (shop + generic envs) and `hand_play_gym.hand_action_mask` (+ the
@@ -47,7 +48,10 @@ analysis and potential overhaul.
      (D27). Rebuild them as "engine legality (`legality.py`) ∩ explicit env restrictions",
      deciding per restriction whether to keep it (e.g. no sell-in-blind / boss-reroll rows
      until appended to the action space) or drop it (the three bugs above). Until then the
-     engine pass pins the current masks unchanged, so checkpoints see no difference.
+     engine pass pins the current masks unchanged, so checkpoints see no difference
+     (`tests/env/test_mask_pin.py`). The rebuild also retires the interim bridges:
+     `jackdaw/env/interim_constraints.py` (Cerulean Bell completion at the adapter step) and
+     `action_space._pack_pick_mask` (the generic env's engine-legal pack picks).
   PHASE 1 (state completeness) EXIT MET 2026-10-06, branch `engine-phase1-state`: Lua state
   map `jackdaw/engine/state_map.py` + `tests/engine/test_state_map.py` (zero unmapped), aliases
   collapsed (C04/C07/C14-Green/D26/D04 fixed early), `migrate_state` on restore, new finding:

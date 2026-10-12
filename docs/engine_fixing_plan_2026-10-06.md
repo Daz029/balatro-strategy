@@ -1083,6 +1083,35 @@ independently of the engine (`env/action_space.py::get_action_mask`,
 D50 and D57 bugs. The engine pass pins them unchanged; the rebuild derives
 them from `legality.py` plus explicit env restrictions (CLAUDE.md TODO 4).
 
+**STATUS 2026-10-12: EXIT MET (engine)** (`engine-legality`, commit
+`3067cf7`; Codex was usage-capped, so done by hand; report
+`docs/implementation-tickets/engine-p6-REPORT.md`).
+
+- `jackdaw/engine/legality.py::illegal_reason` is the single predicate;
+  `step()` raises with its reason, `get_legal_actions` filters candidates
+  with it. Handler validation and `_require_phase` are deleted.
+- New vanilla actions: `RerollBoss`, `BuyAndUse` (appended to the union,
+  nothing renumbered). Selling, consumable use and joker arrangement are
+  legal in every stable phase; hand arrangement wherever a hand is shown.
+- D23 sell phases, D27, D50, D52, D56, D57 fixed (plus the D39 usability
+  residual), one class per finding in `tests/engine/test_legality.py`:
+  28 of 31 red on the parent; the 3 greens are controls.
+- Boss Tag and the player reroll share `_reroll_boss`; the tag now uses up
+  Director's Cut's reroll as in Lua. The invented `boss_blind_rerolls` keys
+  are deleted (Retcon was recorded as free).
+- **Env**: masks pinned byte-identical (`tests/env/test_mask_pin.py`, fixture
+  generated on the pre-Phase-6 commit, 5,663 shop + hand steps). Two interim
+  env bridges, both under TODO 4:
+  `env/interim_constraints.with_cerulean_bell` at the hand and shop-partner
+  adapter steps; and the generic `BalatroEnvironment` (`scripts/train_ppo.py`),
+  which relied on the old silent no-op pack picks, now offers only
+  engine-legal picks and supplies their targets.
+- **Follow-up**: the hand solver (`scripts/hand_solver.py`) does not know
+  Cerulean Bell's forced card, so `generate_hand_demos.py`'s engine
+  execution check will reject such a label and log it to `failures.jsonl`.
+  Teaching the solver the forced card is a label-semantics change; it
+  belongs with the next regen.
+
 `legality.py`; full vanilla action set in the engine (sell anywhere legal, boss
 reroll with the Retcon / Director's Cut pricing, Spectral picks, consumable use
 in packs, buy-and-use); remove agent-convenience restrictions from the engine;
