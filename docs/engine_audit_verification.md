@@ -1,5 +1,11 @@
 # Engine audit verification
 
+**Follow-up, 2026-10-21:** the [source fidelity assessment](engine_fidelity_2026-10-21.md)
+reproduces a remaining C08 boss-disable completion gap and a frame-cached tally
+scoring difference, and identifies limitations in the transition/shop oracles.
+The closure table below records the October 12 audit, not a current guarantee
+of complete source parity.
+
 Date: **2026-10-12**. Branches `engine-closeout` (off `engine-phase1-state`)
 and `engine-legality` (Phase 6, off `engine-closeout`).
 Input: the 74 findings in [`engine_audit.md`](engine_audit.md) (C01–C15,

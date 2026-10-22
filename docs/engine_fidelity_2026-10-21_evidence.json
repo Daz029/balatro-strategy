@@ -1,0 +1,72 @@
+{
+  "cases": {
+    "disable_wall": {
+      "diagnostic_lua51": {
+        "chips": 700,
+        "phase": "new_round"
+      },
+      "diagnostic_luajit": {
+        "chips": 700,
+        "phase": "new_round"
+      },
+      "engine": {
+        "chips": 700,
+        "phase": "selecting_hand",
+        "target": 600.0
+      }
+    },
+    "dusk_last_hand": {
+      "diagnostic_lua51": {
+        "chips": 9,
+        "phase": "game_over"
+      },
+      "diagnostic_luajit": {
+        "chips": 9,
+        "phase": "game_over"
+      },
+      "engine_chips": 9,
+      "stock_oracle_chips": 7
+    },
+    "tooth_bull": {
+      "diagnostic_lua51": {
+        "chips": 13,
+        "phase": "selecting_hand"
+      },
+      "diagnostic_luajit": {
+        "chips": 13,
+        "phase": "selecting_hand"
+      },
+      "engine_chips": 13,
+      "stock_oracle_chips": 15
+    },
+    "vampire_steel": {
+      "diagnostic_lua51": {
+        "chips": 9,
+        "phase": "selecting_hand"
+      },
+      "diagnostic_luajit": {
+        "chips": 9,
+        "phase": "selecting_hand"
+      },
+      "engine_chips": 7,
+      "stock_oracle_error": "...ode/balatro-strategy/balatro_source/Balatro/card.lua:3929: attempt to compare number with nil"
+    }
+  },
+  "joker_visibility": {
+    "face_down_identity_feature": 0.4882943034172058,
+    "face_up_equals_face_down": true
+  },
+  "source_sha256": {
+    "blind.lua": "0a7e5fde144da36d4ca1a96950b4bf51e3c95be55fb02764a555de53a3bd8afb",
+    "card.lua": "5073d834e08119da9516f1795a8c3d93110669aeb409c29ad1b308e0eb0be453",
+    "engine/event.lua": "98d4e954397b9ddc81c6ec8eadae257960d1cc0ba10e9993f4b241c5dd15159e",
+    "functions/button_callbacks.lua": "c88a74ca3a8fa8ace0ce46ad10a97238f347c292842c9164d11136fe9952c101",
+    "functions/state_events.lua": "6c86aefb42d0323d737f87aaa84f53e42b755e72cd0bfd163b7d9cca5c0a99a9",
+    "game.lua": "bbc67bd3fbadd1ea3f3f0aba07ef8596118d89ff1e9758718f9e17c07a96e912"
+  },
+  "source_version": [
+    "1.0.1o-FULL",
+    "1.0.1o",
+    "PROD_PC_Console"
+  ]
+}
